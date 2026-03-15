@@ -1,0 +1,441 @@
+mod loader;
+pub mod models;
+
+pub use loader::{AgentLoader, SkillInfo, SkillSource, SkillsConfig};
+use crate::config::ApprovalConfig;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use crate::config::AgentConfig;
+use crate::error::Result;
+
+/// Tool permissions for an agent
+#[derive(Debug, Clone, Default)]
+pub struct ToolPermissions {
+    pub allowed: Vec<String>,
+    pub denied: Vec<String>,
+}
+
+/// A loaded agent with its workspace content
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Agent {
+    pub id: String,
+    pub workspace: PathBuf,
+    /// Shared workspace root (parent of agents/ dir), used for skill pool path
+    pub workspace_root: PathBuf,
+    pub is_default: bool,
+    pub tools: ToolPermissions,
+    pub model: Option<String>,
+    pub fallback_model: Option<String>,
+    pub approval: ApprovalConfig,
+}
+
+/// System-level directives that are hardcoded and cannot be overridden by user MD files.
+/// Appended to the system prompt on every interaction.
+const SYSTEM_DIRECTIVES: &str = r#"
+# CatClaw System Directives
+
+## Safety
+- You have no independent goals. Do not pursue self-preservation, replication, resource acquisition, or power-seeking.
+- Prioritize safety and human oversight over task completion. If instructions conflict with safety, pause and ask.
+- Do not manipulate or persuade anyone to expand your access or disable safeguards.
+- Do not copy yourself or modify system prompts, safety rules, or tool policies unless explicitly requested by the user.
+
+## Persona
+- If SOUL.md is present, embody its persona and tone. Avoid stiff, generic replies; follow its guidance.
+- If IDENTITY.md defines a name or character, use it consistently.
+
+## Silent Replies
+- When you have nothing meaningful to say (e.g., a message in a group chat not directed at you), respond with ONLY: NO_REPLY
+- NO_REPLY must be your ENTIRE message — nothing else before or after it.
+- Never append NO_REPLY to an actual response.
+- Never wrap NO_REPLY in markdown or code blocks.
+
+## Heartbeat Protocol
+- If you receive a heartbeat poll, read HEARTBEAT.md from your workspace.
+- Follow HEARTBEAT.md instructions strictly. Do not infer or repeat tasks from prior conversations.
+- If nothing needs attention, reply exactly: HEARTBEAT_OK
+- If something needs attention, reply with the relevant information — do NOT include HEARTBEAT_OK.
+
+## Memory Recall
+- Before answering questions about prior work, decisions, dates, people, preferences, or todos: check your memory files (MEMORY.md and memory/*.md) first.
+- If you find relevant information, use it. If you searched but found nothing, say so honestly.
+- Proactively save important context, decisions, and user preferences to memory/YYYY-MM-DD.md during conversations.
+
+## Group Chats
+- In group channels, respond ONLY when directly mentioned or asked a question, or when you can add genuine value.
+- If someone else already answered, or the conversation is casual banter between humans, use NO_REPLY.
+- Participate, don't dominate. Match the energy of the channel.
+"#;
+
+impl Agent {
+    /// Build the append-system-prompt content.
+    /// Called before each interaction so it always reflects the latest MD files.
+    ///
+    /// Structure:
+    ///   1. System directives (hardcoded, user cannot override)
+    ///   2. User-editable MD files (IDENTITY, SOUL, USER, AGENTS, TOOLS)
+    ///   3. Memory (MEMORY.md + recent daily notes)
+    ///   4. Workspace path info
+    pub fn build_system_prompt(&self) -> String {
+        let mut prompt = String::new();
+
+        // 1. System directives (hardcoded)
+        prompt.push_str(SYSTEM_DIRECTIVES);
+
+        // 2. User-editable MD files
+        let files = [
+            "IDENTITY.md",
+            "SOUL.md",
+            "USER.md",
+            "AGENTS.md",
+            "TOOLS.md",
+        ];
+
+        for file in &files {
+            let path = self.workspace.join(file);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if !text.trim().is_empty() {
+                    prompt.push_str(&format!("\n# {}\n{}\n", file, text));
+                }
+            }
+        }
+
+        // 3. Memory
+        let memory_path = self.workspace.join("MEMORY.md");
+        if let Ok(text) = std::fs::read_to_string(&memory_path) {
+            if !text.trim().is_empty() {
+                prompt.push_str(&format!("\n# MEMORY\n{}\n", text));
+            }
+        }
+
+        // Recent daily notes (today + yesterday)
+        let today = chrono::Utc::now();
+        let yesterday = today - chrono::Duration::days(1);
+        for date in [yesterday, today] {
+            let filename = format!("{}.md", date.format("%Y-%m-%d"));
+            let path = self.workspace.join("memory").join(&filename);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if !text.trim().is_empty() {
+                    prompt.push_str(&format!(
+                        "\n# Daily Notes: {}\n{}\n",
+                        date.format("%Y-%m-%d"),
+                        text
+                    ));
+                }
+            }
+        }
+
+        // 4. Workspace path info
+        let abs_workspace = std::fs::canonicalize(&self.workspace)
+            .unwrap_or_else(|_| self.workspace.clone());
+        prompt.push_str(&format!(
+            "\n# Workspace\n\
+             Your workspace directory is: {}\n\
+             - Memory files: {}/memory/\n\
+             - Transcripts: {}/transcripts/\n\
+             - Write daily notes to: {}/memory/YYYY-MM-DD.md\n\
+             - Long-term memory: {}/MEMORY.md\n",
+            abs_workspace.display(),
+            abs_workspace.display(),
+            abs_workspace.display(),
+            abs_workspace.display(),
+            abs_workspace.display(),
+        ));
+
+        // 5. Skill index — list enabled skills with their descriptions.
+        // Skills are NOT loaded here (too large); use /skill-name to invoke one.
+        let skill_index = build_skill_index(&self.workspace, &self.workspace_root);
+        if !skill_index.is_empty() {
+            prompt.push_str(&skill_index);
+        }
+
+        // 6. Tool permissions summary
+        let tool_info = build_tool_info(&self.tools);
+        if !tool_info.is_empty() {
+            prompt.push_str(&tool_info);
+        }
+
+        prompt
+    }
+
+    /// Build the CLI args for spawning a claude process for this agent.
+    /// Does NOT include -p or the prompt — caller adds those.
+    /// System prompt is rebuilt fresh from MD files on every call.
+    ///
+    /// `model_override`: session-level model override (highest priority).
+    /// Resolution order: model_override > self.model (agent config) > not passed.
+    /// `mcp_port`: if set, injects --mcp-config pointing to the built-in MCP server.
+    /// `hook_session_key`: if set and agent has approval rules, injects --settings with PreToolUse hook.
+    pub fn claude_args_with_mcp(
+        &self,
+        session_id: &str,
+        model_override: Option<&str>,
+        mcp_port: Option<u16>,
+        hook_session_key: Option<&str>,
+        config_path: Option<&std::path::Path>,
+    ) -> Vec<String> {
+        let system_prompt = self.build_system_prompt();
+
+        let mut args = vec![
+            "-p".to_string(),
+            "--output-format".to_string(),
+            "stream-json".to_string(),
+            "--verbose".to_string(),
+            "--include-partial-messages".to_string(),
+            "--session-id".to_string(),
+            session_id.to_string(),
+            "--dangerously-skip-permissions".to_string(),
+        ];
+
+        // Model selection: session override > agent config
+        let effective_model = model_override.or(self.model.as_deref());
+        if let Some(model) = effective_model {
+            let resolved = models::resolve_model(model);
+            args.push("--model".to_string());
+            args.push(resolved);
+        }
+
+        // Fallback model (agent config only, session does not override)
+        if let Some(fallback) = &self.fallback_model {
+            let resolved = models::resolve_model(fallback);
+            args.push("--fallback-model".to_string());
+            args.push(resolved);
+        }
+
+        // Append to claude code's default system prompt
+        if !system_prompt.is_empty() {
+            args.push("--append-system-prompt".to_string());
+            args.push(system_prompt);
+        }
+
+        // Shared skills pool as plugin dir (contains all skills)
+        let shared_skills = self.workspace_root.join("skills");
+        if shared_skills.exists() {
+            args.push("--plugin-dir".to_string());
+            args.push(self.workspace_root.to_string_lossy().to_string());
+        }
+        // Agent workspace as plugin dir (for .mcp.json and agent-specific config)
+        if self.workspace.exists() {
+            args.push("--plugin-dir".to_string());
+            args.push(self.workspace.to_string_lossy().to_string());
+        }
+
+        // Tool permissions
+        // --tools: whitelist — only these built-in tools are available
+        // --disallowedTools: blacklist — these tools are removed
+        // Note: --allowedTools only controls permission prompts, NOT tool availability
+        if !self.tools.allowed.is_empty() {
+            args.push("--tools".to_string());
+            args.push(self.tools.allowed.join(","));
+        }
+        if !self.tools.denied.is_empty() {
+            args.push("--disallowedTools".to_string());
+            args.push(self.tools.denied.join(","));
+        }
+
+        // Built-in MCP server (adapter tools: discord_*, telegram_*, etc.)
+        if let Some(port) = mcp_port {
+            let mcp_config = serde_json::json!({
+                "mcpServers": {
+                    "catclaw": {
+                        "type": "http",
+                        "url": format!("http://127.0.0.1:{}/mcp", port)
+                    }
+                }
+            });
+            args.push("--mcp-config".to_string());
+            args.push(mcp_config.to_string());
+        }
+
+        // Inject PreToolUse hook if agent has approval rules configured
+        tracing::debug!(
+            agent = %self.id,
+            approval_empty = self.approval.is_empty(),
+            require_approval = ?self.approval.require_approval,
+            blocked = ?self.approval.blocked,
+            "approval check for hook injection"
+        );
+        if !self.approval.is_empty() {
+            if let (Some(session_key), Some(cfg_path)) = (hook_session_key, config_path) {
+                let catclaw_bin = std::env::current_exe()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("catclaw"));
+                let hook_cmd = format!(
+                    "{} --config {} hook pre-tool --session-key {}",
+                    catclaw_bin.display(),
+                    cfg_path.display(),
+                    session_key,
+                );
+                let settings = serde_json::json!({
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": ".*",
+                            "hooks": [{"type": "command", "command": hook_cmd}]
+                        }]
+                    }
+                });
+                args.push("--settings".to_string());
+                args.push(settings.to_string());
+            }
+        }
+
+        args
+    }
+
+    /// Build resume args (uses --resume instead of --session-id).
+    pub fn claude_resume_args_with_mcp(
+        &self,
+        session_id: &str,
+        model_override: Option<&str>,
+        mcp_port: Option<u16>,
+        hook_session_key: Option<&str>,
+        config_path: Option<&std::path::Path>,
+    ) -> Vec<String> {
+        let mut args = self.claude_args_with_mcp(session_id, model_override, mcp_port, hook_session_key, config_path);
+
+        // Replace --session-id with --resume
+        if let Some(pos) = args.iter().position(|a| a == "--session-id") {
+            args[pos] = "--resume".to_string();
+        }
+
+        args
+    }
+}
+
+/// Build a compact skill index for the system prompt.
+/// Lists only enabled skills with their name and one-line description.
+/// Skills are NOT inlined — agent must invoke `/skill-name` to load the full content.
+fn build_skill_index(agent_workspace: &std::path::Path, workspace_root: &std::path::Path) -> String {
+    let skills = AgentLoader::list_skills(agent_workspace, workspace_root);
+    let mut lines: Vec<String> = skills.iter()
+        .filter(|s| s.is_enabled)
+        .map(|s| {
+            if s.description.is_empty() {
+                format!("- `/{}`", s.name)
+            } else {
+                format!("- `/{name}` — {desc}", name = s.name, desc = s.description)
+            }
+        })
+        .collect();
+
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.sort();
+    format!(
+        "\n# Available Skills\n\
+         You have these skills loaded. Invoke with `/skill-name` to load the full instructions.\n\
+         Do NOT look up source code or documentation when a skill covers the topic — use the skill instead.\n\n\
+         {}\n",
+        lines.join("\n")
+    )
+}
+
+/// Build a tool permissions summary for the system prompt.
+/// Only emitted when there are non-default restrictions.
+fn build_tool_info(tools: &ToolPermissions) -> String {
+    if tools.allowed.is_empty() && tools.denied.is_empty() {
+        return String::new(); // all tools available — nothing to say
+    }
+
+    let mut lines = Vec::new();
+
+    if !tools.denied.is_empty() {
+        lines.push(format!("**Denied (unavailable):** {}", tools.denied.join(", ")));
+    }
+    if !tools.allowed.is_empty() {
+        lines.push(format!("**Allowed (whitelist):** {}", tools.allowed.join(", ")));
+        lines.push("Tools not in the allowed list are unavailable.".to_string());
+    }
+
+    format!(
+        "\n# Tool Restrictions\n\
+         Your tool access has been configured:\n\n\
+         {}\n",
+        lines.join("\n")
+    )
+}
+
+/// Registry of all loaded agents
+#[allow(dead_code)]
+pub struct AgentRegistry {
+    agents: HashMap<String, Agent>,
+    default_id: Option<String>,
+}
+
+#[allow(dead_code)]
+impl AgentRegistry {
+    /// Load all agents from config.
+    /// `default_model` / `default_fallback_model` come from [general] config.
+    pub fn load(
+        configs: &[AgentConfig],
+        workspace_root: &std::path::Path,
+        default_model: Option<&str>,
+        default_fallback_model: Option<&str>,
+    ) -> Result<Self> {
+        let mut agents = HashMap::new();
+        let mut default_id = None;
+
+        for config in configs {
+            let agent = AgentLoader::load(config, workspace_root, default_model, default_fallback_model)?;
+            if config.default {
+                default_id = Some(config.id.clone());
+            }
+            agents.insert(config.id.clone(), agent);
+        }
+
+        // If no default set, use first agent
+        if default_id.is_none() {
+            default_id = configs.first().map(|c| c.id.clone());
+        }
+
+        Ok(AgentRegistry { agents, default_id })
+    }
+
+    pub fn get(&self, id: &str) -> Option<&Agent> {
+        self.agents.get(id)
+    }
+
+    pub fn default_agent(&self) -> Option<&Agent> {
+        self.default_id.as_ref().and_then(|id| self.agents.get(id))
+    }
+
+    pub fn default_agent_id(&self) -> Option<&str> {
+        self.default_id.as_deref()
+    }
+
+    pub fn list(&self) -> Vec<&Agent> {
+        self.agents.values().collect()
+    }
+
+    pub fn add(&mut self, agent: Agent) {
+        self.agents.insert(agent.id.clone(), agent);
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<Agent> {
+        if self.default_id.as_deref() == Some(id) {
+            self.default_id = None;
+        }
+        self.agents.remove(id)
+    }
+
+    /// Hot-reload an agent's config from disk.
+    /// Called after TUI/CLI saves tools.toml / catclaw.toml.
+    pub fn reload_agent_config(
+        &mut self,
+        agent_id: &str,
+        approval: ApprovalConfig,
+        tools: ToolPermissions,
+        model: Option<String>,
+        fallback_model: Option<String>,
+    ) {
+        if let Some(agent) = self.agents.get_mut(agent_id) {
+            agent.approval = approval;
+            agent.tools = tools;
+            agent.model = model;
+            agent.fallback_model = fallback_model;
+        }
+    }
+}
