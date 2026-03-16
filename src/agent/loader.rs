@@ -1227,7 +1227,7 @@ catclaw agent tools <name> --allow "Read,Edit,Bash" --deny "WebFetch" --approve 
 
 Tool permissions: `--allow` sets the whitelist, `--deny` blocks tools entirely, `--approve` requires user confirmation before each execution. See the **Tool Approval** section above.
 
-Agent workspaces: `workspace/agents/{agent_id}/`
+Agent workspaces: `~/.catclaw/workspace/agents/{agent_id}/`
 
 | File | Purpose |
 |------|---------|
@@ -1301,7 +1301,7 @@ catclaw skill uninstall <agent> <skill> # Remove a skill
 
 Agents can connect to custom MCP servers for additional tools. MCP definitions are shared across all agents (like skills):
 
-**File location:** `workspace/.mcp.json`
+**File location:** `~/.catclaw/workspace/.mcp.json`
 
 All agents see these servers by default. Each agent controls access via the TUI Agents > Tools panel (deny or require approval per server).
 

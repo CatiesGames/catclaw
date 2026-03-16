@@ -663,12 +663,9 @@ pub async fn cmd_uninstall(config_path: &Path) {
 
     // 4. Workspace
     println!();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
+    let catclaw_dir = format!("{}/.catclaw", home);
     cli_ui::status_msg("ℹ️", "Config and workspace files are preserved.");
-    cli_ui::status_msg("ℹ️", "To remove them manually:");
-    if config_path.exists() {
-        cli_ui::status_msg("  ", &format!("rm {}", config_path.display()));
-    }
-    cli_ui::status_msg("  ", "rm -rf ./workspace  # or your configured workspace path");
-    cli_ui::status_msg("  ", "rm .env             # contains channel tokens");
+    cli_ui::status_msg("ℹ️", &format!("To remove everything: rm -rf {}", catclaw_dir));
     println!();
 }

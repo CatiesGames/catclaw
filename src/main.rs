@@ -27,11 +27,18 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::state::StateDb;
 
+/// Returns the CatClaw home directory (~/.catclaw/).
+/// All runtime files live here by default.
+fn catclaw_home() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".catclaw")
+}
+
 #[derive(Parser)]
 #[command(name = "catclaw", version, about = "Personal AI assistant gateway powered by Claude Code CLI")]
 struct Cli {
     /// Path to catclaw.toml config file
-    #[arg(short, long, default_value = "./catclaw.toml")]
+    #[arg(short, long, default_value_os_t = catclaw_home().join("catclaw.toml"))]
     config: PathBuf,
 
     #[command(subcommand)]
@@ -1178,10 +1185,10 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
         ("slack", "Slack", false),
     ];
 
-    // Load existing .env if present
-    let env_path = std::path::Path::new(".env");
+    // Load existing .env if present (from ~/.catclaw/.env)
+    let env_path = catclaw_home().join(".env");
     let mut env_lines: Vec<String> = if env_path.exists() {
-        std::fs::read_to_string(env_path)
+        std::fs::read_to_string(&env_path)
             .unwrap_or_default()
             .lines()
             .map(String::from)
@@ -1505,9 +1512,12 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
         println!();
     }
 
+    // Ensure ~/.catclaw/ exists
+    std::fs::create_dir_all(catclaw_home())?;
+
     // Write .env file
     if !env_lines.is_empty() {
-        std::fs::write(env_path, env_lines.join("\n") + "\n")?;
+        std::fs::write(&env_path, env_lines.join("\n") + "\n")?;
     }
 
     // ── Create workspace structure ─────────────────────────────────────
@@ -1569,10 +1579,11 @@ fn write_env_var(lines: &mut Vec<String>, key: &str, value: &str) {
     }
 }
 
-/// Load .env file into process environment (simple parser, no crate needed)
+/// Load .env file into process environment (simple parser, no crate needed).
+/// Reads from ~/.catclaw/.env.
 fn load_dotenv() {
-    let env_path = std::path::Path::new(".env");
-    if let Ok(content) = std::fs::read_to_string(env_path) {
+    let env_path = catclaw_home().join(".env");
+    if let Ok(content) = std::fs::read_to_string(&env_path) {
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {

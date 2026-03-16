@@ -3,12 +3,16 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 
-/// Determine PID file path from config (workspace/catclaw.pid) or fallback to ./catclaw.pid
+/// Determine PID file path: ~/.catclaw/catclaw.pid (or workspace/catclaw.pid as fallback).
 pub fn pid_path(config: Option<&Config>) -> PathBuf {
-    if let Some(cfg) = config {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let catclaw_home = std::path::PathBuf::from(home).join(".catclaw");
+    if catclaw_home.exists() {
+        catclaw_home.join("catclaw.pid")
+    } else if let Some(cfg) = config {
         cfg.general.workspace.join("catclaw.pid")
     } else {
-        PathBuf::from("./catclaw.pid")
+        catclaw_home.join("catclaw.pid")
     }
 }
 

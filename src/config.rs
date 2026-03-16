@@ -246,11 +246,15 @@ pub struct HeartbeatConfig {
 }
 
 // Default functions
+fn catclaw_home() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".catclaw")
+}
 fn default_workspace() -> PathBuf {
-    PathBuf::from("./workspace")
+    catclaw_home().join("workspace")
 }
 fn default_state_db() -> PathBuf {
-    PathBuf::from("./state.sqlite")
+    catclaw_home().join("state.sqlite")
 }
 fn default_max_concurrent() -> usize {
     3
@@ -579,7 +583,7 @@ impl Config {
             channels: vec![],
             agents: vec![AgentConfig {
                 id: "main".to_string(),
-                workspace: PathBuf::from("./workspace/agents/main"),
+                workspace: default_workspace().join("agents/main"),
                 default: true,
                 model: None,
                 fallback_model: None,
