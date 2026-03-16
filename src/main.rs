@@ -20,7 +20,7 @@ mod ws_protocol;
 mod ws_server;
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::agent::AgentLoader;
 use crate::config::Config;
@@ -474,7 +474,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let pid_path = pidfile::pid_path(Some(&config));
             let our_pid = pidfile::read_pid(&pid_path);
             let gateway_running = our_pid
-                .map(|pid| pidfile::is_running(pid))
+                .map(pidfile::is_running)
                 .unwrap_or(false);
 
             // If service was just installed, it may be starting — wait for it
@@ -577,7 +577,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             // Check that gateway is running
             let pid_path = pidfile::pid_path(Some(&config));
             let gateway_running = pidfile::read_pid(&pid_path)
-                .map(|pid| pidfile::is_running(pid))
+                .map(pidfile::is_running)
                 .unwrap_or(false);
 
             if !gateway_running {
@@ -1779,7 +1779,7 @@ fn start_background_gateway_quiet(config_path: &std::path::Path) -> std::result:
     Ok(())
 }
 
-async fn cmd_agent_new(config: &mut Config, config_path: &PathBuf, name: &str) -> Result<()> {
+async fn cmd_agent_new(config: &mut Config, config_path: &Path, name: &str) -> Result<()> {
     // Check if agent already exists
     if config.agents.iter().any(|a| a.id == name) {
         println!("Agent '{}' already exists.", name);
@@ -2005,8 +2005,8 @@ fn cmd_task_list(state_db: &StateDb) -> Result<()> {
     }
 
     println!(
-        "{:<4} {:<25} {:<10} {:<8} {:<20} {}",
-        "ID", "NAME", "AGENT", "STATUS", "NEXT RUN", "SCHEDULE"
+        "{:<4} {:<25} {:<10} {:<8} {:<20} SCHEDULE",
+        "ID", "NAME", "AGENT", "STATUS", "NEXT RUN"
     );
     println!("{}", "-".repeat(85));
 
@@ -2114,7 +2114,7 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
-fn cmd_agent_delete(config: &mut Config, config_path: &PathBuf, name: &str) -> Result<()> {
+fn cmd_agent_delete(config: &mut Config, config_path: &Path, name: &str) -> Result<()> {
     let idx = config
         .agents
         .iter()

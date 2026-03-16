@@ -7,7 +7,6 @@
 ///       → optionally notify originating channel (Discord/Telegram)
 ///     ← user responds via TUI or channel: approval.respond
 ///   hook receives approval.result push event → exits 0 (allow) or 2 (block)
-
 use serde::{Deserialize, Serialize};
 
 /// Sent from the hook subprocess to the gateway via `approval.request`.

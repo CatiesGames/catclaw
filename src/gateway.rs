@@ -175,7 +175,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     // 8. Start scheduler
     {
         let sched_config = scheduler::SchedulerConfig {
-            heartbeat_enabled: config.heartbeat.as_ref().map_or(false, |h| h.enabled),
+            heartbeat_enabled: config.heartbeat.as_ref().is_some_and(|h| h.enabled),
             heartbeat_interval_mins: config.heartbeat.as_ref().map_or(30, |h| h.interval_mins),
             archive_timeout_hours: config.general.session_archive_timeout_hours,
             archive_check_interval_mins: 360, // every 6 hours

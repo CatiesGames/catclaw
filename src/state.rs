@@ -6,6 +6,8 @@ use std::sync::Mutex;
 
 use crate::error::Result;
 
+type OldSessionRow = (String, String, String, String, String, Option<String>, Option<String>, String, String, String, Option<String>);
+
 /// State database backed by SQLite WAL
 pub struct StateDb {
     conn: Mutex<Connection>,
@@ -149,7 +151,7 @@ impl StateDb {
         if has_old_schema {
             // Migrate old sessions table to new schema
             // Read all existing sessions
-            let mut old_rows: Vec<(String, String, String, String, String, Option<String>, Option<String>, String, String, String, Option<String>)> = Vec::new();
+            let mut old_rows: Vec<OldSessionRow> = Vec::new();
             {
                 let mut stmt = conn.prepare(
                     "SELECT session_key, session_id, agent_id, channel_type, channel_id, peer_id, parent_session_id, state, last_activity_at, created_at, metadata FROM sessions"

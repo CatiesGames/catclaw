@@ -379,7 +379,7 @@ impl Config {
             "default_model" => Ok(self.general.default_model.clone().unwrap_or_default()),
             "default_fallback_model" => Ok(self.general.default_fallback_model.clone().unwrap_or_default()),
             "logging.level" => Ok(self.logging.level.clone()),
-            "heartbeat.enabled" => Ok(self.heartbeat.as_ref().map_or(false, |h| h.enabled).to_string()),
+            "heartbeat.enabled" => Ok(self.heartbeat.as_ref().is_some_and(|h| h.enabled).to_string()),
             "heartbeat.interval_mins" => Ok(self.heartbeat.as_ref().map_or(30, |h| h.interval_mins).to_string()),
             "approval.timeout_secs" => {
                 let t = self.agents.first().map(|a| a.approval.timeout_secs).unwrap_or(120);

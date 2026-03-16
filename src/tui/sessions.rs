@@ -362,11 +362,8 @@ impl SessionsPanel {
                             // If streaming was active, we already have the text
                             // The Response just confirms completion
                             self.chat_scroll = u16::MAX;
-                            if self.pending_session.take().is_some() {
-                                self.refresh();
-                            } else {
-                                self.refresh();
-                            }
+                            self.pending_session.take();
+                            self.refresh();
                             continue;
                         }
                     }
@@ -416,7 +413,7 @@ impl SessionsPanel {
                 ChatEvent::NewSessionQuiet(agent_id) => {
                     let key = format!("catclaw:{}:tui:default", agent_id);
                     // Only create if not already present
-                    let already = self.pending_session.as_ref().map_or(false, |p| p.session_key == key)
+                    let already = self.pending_session.as_ref().is_some_and(|p| p.session_key == key)
                         || self.sessions.iter().any(|s| s.session_key == key);
                     if !already {
                         self.pending_session = Some(PendingSession {
@@ -895,14 +892,13 @@ fn format_time(ts: &str) -> String {
 }
 
 /// Read a skill's description from its SKILL.md frontmatter.
-
 impl Component for SessionsPanel {
     fn handle_event(&mut self, event: &KeyEvent) -> Action {
         match &self.mode {
             Mode::List => match event.code {
                 KeyCode::Char('j') | KeyCode::Down => {
                     let has_pending = self.pending_session.as_ref()
-                        .map_or(false, |p| !self.sessions.iter().any(|s| s.session_key == p.session_key));
+                        .is_some_and(|p| !self.sessions.iter().any(|s| s.session_key == p.session_key));
                     let total = self.sessions.len() + if has_pending { 1 } else { 0 };
                     if total > 0 {
                         self.selected = (self.selected + 1).min(total - 1);
@@ -915,7 +911,7 @@ impl Component for SessionsPanel {
                 }
                 KeyCode::Enter => {
                     let has_pending = self.pending_session.as_ref()
-                        .map_or(false, |p| !self.sessions.iter().any(|s| s.session_key == p.session_key));
+                        .is_some_and(|p| !self.sessions.iter().any(|s| s.session_key == p.session_key));
                     let pending_at_0 = has_pending && self.selected == 0;
                     let session_idx = if has_pending { self.selected.saturating_sub(1) } else { self.selected };
 
@@ -944,7 +940,7 @@ impl Component for SessionsPanel {
                 }
                 KeyCode::Char('d') => {
                     let has_pending = self.pending_session.as_ref()
-                        .map_or(false, |p| !self.sessions.iter().any(|s| s.session_key == p.session_key));
+                        .is_some_and(|p| !self.sessions.iter().any(|s| s.session_key == p.session_key));
                     let session_idx = if has_pending { self.selected.saturating_sub(1) } else { self.selected };
                     if let Some(session) = self.sessions.get(session_idx) {
                         let key = session.session_key.clone();

@@ -5,7 +5,6 @@
 /// checks config rules, and either:
 /// - Exits 0: allow the tool to execute
 /// - Exits 2: block the tool (stderr message shown to agent as tool error)
-
 use std::path::Path;
 
 use crate::approval::HookInput;

@@ -52,7 +52,7 @@ impl GatewayClient {
         // Send auth token as first message
         if !token.is_empty() {
             let auth_msg = serde_json::json!({"auth": token}).to_string();
-            ws_stream.send(Message::Text(auth_msg.into())).await?;
+            ws_stream.send(Message::Text(auth_msg)).await?;
         }
         let (ws_sink, mut ws_read) = ws_stream.split();
 

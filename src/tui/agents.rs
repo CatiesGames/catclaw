@@ -553,7 +553,7 @@ impl AgentsPanel {
             self.status_msg = Some(format!("Saved {}", path.display()));
 
             // Update the soul preview if we edited SOUL.md
-            if path.file_name().map_or(false, |n| n == "SOUL.md") {
+            if path.file_name().is_some_and(|n| n == "SOUL.md") {
                 if let Some(agent) = self.agents.get_mut(self.selected) {
                     agent.soul_preview = content.lines().take(3).collect::<Vec<_>>().join(" ");
                 }
@@ -1023,8 +1023,8 @@ impl Component for AgentsPanel {
                 match event.code {
                     KeyCode::Enter => {
                         // If completions visible, accept current selection first
-                        if model_count > 0 && !self.model_edit_buffer.is_empty()
-                            || model_count > 0 && self.model_completion_idx < model_count
+                        if model_count > 0 && (!self.model_edit_buffer.is_empty()
+                            || self.model_completion_idx < model_count)
                         {
                             // Check if buffer exactly matches a model id — if not, accept completion
                             let exact = models.iter().any(|(id, _)| *id == self.model_edit_buffer);

@@ -176,13 +176,16 @@ When adding a new WS method, update this table and the `dispatch()` function in 
 
 ```bash
 cargo check          # Fast type-check
+cargo clippy -- -D warnings  # Lint — MUST pass with zero warnings
 cargo build --release  # Production build (output: target/release/catclaw)
-cargo clippy         # Lint
 ```
 
-Always run `cargo check` after changes — zero errors AND zero warnings required.
+**Both `cargo check` and `cargo clippy -- -D warnings` must pass with zero errors AND zero warnings.** CI enforces this on every push.
 
-No unit tests currently — verification relies on `cargo check` (zero errors, zero warnings) + manual TUI/CLI testing.
+No unit tests currently — verification relies on cargo check + clippy + manual TUI/CLI testing.
+
+### No Shortcuts Policy
+Always do the complete fix. Never leave warnings, tech debt, or half-done work with "fix later" / "TODO" / "skip for now". If clippy complains, fix all warnings — not just the ones in your new code. If CI fails, fix the root cause — don't weaken the CI checks. Every commit should leave the codebase cleaner than it was.
 
 ## Dependencies (version constraints)
 

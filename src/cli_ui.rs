@@ -32,9 +32,9 @@ pub fn section_header(icon: &str, title: &str) {
     let visible_title_len = 2 + 2 + title.len(); // " icon title "
     let right_dashes = BOX_WIDTH.saturating_sub(3 + visible_title_len + 1); // ╭───title...╮
     println!(
-        "  {}╭───{}{}{}{}{}{}╮{}",
+        "  {}╭───{}{}{}{}{}{}{}╮{}",
         SURFACE, RESET, MAUVE, BOLD, title_part, RESET,
-        format!("{}{}", SURFACE, "─".repeat(right_dashes)),
+        SURFACE, "─".repeat(right_dashes),
         RESET
     );
 }

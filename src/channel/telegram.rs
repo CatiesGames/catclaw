@@ -595,13 +595,13 @@ impl ChannelAdapter for TelegramAdapter {
                 let uid = p_user_id(&params)?;
                 let mut perms = ChatPermissions::empty();
                 if params.get("can_send_messages").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    perms = perms | ChatPermissions::SEND_MESSAGES;
+                    perms |= ChatPermissions::SEND_MESSAGES;
                 }
                 if params.get("can_send_media").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    perms = perms | ChatPermissions::SEND_MEDIA_MESSAGES;
+                    perms |= ChatPermissions::SEND_MEDIA_MESSAGES;
                 }
                 if params.get("can_send_other").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    perms = perms | ChatPermissions::SEND_OTHER_MESSAGES;
+                    perms |= ChatPermissions::SEND_OTHER_MESSAGES;
                 }
                 bot.restrict_chat_member(cid, uid, perms).await
                     .map_err(|e| CatClawError::Telegram(format!("restrict_member: {}", e)))?;
@@ -697,16 +697,16 @@ impl ChannelAdapter for TelegramAdapter {
                 let cid = p_chat(&params)?;
                 let mut perms = ChatPermissions::empty();
                 if params.get("can_send_messages").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    perms = perms | ChatPermissions::SEND_MESSAGES;
+                    perms |= ChatPermissions::SEND_MESSAGES;
                 }
                 if params.get("can_send_media").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    perms = perms | ChatPermissions::SEND_MEDIA_MESSAGES;
+                    perms |= ChatPermissions::SEND_MEDIA_MESSAGES;
                 }
                 if params.get("can_invite_users").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    perms = perms | ChatPermissions::INVITE_USERS;
+                    perms |= ChatPermissions::INVITE_USERS;
                 }
                 if params.get("can_pin_messages").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    perms = perms | ChatPermissions::PIN_MESSAGES;
+                    perms |= ChatPermissions::PIN_MESSAGES;
                 }
                 bot.set_chat_permissions(cid, perms).await
                     .map_err(|e| CatClawError::Telegram(format!("set_chat_permissions: {}", e)))?;

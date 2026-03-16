@@ -75,7 +75,7 @@ unicode-width = "0.2"
 teloxide = { version = "0.13", features = ["macros"] }
 
 # HTTP client (for Telegram, MCP, etc.)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # HTTP server (Gateway: WS + MCP on single port)
 axum = { version = "0.8", features = ["ws"] }
