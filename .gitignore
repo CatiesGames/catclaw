@@ -3,4 +3,6 @@
 *.sqlite-wal
 *.sqlite-shm
 .env
+*.pid
+/workspace
 /my-agents

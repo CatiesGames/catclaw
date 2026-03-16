@@ -125,6 +125,20 @@
 - [x] `catclaw logs` CLI 命令（Phase 1d）
 - [x] `send_and_wait` / `send_streaming` 新 session else 分支漏傳 MCP config — 已修復
 
+## Phase 5: Distribution & Deployment (TODO)
+- [ ] GitHub Actions CI — multi-platform build (macOS arm64/x86_64, Linux arm64/x86_64)
+- [ ] GitHub Releases — auto-upload binary artifacts on tag push
+- [ ] `install.sh` — one-line install script (`curl -fsSL https://catclaw.dev/install.sh | bash`)
+  - Detect OS/arch, download binary from GitHub Releases, install to ~/.local/bin or /usr/local/bin
+- [ ] `catclaw update` — self-update command
+  - Query GitHub Releases API, compare version, download and replace binary
+  - `catclaw update --check` for dry-run
+- [ ] `catclaw service install` — auto-install as system service
+  - macOS: launchd plist → ~/Library/LaunchAgents/
+  - Linux: systemd user service → ~/.config/systemd/user/
+  - `catclaw service uninstall` to remove
+  - `catclaw service status` to check
+
 ## Build Status
 - Compiles cleanly (0 errors, 0 warnings)
 - `catclaw init` tested and working

@@ -21,16 +21,16 @@
 
 ---
 
-CatClaw is a Rust daemon that turns your **Claude Code subscription** into a personal AI assistant accessible from Discord, Telegram, Slack, and a beautiful terminal UI. Inspired by [OpenClaw](https://github.com/openclaw/openclaw), built from scratch in Rust for performance, reliability, and full Anthropic compliance.
+CatClaw is a Rust daemon that turns your **Claude Code subscription** into a personal AI assistant accessible from Discord, Telegram, and a beautiful terminal UI. Inspired by [OpenClaw](https://github.com/nicekid1/OpenClaw), built from scratch in Rust for performance, reliability, and full Anthropic compliance.
 
 ## Why CatClaw?
 
 - **Use your Claude Code subscription** &mdash; no API keys, no surprise bills. CatClaw spawns `claude -p` subprocesses that use your existing Claude Code plan.
 - **Multi-agent** &mdash; define multiple AI personas (main assistant, research expert, code reviewer), each with their own personality, memory, and tool permissions.
-- **Multi-channel** &mdash; talk to your agents from Discord, Telegram, Slack, or the built-in TUI. All channels share the same session and memory system.
+- **Multi-channel** &mdash; talk to your agents from Discord, Telegram, or the built-in TUI. All channels share the same session and memory system.
+- **Tool approval system** &mdash; require user confirmation before agents execute sensitive tools (Bash, Edit, etc.) with inline approval UI in TUI and Discord/Telegram buttons.
 - **Stateless gateway** &mdash; all state persisted to SQLite. Kill the daemon anytime, restart, and everything picks up where it left off.
-- **Fork & converge** &mdash; branch a conversation into a Discord thread with full context, then merge the conclusions back.
-- **Beautiful TUI** &mdash; Catppuccin Mocha themed terminal interface with 7 panels for managing sessions, agents, skills, tasks, bindings, config, and logs.
+- **Beautiful TUI** &mdash; Catppuccin Mocha themed terminal interface with 8 panels for managing everything.
 
 ## Quick Start
 
@@ -38,8 +38,6 @@ CatClaw is a Rust daemon that turns your **Claude Code subscription** into a per
 
 - [Rust](https://rustup.rs/) 1.75+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- (Optional) Discord bot token for Discord integration
-- (Optional) [Ollama](https://ollama.ai/) for local embedding (Phase 2)
 
 ### Install
 
@@ -52,10 +50,10 @@ cargo build --release
 ### Launch
 
 ```bash
-catclaw
+./target/release/catclaw
 ```
 
-That's it. On first run, CatClaw will:
+On first run, CatClaw will:
 1. Show the splash logo
 2. Run the interactive setup wizard (verify Claude Code CLI, create your agent, configure channels)
 3. Start the gateway in the background
@@ -65,10 +63,12 @@ On subsequent runs, it skips setup and goes straight to gateway + TUI.
 
 ```bash
 # Other ways to run:
-catclaw init             # Re-run the setup wizard
-catclaw gateway          # Start gateway in foreground (no TUI)
-catclaw tui              # Launch TUI only (no auto-init or background gateway)
-catclaw stop             # Stop the background gateway
+catclaw init                      # Re-run the setup wizard
+catclaw gateway start             # Start gateway in foreground
+catclaw gateway start -d          # Start gateway as background daemon
+catclaw gateway stop              # Stop the background gateway
+catclaw gateway status            # Show gateway status
+catclaw tui                       # Launch TUI only (connects to running gateway)
 ```
 
 ## Architecture
@@ -77,25 +77,35 @@ catclaw stop             # Stop the background gateway
 ┌──────────────────────────────────────────────────────────────────┐
 │                       CatClaw Gateway (Rust)                     │
 │                                                                  │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐                │
-│  │  Discord     │ │  Telegram   │ │  Slack      │  Channel       │
-│  │  Adapter     │ │  Adapter    │ │  Adapter    │  Adapters      │
-│  └──────┬───────┘ └──────┬──────┘ └──────┬──────┘                │
-│         └────────────────┼───────────────┘                        │
-│                          ▼                                        │
+│  ┌─────────────┐ ┌─────────────┐                                │
+│  │  Discord     │ │  Telegram   │    Channel Adapters            │
+│  │  Adapter     │ │  Adapter    │                                │
+│  └──────┬───────┘ └──────┬──────┘                                │
+│         └────────────────┘                                        │
+│                  ▼                                                │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  Message Router  →  Agent Registry  →  Session Manager    │  │
 │  │  (binding table)    (SOUL/tools)       (claude -p spawn)  │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────┐  │
-│  │  State DB         │  │  Scheduler       │  │  TUI         │  │
-│  │  (SQLite WAL)     │  │  (cron/heartbeat)│  │  (ratatui)   │  │
-│  └──────────────────┘  └──────────────────┘  └──────────────┘  │
+│  ┌──────────────────┐  ┌──────────────────┐                     │
+│  │  State DB         │  │  Scheduler       │                     │
+│  │  (SQLite WAL)     │  │  (cron/heartbeat)│                     │
+│  └──────────────────┘  └──────────────────┘                     │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  WS Server (/ws)  +  MCP Server (/mcp)  — port 21130    │   │
+│  └──────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────┘
+          ▲                              ▲
+          │ WebSocket                    │ MCP JSON-RPC
+    ┌─────┴─────┐                 ┌──────┴──────┐
+    │  TUI      │                 │  Claude CLI │
+    │ (ratatui) │                 │  (tool use) │
+    └───────────┘                 └─────────────┘
 ```
 
-**How it works**: When a message arrives from any channel, CatClaw resolves which agent should handle it (via binding table), finds or creates a session, spawns a `claude -p --input-format stream-json --output-format stream-json` subprocess, and streams the response back to the originating channel.
+**How it works**: When a message arrives from any channel, CatClaw resolves which agent should handle it (via binding table), finds or creates a session, spawns a `claude -p --output-format stream-json` subprocess, and streams the response back to the originating channel.
 
 Each `claude -p` subprocess uses your Claude Code subscription &mdash; no API keys needed.
 
@@ -103,132 +113,123 @@ Each `claude -p` subprocess uses your Claude Code subscription &mdash; no API ke
 
 All configuration is managed through the CLI or TUI. No manual file editing required.
 
-### Gateway & TUI
+### Gateway
 
 ```bash
-catclaw                  # Unified: splash → auto-init → background gateway → TUI
-catclaw gateway          # Start gateway in foreground (no TUI)
-catclaw tui              # Launch TUI only
-catclaw stop             # Stop the background gateway
-catclaw init             # Re-run the setup wizard
+catclaw                           # Unified: splash → auto-init → background gateway → TUI
+catclaw gateway start             # Start gateway in foreground
+catclaw gateway start -d          # Start as background daemon
+catclaw gateway stop              # Stop background gateway
+catclaw gateway restart           # Restart daemon
+catclaw gateway status            # Show running status and PID
+catclaw init                      # Re-run the setup wizard
+catclaw tui                       # Launch TUI only
 ```
 
 ### Agent Management
 
 ```bash
-catclaw agent new <name>           # Create a new agent (opens SOUL.md editor)
-catclaw agent list                 # List all agents
-catclaw agent edit <name> soul     # Edit an agent's SOUL.md
-catclaw agent edit <name> user     # Edit an agent's USER.md
+catclaw agent new <name>                          # Create a new agent
+catclaw agent list                                # List all agents
+catclaw agent edit <name> <file>                  # Open file in $EDITOR
+catclaw agent tools <name>                        # Show current tool permissions
 catclaw agent tools <name> \
   --allow "Read,Grep,WebFetch" \
-  --deny "Bash,Edit"              # Configure tool permissions
-catclaw agent delete <name>        # Delete an agent
+  --deny "Bash" \
+  --approve "Edit,Write"                          # Configure tool permissions
+catclaw agent delete <name>                       # Delete an agent
 ```
 
-### Channel Adapters
+`<file>` values: `soul`, `user`, `identity`, `agents`, `tools`, `boot`, `heartbeat`, `memory`
+
+### Channels
 
 ```bash
+catclaw channel list                              # List configured channels
 catclaw channel add discord \
-  --token-env DISCORD_TOKEN \
+  --token-env CATCLAW_DISCORD_TOKEN \
   --guilds "123456789" \
-  --activation mention             # Add Discord channel
-
+  --activation mention                            # Add Discord channel
 catclaw channel add telegram \
-  --token-env TELEGRAM_TOKEN       # Add Telegram channel
-
-catclaw channel list               # List configured channels
+  --token-env CATCLAW_TELEGRAM_TOKEN              # Add Telegram channel
 ```
 
 ### Bindings (Channel → Agent routing)
 
 ```bash
-catclaw bind "discord:channel:222222" research   # Bind a channel to an agent
-catclaw bind "telegram:*" main                   # Bind all Telegram to main
+catclaw bind "discord:channel:222222" research    # Bind a channel to an agent
+catclaw bind "telegram:*" main                    # Bind all Telegram to main
+catclaw bind "*" main                             # Global fallback
 ```
 
 ### Sessions
 
 ```bash
-catclaw session list               # List all sessions
-catclaw session delete <key>       # Delete a session
+catclaw session list                              # List all sessions
+catclaw session delete <key>                      # Delete a session
 ```
 
 ### Skills
 
 ```bash
-catclaw skill list <agent>         # List skills for an agent
-catclaw skill enable <agent> <skill>   # Enable a skill
-catclaw skill disable <agent> <skill>  # Disable a skill
-catclaw skill install <agent> <path>   # Install a skill from directory
+catclaw skill list <agent>                        # List skills (built-in + installed)
+catclaw skill enable <agent> <skill>              # Enable a skill
+catclaw skill disable <agent> <skill>             # Disable a skill
+catclaw skill install <source>                    # Install from remote source
+catclaw skill uninstall <skill>                   # Remove a skill
 ```
+
+Install sources: `@anthropic/<name>`, `github:<owner>/<repo>/path`, `/local/path`
 
 ### Scheduled Tasks
 
 ```bash
-catclaw task list                  # List scheduled tasks
-catclaw task add heartbeat \
-  --agent main \
-  --interval 30                    # Add heartbeat every 30 minutes
-
-catclaw task add cron \
-  --agent main \
-  --cron "0 9 * * *" \
-  --payload "Good morning check"   # Add cron job
-
-catclaw task enable <id>           # Enable a task
-catclaw task disable <id>          # Disable a task
-catclaw task delete <id>           # Delete a task
+catclaw task list                                 # List scheduled tasks
+catclaw task add <name> --agent main \
+  --prompt "Check inbox" --every 30               # Repeat every 30 minutes
+catclaw task add <name> --agent main \
+  --prompt "Morning briefing" --cron "0 9 * * *"  # Cron schedule
+catclaw task enable <id>                          # Enable a task
+catclaw task disable <id>                         # Disable a task
+catclaw task delete <id>                          # Delete a task
 ```
 
 ### Configuration
 
 ```bash
-catclaw config show                # Show current config
-catclaw config set \
-  max_concurrent_sessions 5        # Modify a setting
+catclaw config show                               # Show full config (TOML)
+catclaw config get <key>                          # Get a specific value
+catclaw config set <key> <value>                  # Set a value (hot-reload when possible)
+```
+
+### Logs
+
+```bash
+catclaw logs                                      # Show recent logs
+catclaw logs -f                                   # Stream in real-time
+catclaw logs --level debug                        # Filter by level
+catclaw logs --grep "discord"                     # Search by pattern
+catclaw logs --json                               # Raw JSON output
 ```
 
 ## TUI
 
-The TUI provides a beautiful Catppuccin Mocha themed interface with 7 panels:
-
-```
-┌─ CatClaw ─────────── Sessions │ Agents │ Skills │ Tasks │ Bindings │ Config │ Logs ─┐
-│                                                                                       │
-│ ┌─ Sessions ──────────────┐ ┌─ Chat ──────────────────────────────────────────────┐  │
-│ │                         │ │                                                      │  │
-│ │ ● #general              │ │  ╭─ main ──────────────────────────────────────╮    │  │
-│ │   main · Active · 2m    │ │  │ Here are the key best practices for Rust    │    │  │
-│ │                         │ │  │ async programming:                          │    │  │
-│ │ ○ #research             │ │  │                                              │    │  │
-│ │   research · Idle · 15m │ │  │ 1. Use tokio as your runtime...             │    │  │
-│ │                         │ │  ╰──────────────────────────────────────────────╯    │  │
-│ │ ◌ Thread: auth-bug      │ │                                                      │  │
-│ │   main · Suspended · 1h │ │  ╭─ You ───────────────────────────────────────╮    │  │
-│ │                         │ │  │ What about tokio::spawn vs join!?            │    │  │
-│ │                         │ │  ╰──────────────────────────────────────────────╯    │  │
-│ │                         │ │                                                      │  │
-│ │                         │ │  ● main is thinking...                               │  │
-│ ├─────────────────────────┤ ├──────────────────────────────────────────────────────┤  │
-│ │ n New  f Fork  d Delete │ │ > _                                                  │  │
-│ └─────────────────────────┘ └──────────────────────────────────────────────────────┘  │
-│                                                                                       │
-│ ← → Tab  ↑↓ Select  Enter Open  q Quit  ? Help           ● 2 active  ○ 1 idle       │
-└───────────────────────────────────────────────────────────────────────────────────────┘
-```
+The TUI provides a beautiful Catppuccin Mocha themed interface with 8 panels:
 
 | Panel | Description |
 |---|---|
-| **Sessions** | View all sessions with status, chat directly with any agent |
-| **Agents** | Manage agents, edit personality (SOUL.md), configure tool permissions |
-| **Skills** | Enable/disable skills per agent |
+| **Dashboard** | Overview with agent count, active sessions, uptime |
+| **Sessions** | View all sessions, chat directly with agents, inline tool approval |
+| **Agents** | Manage agents, edit personality files, configure tool permissions (allowed/denied/approval) |
+| **Skills** | Enable/disable/install skills per agent |
 | **Tasks** | View and manage scheduled tasks (heartbeat, cron) |
 | **Bindings** | Map channels to agents |
-| **Config** | View and edit gateway configuration |
-| **Logs** | Live log tail with level filtering |
+| **Config** | View and edit gateway configuration with hot-reload |
+| **Logs** | Live log viewer with search, level filter, structured fields |
 
-**Keyboard shortcuts**: `Tab`/`Shift+Tab` cycle panels, `Alt+1-7` jump directly, `q` quit, `?` help.
+**Keyboard shortcuts**: `Tab`/`Shift+Tab` cycle panels, `Alt+1-8` jump directly, `q` quit. Mouse scroll supported in Sessions and Logs.
+
+**Chat commands**: `/new` start fresh session, `/model <name>` switch model, `/help` show help.
 
 ## Agent System
 
@@ -239,90 +240,113 @@ workspace/agents/main/
 ├── SOUL.md              # Personality, tone, values
 ├── USER.md              # Who the user is
 ├── IDENTITY.md          # Agent name, role
-├── AGENTS.md            # Collaboration rules
+├── AGENTS.md            # Workspace conventions
 ├── TOOLS.md             # Tool usage guidelines
-├── BOOT.md              # Startup checklist
+├── BOOT.md              # Startup instructions (prepended to first message)
 ├── HEARTBEAT.md         # Periodic check tasks
 ├── MEMORY.md            # Long-term memory (curated)
 ├── memory/              # Daily notes (YYYY-MM-DD.md)
 ├── transcripts/         # Session logs (JSONL)
-├── skills/              # Agent-specific Claude Code skills
-├── .mcp.json            # Agent-specific MCP servers
-└── tools.toml           # Tool permissions (allowed/denied)
+└── tools.toml           # Tool permissions
 ```
 
-**Tool permissions** give you fine-grained control over what each agent can do:
+### Tool Permissions
+
+Each tool exists in exactly one of three states:
 
 ```toml
-# agents/research/tools.toml — read-only research agent
+# workspace/agents/research/tools.toml
 allowed = ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]
-denied = ["Bash", "Edit", "Write"]
+denied = ["Bash"]
+require_approval = ["Edit", "Write"]
 ```
 
-CatClaw leverages **Claude Code's native plugin system** &mdash; each agent's `skills/` directory is loaded via `--plugin-dir`, no custom skill system needed.
+- **allowed** &mdash; tool runs freely
+- **denied** &mdash; tool is completely blocked
+- **require_approval** &mdash; tool runs only after user approves (via TUI inline widget, Discord button, or Telegram keyboard)
+
+Manage via TUI (Agents → `t` Tools → Space to cycle states) or CLI (`catclaw agent tools`).
+
+### Skills
+
+CatClaw ships with built-in skills and supports installing custom ones:
+
+| Skill | Description |
+|---|---|
+| `catclaw` | CatClaw system administration (agent knows all CLI commands) |
+| `discord` | Discord formatting and MCP tool usage |
+| `telegram` | Telegram formatting and MCP tool usage |
+| `sessions-history` | Query transcripts from other sessions |
+| `injection-guard` | Defend against prompt injection from external content |
+
+Skills are shared across agents via `workspace/skills/`. Each agent can enable/disable skills independently.
+
+### User MCP Servers
+
+Add custom MCP servers in `workspace/.mcp.json` (shared across all agents):
+
+```json
+{
+  "mcpServers": {
+    "my-api": {
+      "type": "http",
+      "url": "https://api.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${MY_API_KEY}" }
+    }
+  }
+}
+```
+
+MCP tools appear in the TUI Tools panel under "User MCP Servers" and can be denied or set to require approval per agent.
 
 ## Channel Adapters
 
-Channels are pluggable adapters implementing a common `ChannelAdapter` trait. All channels normalize messages into a unified `MsgContext` format.
-
 | Channel | Status | Features |
 |---|---|---|
-| **Discord** | Implemented | Threads, typing indicator, chunked messages, 32 MCP actions |
-| **Telegram** | Implemented | Long polling, forum topics, 26 MCP actions |
-| **Slack** | Planned | Threads, reactions |
-| **TUI** | Implemented | Direct chat in terminal |
+| **Discord** | ✅ | Threads, typing indicator, approval buttons, 32 MCP actions |
+| **Telegram** | ✅ | Long polling, forum topics, approval keyboard, 26 MCP actions |
+| **Slack** | Planned | — |
+| **TUI** | ✅ | Direct chat with streaming, inline approval widget |
 
-**Activation modes**: DMs are always responded to. For group chats / server channels:
+**Activation modes** (DMs always respond; this controls group/server channels):
 - `mention` (default) &mdash; respond only when @mentioned
 - `all` &mdash; respond to every message
 
-Activation can be configured per-channel in `catclaw.toml`, via TUI Config panel, or with per-channel overrides.
-
-**Fork & Converge** (Discord):
-- `/fork` &mdash; Create a Discord thread with a forked session (inherits full context)
-- `/converge` &mdash; Summarize the thread and post conclusions back to the parent channel
-
 ### Built-in MCP Server
 
-CatClaw runs a built-in [MCP](https://modelcontextprotocol.io/) server on the same port as the gateway (`/mcp`). This exposes channel adapter operations as LLM tools, so agents can autonomously perform platform actions:
+CatClaw exposes channel adapter operations as MCP tools, so agents can autonomously perform platform actions:
 
 ```
-LLM tool call (discord_get_messages, telegram_send_poll, ...)
-  → Claude CLI → MCP protocol → Gateway MCP Server
-  → Adapter.execute(action, params) → Platform REST API
-  → Result back to LLM
+Agent wants to list Discord channels
+  → Claude calls mcp__catclaw__discord_get_channels
+  → CatClaw MCP server → serenity → Discord REST API
+  → JSON result back to agent
 ```
 
-**Discord tools** (32): get/send/edit/delete messages, reactions, pins, threads, channels, categories, permissions, guild info, members, roles, emojis, moderation (timeout/kick/ban), events, stickers.
+**Discord** (32 tools): messages, reactions, pins, threads, channels, categories, permissions, guilds, members, roles, emojis, moderation, events, stickers.
 
-**Telegram tools** (26): send/edit/delete/forward/copy messages, pins, chat info/management, moderation (ban/restrict/promote), polls, forum topics, permissions, invite links.
-
-User-installed MCP servers (via workspace `.mcp.json`) are loaded alongside built-in tools via Claude Code's `--plugin-dir`.
+**Telegram** (26 tools): messages, pins, chat info/management, moderation, polls, forum topics, permissions, invite links.
 
 ## Session Management
 
-Sessions map channels to Claude Code subprocesses:
-
 ```
-SessionKey = agent_id + channel_type + channel_id [+ thread_id]
+SessionKey = catclaw:{agent_id}:{origin}:{context_id}
 ```
 
 **Lifecycle**:
 ```
-Empty → Active (claude -p subprocess alive)
-          ↓ idle 30 min
-        Suspended (subprocess killed, session_id preserved for --resume)
-          ↓ idle 7 days
-        Archived (summary written to memory, start fresh)
+New → Active (claude -p subprocess alive)
+       ↓ idle 30 min
+     Idle (subprocess exited, session_id preserved for --resume)
+       ↓ idle 7 days
+     Archived (summary written to memory, start fresh)
 ```
 
-**Concurrency control**: configurable max concurrent sessions with priority queue (DM > mention > message > heartbeat > cron). Excess requests are queued.
+**Concurrency**: configurable max (default 3) with priority queue (DM > mention > cron). Excess requests queued.
 
-**Stateless restart**: all session state persists to SQLite. Kill the daemon, restart, and sessions automatically resume via `--resume`.
+**Stateless restart**: all state in SQLite. Kill and restart — sessions resume via `--resume`.
 
 ## Configuration
-
-All config lives in `catclaw.toml`, managed via CLI/TUI:
 
 ```toml
 [general]
@@ -330,96 +354,30 @@ workspace = "./workspace"
 state_db = "./state.sqlite"
 max_concurrent_sessions = 3
 session_idle_timeout_mins = 30
-session_archive_timeout_hours = 168  # 7 days
-ws_port = 21130  # Gateway server (WS + MCP on single port)
+session_archive_timeout_hours = 168
+port = 21130                        # WS + MCP on single port
+streaming = true
+default_model = "opus"              # optional: opus, sonnet, haiku
 
 [[channels]]
 type = "discord"
 token_env = "CATCLAW_DISCORD_TOKEN"
 guilds = ["123456789"]
-activation = "mention"  # DMs always respond; this controls server channels
+activation = "mention"
 
 [[channels]]
 type = "telegram"
 token_env = "CATCLAW_TELEGRAM_TOKEN"
-activation = "mention"  # DMs always respond; this controls group chats
+activation = "mention"
 
 [[agents]]
 id = "main"
 workspace = "./workspace/agents/main"
 default = true
+
+[agents.approval]
+timeout_secs = 120                  # approval timeout (global)
 ```
-
-## Roadmap
-
-### Phase 1: Core &mdash; Complete
-
-- [x] CLI with all subcommands (`init`, `gateway`, `tui`, `stop`, `agent`, `channel`, `bind`, `config`, `session`, `skill`, `task`)
-- [x] Unified startup flow (`catclaw` = splash &rarr; auto-init &rarr; background gateway &rarr; TUI)
-- [x] Background gateway with PID file lifecycle (`catclaw stop`)
-- [x] Config system (TOML read/write, interactive init wizard with per-channel setup)
-- [x] State DB (SQLite WAL, sessions, tasks, bindings)
-- [x] Agent system (registry, workspace loader, tool permissions, system directives)
-- [x] Session manager (spawn, resume, fork, priority queue, persistence)
-- [x] Claude Code subprocess (bidirectional NDJSON via `--input-format stream-json`)
-- [x] Channel adapter abstraction (`ChannelAdapter` trait, `MsgContext`)
-- [x] Discord adapter (serenity, typing, threads, chunked messages, 32 MCP actions)
-- [x] Telegram adapter (teloxide long polling, 26 MCP actions)
-- [x] Built-in MCP server (axum, MCP JSON-RPC, tool routing to adapters)
-- [x] WS + MCP on single port (axum: `/ws` WebSocket, `/mcp` MCP HTTP)
-- [x] Message router (binding resolution, agent dispatch)
-- [x] Gateway main loop (restart recovery, SIGTERM handling, session cleanup)
-- [x] TUI with 7 fully functional panels (Catppuccin Mocha, splash screen, tab navigation)
-- [x] TUI Config panel (channel activation/guilds editable, inline editing, auto-save)
-- [x] Full-screen Markdown editor (tui-textarea, Ctrl+S save, Ctrl+Q close)
-- [x] Scheduler (heartbeat, cron, one-shot, archive cleanup)
-- [x] Skills system (built-in skills, per-agent install/enable/disable)
-- [x] Session transcript logging (JSONL)
-- [x] Archive with AI-generated summary
-
-### Phase 1d: Logging &mdash; Complete
-
-- [x] JSON structured logging to file (workspace/logs/, daily rotation, JSONL)
-- [x] Log levels with configurable minimum level
-- [x] `catclaw logs` CLI (tail -f, level/grep/time filters, JSON output)
-- [x] TUI Logs panel (search, highlight, level filter, structured fields)
-
-### Phase 2: Memory &mdash; Planned
-
-- [ ] Memory tables in SQLite (per-agent + shared)
-- [ ] Embedding engine (Ollama / nomic-embed-text)
-- [ ] MD to chunk pipeline (sliding window, 400 tokens)
-- [ ] Hybrid search (vector cosine 70% + BM25 30%)
-- [ ] File watcher (auto-reindex on MD changes)
-- [ ] Plugin hooks (`PreCompact` / `Stop` for auto memory capture)
-
-### Phase 3: Autonomy &mdash; Partial
-
-- [x] Scheduler (heartbeat, cron, one-shot, archive cleanup)
-- [x] Session archive with AI-generated summary
-- [ ] BOOT.md startup flow
-- [ ] `sessions_history` MCP tool (cross-session search)
-
-### Phase 4: Collaboration & Extensions
-
-- [ ] Slack adapter
-- [ ] Agent-to-agent collaboration (`sessions_spawn`, `agent_send`)
-- [ ] `/bind` Discord slash command
-- [ ] MCP action permissions (per-agent whitelist/blacklist for channel tools)
-- [ ] OpenClaw migration tool
-
-## Comparison with OpenClaw
-
-| Aspect | OpenClaw | CatClaw |
-|---|---|---|
-| Language | TypeScript | Rust |
-| LLM access | OAuth token (banned) | Claude Code CLI subscription |
-| Skill system | Custom (ClawHub) | Claude Code native `--plugin-dir` |
-| Tool permissions | JSON config cascade | `--allowedTools` / `--disallowedTools` |
-| Channel adapters | ChannelPlugin interface | `ChannelAdapter` trait (same pattern) |
-| State management | In-memory + disk | SQLite-first (stronger restart guarantees) |
-| Memory | MD + SQLite + sqlite-vec | Same architecture, Rust implementation |
-| TUI | None | Catppuccin Mocha, 7 panels |
 
 ## Tech Stack
 
@@ -435,6 +393,10 @@ default = true
 | Config | `toml` + `serde` |
 | Scheduling | `croner` (cron expressions) |
 | Logging | `tracing` |
+
+## Contributing
+
+Contributions are welcome! Please open an issue first to discuss what you'd like to change.
 
 ## License
 
