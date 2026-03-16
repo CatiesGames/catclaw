@@ -133,19 +133,17 @@ impl MessageRouter {
             Priority::Mention
         };
 
-        // 6. Download attachments to workspace and build message with local paths
-        let message = if ctx.attachments.is_empty() {
-            ctx.text.clone()
-        } else {
+        // 6. Build context header + download attachments + compose message
+        let context_header = build_context_header(ctx);
+        let mut message = format!("{}\n{}", context_header, ctx.text);
+        if !ctx.attachments.is_empty() {
             let att_dir = self.workspace.join("attachments");
             let _ = std::fs::create_dir_all(&att_dir);
-            let mut parts = vec![ctx.text.clone()];
             for att in &ctx.attachments {
                 let meta = download_attachment(&self.http_client, att, &att_dir).await;
-                parts.push(format!("\n{}", meta));
+                message.push_str(&format!("\n{}", meta));
             }
-            parts.join("")
-        };
+        }
 
         // Send to session and wait for response
         let sender = SenderInfo {
@@ -228,6 +226,25 @@ fn format_file_size(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// Build a one-line context header so the agent knows where this message came from.
+/// Example: `[Context: discord #chat (1234567890) | sender: Boze (354982148165337089)]`
+fn build_context_header(ctx: &MsgContext) -> String {
+    let platform = ctx.channel_type.as_str();
+    let channel = if ctx.is_direct_message {
+        format!("DM with {} ({})", ctx.sender_name, ctx.sender_id)
+    } else {
+        let name = ctx.channel_name.as_deref().unwrap_or("unknown");
+        format!("#{} ({})", name, ctx.channel_id)
+    };
+    let thread = ctx.thread_id.as_ref()
+        .map(|t| format!(" thread:{}", t))
+        .unwrap_or_default();
+    format!(
+        "[Context: {} {}{}| sender: {} ({})]",
+        platform, channel, thread, ctx.sender_name, ctx.sender_id
+    )
 }
 
 /// Download an attachment to the workspace and return a metadata string for the agent.
