@@ -335,12 +335,31 @@ impl LoggingConfig {
 }
 
 impl Config {
-    /// Load config from a TOML file
+    /// Load config from a TOML file.
+    /// Relative paths (workspace, state_db, agent workspaces) are resolved
+    /// relative to the config file's parent directory, so the gateway works
+    /// correctly regardless of the process's working directory (e.g., launchd).
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
             CatClawError::Config(format!("failed to read {}: {}", path.display(), e))
         })?;
         let mut config: Config = toml::from_str(&content)?;
+
+        // Resolve relative paths against config file's directory
+        let base = path.parent().unwrap_or(Path::new("."));
+        let resolve = |p: &PathBuf| -> PathBuf {
+            if p.is_relative() {
+                base.join(p)
+            } else {
+                p.clone()
+            }
+        };
+        config.general.workspace = resolve(&config.general.workspace);
+        config.general.state_db = resolve(&config.general.state_db);
+        for agent in &mut config.agents {
+            agent.workspace = resolve(&agent.workspace);
+        }
+
         // Auto-generate ws_token if missing (upgrade existing configs)
         if config.general.ws_token.is_empty() {
             config.general.ws_token = generate_token();
