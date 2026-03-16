@@ -239,6 +239,7 @@ pub async fn perform_update() -> Result<Option<String>, CatClawError> {
 // ── Service management ──────────────────────────────────────────────────────
 
 /// Escape a string for safe inclusion in XML plist values.
+#[cfg(target_os = "macos")]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
