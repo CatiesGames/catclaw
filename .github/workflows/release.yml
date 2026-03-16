@@ -1,4 +1,4 @@
-name: Release
+name: Release Build
 
 on:
   push:
@@ -33,24 +33,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Install cross for Linux ARM64
       - name: Install cross
         if: matrix.cross
         run: cargo install cross --locked
 
-      # Build natively (macOS, Linux x86_64)
       - name: Build (native)
         if: "!matrix.cross"
         run: cargo build --release --target ${{ matrix.target }}
 
-      # Build with cross (Linux ARM64)
       - name: Build (cross)
         if: matrix.cross
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Rename binary
-        run: |
-          cp target/${{ matrix.target }}/release/catclaw ${{ matrix.binary }}
+        run: cp target/${{ matrix.target }}/release/catclaw ${{ matrix.binary }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
@@ -58,7 +54,7 @@ jobs:
           name: ${{ matrix.binary }}
           path: ${{ matrix.binary }}
 
-  release:
+  upload:
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -76,10 +72,9 @@ jobs:
           cd ..
           sha256sum catclaw-* > checksums.txt
 
-      - name: Create GitHub Release
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
           files: |
             catclaw-darwin-arm64
             catclaw-linux-x86_64
