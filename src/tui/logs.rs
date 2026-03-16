@@ -181,6 +181,15 @@ impl LogsPanel {
             .collect()
     }
 
+    pub fn scroll_up(&mut self, lines: u16) {
+        self.scroll = self.scroll.saturating_sub(lines);
+    }
+
+    pub fn scroll_down(&mut self, lines: u16) {
+        let max = self.total_lines.saturating_sub(self.visible_height);
+        self.scroll = self.scroll.saturating_add(lines).min(max);
+    }
+
     fn scroll_to_bottom(&mut self) {
         let count = self.filtered_records().len();
         if count > 0 {

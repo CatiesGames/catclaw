@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use crate::config::AgentConfig;
 use crate::error::Result;
 
-/// Tool permissions for an agent
+/// Tool permissions for an agent (from tools.toml)
 #[derive(Debug, Clone, Default)]
 pub struct ToolPermissions {
     pub allowed: Vec<String>,
     pub denied: Vec<String>,
+    pub require_approval: Vec<String>,
 }
 
 /// A loaded agent with its workspace content
@@ -217,7 +218,7 @@ impl Agent {
             args.push("--plugin-dir".to_string());
             args.push(self.workspace_root.to_string_lossy().to_string());
         }
-        // Agent workspace as plugin dir (for .mcp.json and agent-specific config)
+        // Agent workspace as plugin dir (for agent-specific plugins and config)
         if self.workspace.exists() {
             args.push("--plugin-dir".to_string());
             args.push(self.workspace.to_string_lossy().to_string());
@@ -225,11 +226,21 @@ impl Agent {
 
         // Tool permissions
         // --tools: whitelist — only these built-in tools are available
+        // require_approval tools must also be in the whitelist (they're "allowed but need approval")
         // --disallowedTools: blacklist — these tools are removed
         // Note: --allowedTools only controls permission prompts, NOT tool availability
-        if !self.tools.allowed.is_empty() {
-            args.push("--tools".to_string());
-            args.push(self.tools.allowed.join(","));
+        {
+            let mut whitelist: Vec<String> = self.tools.allowed.clone();
+            // Add require_approval tools to whitelist (they need to be "available" for hook to fire)
+            for tool in &self.tools.require_approval {
+                if !whitelist.contains(tool) {
+                    whitelist.push(tool.clone());
+                }
+            }
+            if !whitelist.is_empty() {
+                args.push("--tools".to_string());
+                args.push(whitelist.join(","));
+            }
         }
         if !self.tools.denied.is_empty() {
             args.push("--disallowedTools".to_string());

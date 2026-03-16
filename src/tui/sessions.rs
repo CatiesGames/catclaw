@@ -502,6 +502,10 @@ impl SessionsPanel {
                         self.approval_selected = self.pending_approvals.len().saturating_sub(1);
                     }
                 }
+                "session.updated" => {
+                    // Channel session changed — refresh list
+                    self.refresh();
+                }
                 _ => {}
             }
         }
@@ -509,6 +513,16 @@ impl SessionsPanel {
         // Evict expired approvals
         let now = std::time::Instant::now();
         self.pending_approvals.retain(|a| now.duration_since(a.received_at).as_secs() < a.expires_secs);
+    }
+
+    /// Scroll chat up by N lines (for mouse wheel)
+    pub fn scroll_up(&mut self, lines: u16) {
+        self.chat_scroll = self.chat_scroll.saturating_sub(lines);
+    }
+
+    /// Scroll chat down by N lines (for mouse wheel)
+    pub fn scroll_down(&mut self, lines: u16) {
+        self.chat_scroll = self.chat_scroll.saturating_add(lines);
     }
 
     /// Send an approval response for the currently selected pending approval.

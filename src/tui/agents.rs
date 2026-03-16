@@ -117,12 +117,27 @@ enum Mode {
     Skills,
 }
 
+/// Which section a tool belongs to in the tools editor
+#[derive(Debug, Clone, PartialEq)]
+enum ToolSection {
+    /// Claude Code built-in tool (managed via --tools / --disallowedTools)
+    BuiltIn,
+    /// CatClaw built-in MCP server tool (mcp__catclaw__*)
+    McpCatclaw,
+    /// User-defined MCP server tool from agent .mcp.json (mcp__{server}__*)
+    McpUser,
+}
+
 /// A tool entry for the tools editor
 struct ToolEntry {
     name: String,
-    /// true = in allowed list (whitelist)
+    /// Display name (short form for MCP tools)
+    display: String,
+    /// Which section this tool belongs to
+    section: ToolSection,
+    /// true = in allowed list (whitelist, built-in only)
     allowed: bool,
-    /// true = in denied list (blacklist)
+    /// true = in denied list (blacklist, works for both built-in and MCP)
     denied: bool,
     /// true = requires user approval before each execution
     require_approval: bool,
@@ -230,7 +245,14 @@ impl AgentsPanel {
                     denied,
                     model: a.model.clone(),
                     fallback_model: a.fallback_model.clone(),
-                    approval_tools: a.approval.require_approval.clone(),
+                    approval_tools: {
+                        let content = std::fs::read_to_string(a.workspace.join("tools.toml")).unwrap_or_default();
+                        toml::from_str::<toml::Value>(&content).ok()
+                            .and_then(|v| v.get("require_approval")?.as_array().map(|arr| {
+                                arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                            }))
+                            .unwrap_or_default()
+                    },
                 }
             })
             .collect()
@@ -268,25 +290,133 @@ impl AgentsPanel {
         if let Some(agent) = self.agents.get(self.selected) {
             self.whitelist_mode = !agent.allowed.is_empty();
 
-            // Load approval config from catclaw.toml for this agent
-            let approval = Config::load(&self.config_path).ok().and_then(|config| {
-                config.agents.into_iter().find(|a| a.id == agent.id).map(|a| a.approval)
-            });
+            // Load approval list from agent's tools.toml (same file as allowed/denied)
+            let approval_list: Vec<String> = {
+                let content = std::fs::read_to_string(agent.workspace.join("tools.toml")).unwrap_or_default();
+                toml::from_str::<toml::Value>(&content).ok()
+                    .and_then(|v| v.get("require_approval")?.as_array().map(|arr| {
+                        arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                    }))
+                    .unwrap_or_default()
+            };
 
-            self.tool_entries = ALL_BUILTIN_TOOL_NAMES
-                .iter()
-                .map(|&name| ToolEntry {
+            let mut entries: Vec<ToolEntry> = Vec::new();
+
+            // 1. Built-in tools
+            for &name in ALL_BUILTIN_TOOL_NAMES {
+                entries.push(ToolEntry {
                     name: name.to_string(),
+                    display: name.to_string(),
+                    section: ToolSection::BuiltIn,
                     allowed: agent.allowed.is_empty() || agent.allowed.iter().any(|a| a == name),
                     denied: agent.denied.iter().any(|d| d == name),
-                    require_approval: approval.as_ref().map_or(false, |a| a.requires_approval(name)),
-                })
-                .collect();
+                    require_approval: approval_list.iter().any(|p| crate::config::ApprovalConfig::matches_pattern(p, name)),
+                });
+            }
 
+            // 2. CatClaw built-in MCP tools (from configured channel adapters)
+            let config = Config::load(&self.config_path).ok();
+            let catclaw_mcp_tools = Self::list_catclaw_mcp_tools(config.as_ref());
+            for tool_name in &catclaw_mcp_tools {
+                let display = tool_name.strip_prefix("mcp__catclaw__").unwrap_or(tool_name).to_string();
+                entries.push(ToolEntry {
+                    name: tool_name.clone(),
+                    display,
+                    section: ToolSection::McpCatclaw,
+                    allowed: true, // MCP tools don't use --tools whitelist
+                    denied: agent.denied.iter().any(|d| {
+                        crate::config::ApprovalConfig::matches_pattern(d, tool_name)
+                    }),
+                    require_approval: approval_list.iter().any(|p| crate::config::ApprovalConfig::matches_pattern(p, tool_name)),
+                });
+            }
+
+            // 3. User MCP tools (from shared workspace + agent workspace .mcp.json)
+            let user_mcp_servers = Self::list_user_mcp_servers(&self.workspace);
+            for server_name in &user_mcp_servers {
+                let wildcard = format!("mcp__{}__*", server_name);
+                let display = format!("{}  (all tools)", server_name);
+                entries.push(ToolEntry {
+                    name: wildcard.clone(),
+                    display,
+                    section: ToolSection::McpUser,
+                    allowed: true,
+                    denied: agent.denied.iter().any(|d| {
+                        d == &wildcard || d == &format!("mcp__{}__*", server_name)
+                    }),
+                    require_approval: approval_list.iter().any(|p| {
+                        crate::config::ApprovalConfig::matches_pattern(p, &wildcard)
+                    }),
+                });
+            }
+
+            self.tool_entries = entries;
             self.tool_selected = 0;
             self.mode = Mode::Tools;
             self.status_msg = None;
         }
+    }
+
+    /// List CatClaw built-in MCP tool names based on configured channel adapters.
+    fn list_catclaw_mcp_tools(config: Option<&Config>) -> Vec<String> {
+        let config = match config {
+            Some(c) => c,
+            None => return vec![],
+        };
+        let mut tools = Vec::new();
+        for ch in &config.channels {
+            let adapter_name = &ch.channel_type;
+            // Known adapter actions — we keep a static list here since we can't
+            // query the actual adapter (it requires a running gateway).
+            let actions: &[&str] = match adapter_name.as_str() {
+                "discord" => &[
+                    "get_messages", "send_message", "edit_message", "delete_message",
+                    "react", "get_reactions", "delete_reaction",
+                    "pin_message", "unpin_message", "list_pins",
+                    "create_thread", "list_threads",
+                    "get_channels", "channel_info", "create_channel", "create_category",
+                    "edit_channel", "delete_channel", "edit_permissions",
+                    "get_guilds", "get_guild_info", "member_info",
+                    "get_roles", "create_role", "edit_role", "delete_role", "assign_role", "remove_role",
+                    "timeout_member", "kick_member", "ban_member", "unban_member",
+                    "list_emojis", "list_stickers",
+                    "list_events", "get_event",
+                ],
+                "telegram" => &[
+                    "send_message", "edit_message", "delete_message",
+                    "forward_message", "copy_message",
+                    "pin_message", "unpin_message", "unpin_all",
+                    "get_chat", "get_chat_member_count", "get_chat_member", "get_chat_administrators",
+                    "set_chat_title", "set_chat_description",
+                    "ban_member", "unban_member", "restrict_member", "promote_member",
+                    "send_poll", "stop_poll",
+                    "create_forum_topic", "close_forum_topic", "reopen_forum_topic", "delete_forum_topic",
+                    "set_chat_permissions",
+                    "create_invite_link",
+                ],
+                _ => &[],
+            };
+            for action in actions {
+                tools.push(format!("mcp__catclaw__{}_{}", adapter_name, action));
+            }
+        }
+        tools
+    }
+
+    /// List user-defined MCP server names from shared workspace .mcp.json.
+    fn list_user_mcp_servers(workspace_root: &std::path::Path) -> Vec<String> {
+        let mcp_path = workspace_root.join(".mcp.json");
+        let mut servers = std::collections::BTreeSet::new();
+        if let Ok(content) = std::fs::read_to_string(mcp_path) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(srv) = parsed.get("mcpServers").and_then(|v| v.as_object()) {
+                    servers.extend(srv.keys().cloned());
+                }
+            }
+        }
+        // Exclude "catclaw" — that's the built-in MCP, already shown in CatClaw MCP section
+        servers.remove("catclaw");
+        servers.into_iter().collect()
     }
 
     fn toggle_tool(&mut self) {
@@ -313,54 +443,60 @@ impl AgentsPanel {
 
     fn save_tools(&mut self) {
         if let Some(agent) = self.agents.get_mut(self.selected) {
-            let allowed: Vec<String> = self
-                .tool_entries
-                .iter()
-                .filter(|e| e.allowed && !e.denied)
+            // Built-in tools: allowed (whitelist for --tools) and denied (blacklist)
+            let builtin_allowed: Vec<String> = self.tool_entries.iter()
+                .filter(|e| e.section == ToolSection::BuiltIn && e.allowed && !e.denied)
+                .map(|e| e.name.clone())
+                .collect();
+            let builtin_denied: Vec<String> = self.tool_entries.iter()
+                .filter(|e| e.section == ToolSection::BuiltIn && e.denied)
                 .map(|e| e.name.clone())
                 .collect();
 
-            let denied: Vec<String> = self
-                .tool_entries
-                .iter()
-                .filter(|e| e.denied)
+            // MCP tools: only denied (--disallowedTools) since --tools doesn't affect MCP
+            let mcp_denied: Vec<String> = self.tool_entries.iter()
+                .filter(|e| e.section != ToolSection::BuiltIn && e.denied)
                 .map(|e| e.name.clone())
                 .collect();
 
-            let approval_tools: Vec<String> = self
-                .tool_entries
-                .iter()
+            // All denied = built-in denied + MCP denied
+            let all_denied: Vec<String> = builtin_denied.iter()
+                .chain(mcp_denied.iter())
+                .cloned()
+                .collect();
+
+            // All approval tools (built-in + MCP)
+            let approval_tools: Vec<String> = self.tool_entries.iter()
                 .filter(|e| e.require_approval)
                 .map(|e| e.name.clone())
                 .collect();
 
-            // If all tools are allowed and none denied, write empty allowed (= unrestricted)
-            let all_allowed = allowed.len() == ALL_BUILTIN_TOOL_NAMES.len();
-            let final_allowed = if all_allowed && denied.is_empty() {
+            // If all built-in tools are allowed and none denied, write empty allowed (= unrestricted)
+            let all_builtin_allowed = builtin_allowed.len() == ALL_BUILTIN_TOOL_NAMES.len();
+            let final_allowed = if all_builtin_allowed && builtin_denied.is_empty() {
                 vec![]
             } else {
-                allowed
+                builtin_allowed
             };
 
-            let content = format!(
+            // Write everything to tools.toml (allowed, denied, require_approval)
+            let mut content = format!(
                 "allowed = [{}]\ndenied = [{}]\n",
-                final_allowed
-                    .iter()
-                    .map(|t| format!("\"{}\"", t))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                denied
-                    .iter()
-                    .map(|t| format!("\"{}\"", t))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                final_allowed.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "),
+                all_denied.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "),
             );
+            if !approval_tools.is_empty() {
+                content.push_str(&format!(
+                    "require_approval = [{}]\n",
+                    approval_tools.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "),
+                ));
+            }
 
             let tools_path = agent.workspace.join("tools.toml");
             if std::fs::write(&tools_path, &content).is_ok() {
                 agent.allowed = final_allowed;
-                agent.denied = denied.clone();
-                agent.approval_tools = approval_tools.clone();
+                agent.denied = all_denied;
+                agent.approval_tools = approval_tools;
                 self.status_msg = Some(format!("Tools saved for '{}'", agent.id));
             } else {
                 self.status_msg = Some("Failed to save tools.toml".into());
@@ -368,26 +504,9 @@ impl AgentsPanel {
                 return;
             }
 
-            // Update approval config in catclaw.toml
-            let agent_id = agent.id.clone();
-            match Config::load(&self.config_path) {
-                Ok(mut config) => {
-                    if let Some(ac) = config.agents.iter_mut().find(|a| a.id == agent_id) {
-                        ac.approval.require_approval = approval_tools;
-                        ac.approval.blocked = denied;
-                    }
-                    if let Err(e) = config.save(&self.config_path) {
-                        self.status_msg = Some(format!("Tools saved, but config error: {}", e));
-                    }
-                }
-                Err(e) => {
-                    self.status_msg = Some(format!("Tools saved, but config load error: {}", e));
-                }
-            }
-
             // Hot-reload in gateway via WS
             let client = self.client.clone();
-            let aid = agent_id.clone();
+            let aid = agent.id.clone();
             tokio::spawn(async move {
                 let _ = client.request(
                     "agents.reload_tools",
@@ -1384,82 +1503,88 @@ impl AgentsPanel {
         );
         frame.render_widget(header, chunks[0]);
 
-        // Tool list in two columns
-        let col_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(chunks[1]);
+        // Build list items with section headers
+        let mut lines: Vec<Line> = Vec::new();
+        let mut current_section: Option<&ToolSection> = None;
+        // Map from display line index to tool_entries index (for selection tracking)
+        let mut line_to_entry: Vec<Option<usize>> = Vec::new();
 
-        let mid = (self.tool_entries.len() + 1) / 2;
-
-        // Build items for both columns
-        let all_items: Vec<ListItem> = self
-            .tool_entries
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let is_selected = i == self.tool_selected;
-
-                let (icon, icon_color) = if e.denied {
-                    ("🚫", Theme::RED)
-                } else if e.require_approval {
-                    ("🔒", Theme::YELLOW)
-                } else if e.allowed {
-                    ("✅", Theme::GREEN)
-                } else {
-                    ("⬜", Theme::OVERLAY0)
-                };
-
-                let bg = if is_selected {
-                    Theme::SURFACE0
-                } else {
-                    Theme::BASE
-                };
-
-                let name_style = if e.denied {
-                    Style::default().fg(Theme::OVERLAY0).bg(bg)
-                } else {
-                    Style::default().fg(Theme::TEXT).bg(bg)
-                };
-
-                let mut spans = vec![
-                    Span::styled(format!("  {} ", icon), Style::default().fg(icon_color).bg(bg)),
-                    Span::styled(e.name.clone(), name_style),
-                ];
-                if e.denied {
-                    spans.push(Span::styled(
-                        " (denied)",
-                        Style::default().fg(Theme::RED).bg(bg),
-                    ));
-                } else if e.require_approval {
-                    spans.push(Span::styled(
-                        " (approval)",
-                        Style::default().fg(Theme::YELLOW).bg(bg),
-                    ));
+        for (i, e) in self.tool_entries.iter().enumerate() {
+            // Section header
+            if current_section != Some(&e.section) {
+                if current_section.is_some() {
+                    lines.push(Line::from(""));
+                    line_to_entry.push(None);
                 }
+                let section_label = match e.section {
+                    ToolSection::BuiltIn => "  Built-in Tools",
+                    ToolSection::McpCatclaw => "  CatClaw MCP Tools",
+                    ToolSection::McpUser => "  User MCP Servers",
+                };
+                lines.push(Line::from(Span::styled(
+                    section_label,
+                    Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD),
+                )));
+                line_to_entry.push(None);
+                current_section = Some(&e.section);
+            }
 
-                ListItem::new(Line::from(spans))
-            })
-            .collect();
+            let is_selected = i == self.tool_selected;
 
-        let left_items: Vec<ListItem> = all_items[..mid.min(all_items.len())].to_vec();
-        let right_items: Vec<ListItem> = if mid < all_items.len() {
-            all_items[mid..].to_vec()
+            let (icon, icon_color) = if e.denied {
+                ("🚫", Theme::RED)
+            } else if e.require_approval {
+                ("🔒", Theme::YELLOW)
+            } else if e.allowed {
+                ("✅", Theme::GREEN)
+            } else {
+                ("⬜", Theme::OVERLAY0)
+            };
+
+            let bg = if is_selected { Theme::SURFACE0 } else { Theme::BASE };
+
+            let name_style = if e.denied {
+                Style::default().fg(Theme::OVERLAY0).bg(bg)
+            } else {
+                Style::default().fg(Theme::TEXT).bg(bg)
+            };
+
+            let mut spans = vec![
+                Span::styled(format!("    {} ", icon), Style::default().fg(icon_color).bg(bg)),
+                Span::styled(&e.display, name_style),
+            ];
+            if e.denied {
+                spans.push(Span::styled(" (denied)", Style::default().fg(Theme::RED).bg(bg)));
+            } else if e.require_approval {
+                spans.push(Span::styled(" (approval)", Style::default().fg(Theme::YELLOW).bg(bg)));
+            }
+
+            lines.push(Line::from(spans));
+            line_to_entry.push(Some(i));
+        }
+
+        // Find scroll offset to keep selected item visible
+        let selected_line = line_to_entry.iter().position(|e| *e == Some(self.tool_selected)).unwrap_or(0);
+        let visible_height = chunks[1].height as usize;
+        let scroll = if selected_line >= visible_height {
+            (selected_line - visible_height + 1) as u16
         } else {
-            vec![]
+            0
         };
 
-        let left_list = List::new(left_items).block(Block::default());
-        let right_list = List::new(right_items).block(Block::default());
-
-        frame.render_widget(left_list, col_chunks[0]);
-        frame.render_widget(right_list, col_chunks[1]);
+        let tool_list = Paragraph::new(lines).scroll((scroll, 0));
+        frame.render_widget(tool_list, chunks[1]);
 
         // Selected tool description
         let selected_desc = self.tool_entries.get(self.tool_selected)
             .and_then(|e| ALL_BUILTIN_TOOLS.iter().find(|(n, _)| *n == e.name))
             .map(|(_, desc)| *desc)
-            .unwrap_or("");
+            .unwrap_or_else(|| {
+                // For MCP tools, show the full tool name as description
+                self.tool_entries.get(self.tool_selected)
+                    .map(|e| e.name.as_str())
+                    .unwrap_or("")
+            });
         let desc_line = Paragraph::new(Line::from(vec![
             Span::styled(" → ", Style::default().fg(Theme::MAUVE)),
             Span::styled(selected_desc, Style::default().fg(Theme::SUBTEXT0)),

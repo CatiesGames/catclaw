@@ -180,7 +180,7 @@ impl ApprovalConfig {
     }
 
     /// Check if a tool name matches a pattern (supports "*" wildcard).
-    fn matches_pattern(pattern: &str, tool: &str) -> bool {
+    pub fn matches_pattern(pattern: &str, tool: &str) -> bool {
         if pattern == "*" { return true; }
         if let Some(prefix) = pattern.strip_suffix('*') {
             return tool.starts_with(prefix);

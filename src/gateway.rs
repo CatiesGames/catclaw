@@ -195,12 +195,17 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         .collect();
     let adapter_map = Arc::new(adapter_map);
 
+    let (event_bus_tx, _) = tokio::sync::broadcast::channel::<String>(256);
+    let event_bus = Arc::new(event_bus_tx);
+
     let router_adapters = adapter_map.clone();
+    let router_event_bus = event_bus.clone();
     tokio::spawn(async move {
         info!("gateway message router ready");
         while let Some(msg) = msg_rx.recv().await {
             let router = router.clone();
             let adapter = router_adapters.get(msg.channel_type.as_str()).cloned();
+            let bus = router_event_bus.clone();
 
             tokio::spawn(async move {
                 if let Some(adapter) = adapter {
@@ -212,6 +217,13 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                             "failed to route message"
                         );
                     }
+                    // Notify TUI that sessions may have changed
+                    let _ = bus.send(
+                        serde_json::to_string(&crate::ws_protocol::WsEvent {
+                            event: "session.updated".to_string(),
+                            data: serde_json::json!({}),
+                        }).unwrap_or_default()
+                    );
                 } else {
                     warn!(
                         channel = %msg.channel_type,
@@ -224,9 +236,6 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     });
 
     info!("gateway ready");
-
-    let (event_bus_tx, _) = tokio::sync::broadcast::channel::<String>(256);
-    let event_bus = Arc::new(event_bus_tx);
 
     // Approval expiry cleanup task
     {

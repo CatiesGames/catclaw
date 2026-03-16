@@ -87,12 +87,14 @@ impl SkillSource {
 }
 
 /// Tools config from tools.toml
-#[derive(Debug, serde::Deserialize, Default)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, Default)]
 struct ToolsConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allowed: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     denied: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    require_approval: Vec<String>,
 }
 
 pub struct AgentLoader;
@@ -111,6 +113,13 @@ impl AgentLoader {
         let model = config.model.clone().or_else(|| default_model.map(String::from));
         let fallback_model = config.fallback_model.clone().or_else(|| default_fallback_model.map(String::from));
 
+        // Build approval config: tool lists from tools.toml, timeout from catclaw.toml
+        let approval = crate::config::ApprovalConfig {
+            require_approval: tools.require_approval.clone(),
+            blocked: tools.denied.clone(),
+            timeout_secs: config.approval.timeout_secs,
+        };
+
         Ok(Agent {
             id: config.id.clone(),
             workspace: workspace.clone(),
@@ -119,7 +128,7 @@ impl AgentLoader {
             tools,
             model,
             fallback_model,
-            approval: config.approval.clone(),
+            approval,
         })
     }
 
@@ -131,6 +140,7 @@ impl AgentLoader {
                 return ToolPermissions {
                     allowed: config.allowed,
                     denied: config.denied,
+                    require_approval: config.require_approval,
                 };
             }
         }
@@ -1082,7 +1092,7 @@ description: CatClaw system administration. Use when the user asks to configure 
 
 # CatClaw System Administration
 
-All operations use the `catclaw` CLI via the Bash tool. Always read the current value before modifying lists (dm_allow, group_deny, etc.) to avoid overwriting.
+All operations use the `catclaw` CLI via the Bash tool. **Never manually edit catclaw.toml or tools.toml** — always use the CLI commands below, which handle file writes + gateway hot-reload in one step. Always read the current value before modifying lists (dm_allow, group_deny, etc.) to avoid overwriting.
 
 ---
 
@@ -1231,7 +1241,7 @@ Agent workspaces: `workspace/agents/{agent_id}/`
 | `HEARTBEAT.md` | Periodic maintenance tasks |
 | `memory/YYYY-MM-DD.md` | Daily session notes |
 
-Use `Read` and `Edit` tools directly to view and modify these files.
+Use `Read` and `Edit` tools directly to view and modify these MD files (personality, memory, etc.). **Do not manually edit `tools.toml` or `catclaw.toml`** — use `catclaw agent tools` and `catclaw config set` instead.
 
 **Memory discipline:**
 - `MEMORY.md` — concise, structured, `##` headings by topic
@@ -1284,6 +1294,58 @@ catclaw skill uninstall <agent> <skill> # Remove a skill
 - `@anthropic/<name>` — Official Anthropic skill
 - `github:<owner>/<repo>/path/to/skill` — From GitHub
 - `/local/path/to/skill` — Local directory
+
+---
+
+## User MCP Servers
+
+Agents can connect to custom MCP servers for additional tools. MCP definitions are shared across all agents (like skills):
+
+**File location:** `workspace/.mcp.json`
+
+All agents see these servers by default. Each agent controls access via the TUI Agents > Tools panel (deny or require approval per server).
+
+### Supported transport types
+
+**HTTP (recommended for cloud services):**
+```json
+{
+  "mcpServers": {
+    "my-api": {
+      "type": "http",
+      "url": "https://api.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MY_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+**Stdio (local subprocess):**
+```json
+{
+  "mcpServers": {
+    "local-db": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@company/mcp-server"],
+      "env": {
+        "DB_PATH": "/path/to/database"
+      }
+    }
+  }
+}
+```
+
+### Rules
+
+- Environment variables (`${VAR}`, `${VAR:-default}`) are expanded automatically.
+- Tool names become `mcp__{server-name}__{tool}` (e.g. `mcp__my-api__search`).
+- Tools from user MCP servers appear in the TUI Agents > Tools panel under "User MCP Servers" and can be denied or set to require approval.
+- `.mcp.json` only defines **how to connect** — tool definitions come from the MCP server's `tools/list` response.
+- Use `Read` and `Write` tools to create/edit `.mcp.json` directly.
+- Shared MCP servers are available to all agents by default. To disable for a specific agent, use `catclaw agent tools <name> --deny "mcp__{server}__*"` or set to 🚫 in TUI Tools.
 
 ---
 

@@ -618,28 +618,23 @@ fn handle_agents_reload_tools(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRes
         None => return WsResponse::err(req.id, -32602, "missing param: agent_id"),
     };
 
-    // Re-read from the live config (catclaw.toml already updated by caller)
-    // Also sync the in-memory config from disk to pick up file-only changes
-    let (approval, model, fallback_model) = {
-        // Reload config from disk to ensure we have the latest
+    // Re-read model from config (catclaw.toml)
+    let (timeout_secs, model, fallback_model) = {
         let disk_config = crate::config::Config::load(&gw.config_path).ok();
         if let Some(ref dc) = disk_config {
             let mut config = gw.config.write().unwrap();
-            // Sync agent-level fields from disk
             for disk_agent in &dc.agents {
                 if let Some(mem_agent) = config.agents.iter_mut().find(|a| a.id == disk_agent.id) {
-                    mem_agent.approval = disk_agent.approval.clone();
                     mem_agent.model = disk_agent.model.clone();
                     mem_agent.fallback_model = disk_agent.fallback_model.clone();
                 }
             }
         }
-
         let config = gw.config.read().unwrap();
         let agent_cfg = config.agents.iter().find(|a| a.id == agent_id);
         match agent_cfg {
-            Some(ac) => (ac.approval.clone(), ac.model.clone(), ac.fallback_model.clone()),
-            None => (crate::config::ApprovalConfig::default(), None, None),
+            Some(ac) => (ac.approval.timeout_secs, ac.model.clone(), ac.fallback_model.clone()),
+            None => (120, None, None),
         }
     };
 
@@ -650,21 +645,30 @@ fn handle_agents_reload_tools(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRes
             Some(agent) => {
                 let content = std::fs::read_to_string(agent.workspace.join("tools.toml")).unwrap_or_default();
                 if let Ok(parsed) = toml::from_str::<toml::Value>(&content) {
-                    let allowed = parsed.get("allowed")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                        .unwrap_or_default();
-                    let denied = parsed.get("denied")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                        .unwrap_or_default();
-                    crate::agent::ToolPermissions { allowed, denied }
+                    let get_list = |key: &str| -> Vec<String> {
+                        parsed.get(key)
+                            .and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                            .unwrap_or_default()
+                    };
+                    crate::agent::ToolPermissions {
+                        allowed: get_list("allowed"),
+                        denied: get_list("denied"),
+                        require_approval: get_list("require_approval"),
+                    }
                 } else {
                     crate::agent::ToolPermissions::default()
                 }
             }
             None => return WsResponse::err(req.id, -1, format!("agent not found: {}", agent_id)),
         }
+    };
+
+    // Build approval from tools.toml data + catclaw.toml timeout
+    let approval = crate::config::ApprovalConfig {
+        require_approval: tools.require_approval.clone(),
+        blocked: tools.denied.clone(),
+        timeout_secs,
     };
 
     // Apply to registry

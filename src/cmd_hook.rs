@@ -44,10 +44,38 @@ pub async fn run_pre_tool(config_path: &Path, session_key: &str) -> ! {
         std::process::exit(0);
     }
 
-    let approval = config.agents.iter()
-        .find(|a| a.id == agent_id)
-        .map(|a| a.approval.clone())
-        .unwrap_or_default();
+    // Build approval config: tool lists from agent's tools.toml, timeout from catclaw.toml
+    let approval = {
+        let agent_config = config.agents.iter().find(|a| a.id == agent_id);
+        let timeout_secs = agent_config.map(|a| a.approval.timeout_secs).unwrap_or(120);
+
+        // Read require_approval and denied from tools.toml
+        let tools_path = agent_config.map(|a| a.workspace.join("tools.toml"));
+        let (require_approval, blocked) = if let Some(path) = tools_path {
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            if let Ok(parsed) = toml::from_str::<toml::Value>(&content) {
+                let ra = parsed.get("require_approval")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let bl = parsed.get("denied")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                (ra, bl)
+            } else {
+                (vec![], vec![])
+            }
+        } else {
+            (vec![], vec![])
+        };
+
+        crate::config::ApprovalConfig {
+            require_approval,
+            blocked,
+            timeout_secs,
+        }
+    };
 
     let tool = &hook_input.tool_name;
 

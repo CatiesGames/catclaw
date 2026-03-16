@@ -1025,6 +1025,7 @@ async fn cmd_init(config_path: &PathBuf) -> Result<Config> {
 
     let existing_channels: Vec<String> = config.channels.iter().map(|c| c.channel_type.clone()).collect();
 
+    // Show existing channels
     if !existing_channels.is_empty() {
         for ch in &existing_channels {
             cli_ui::section_ok(&format!("{} configured", ch));
@@ -1032,53 +1033,12 @@ async fn cmd_init(config_path: &PathBuf) -> Result<Config> {
         cli_ui::section_empty();
     }
 
-    // Available channels
+    // Available channels (type, label, implemented)
     let available_channels: Vec<(&str, &str, bool)> = vec![
         ("discord", "Discord", true),
         ("telegram", "Telegram", true),
         ("slack", "Slack", false),
     ];
-
-    let mut channel_selection: Vec<usize> = Vec::new();
-
-    // Build selectable items: only implemented channels not yet configured
-    let mut select_labels: Vec<&str> = Vec::new();
-    let mut select_indices: Vec<Option<usize>> = Vec::new(); // None = skip
-
-    for (i, (ch_type, ch_label, implemented)) in available_channels.iter().enumerate() {
-        if existing_channels.contains(&ch_type.to_string()) || !implemented {
-            continue;
-        }
-        select_labels.push(ch_label);
-        select_indices.push(Some(i));
-    }
-
-    let has_new_channels = !select_labels.is_empty();
-
-    if has_new_channels {
-        select_labels.push("Skip, set up later");
-        select_indices.push(None);
-
-        cli_ui::section_line(&format!(
-            "{}Select a channel to connect:{}",
-            cli_ui::SUBTEXT, cli_ui::RESET
-        ));
-        cli_ui::section_empty();
-
-        let choice = cli_ui::section_select(&select_labels, 0);
-
-        if let Some(idx) = select_indices[choice] {
-            channel_selection.push(idx);
-        }
-    }
-
-    cli_ui::section_empty();
-    cli_ui::section_footer();
-
-    if channel_selection.is_empty() && existing_channels.is_empty() {
-        cli_ui::status_msg("ℹ️", "No channels configured. Add later: catclaw channel add");
-        println!();
-    }
 
     // Load existing .env if present
     let env_path = std::path::Path::new(".env");
@@ -1092,7 +1052,45 @@ async fn cmd_init(config_path: &PathBuf) -> Result<Config> {
         Vec::new()
     };
 
-    for &idx in &channel_selection {
+    // Channel selection + setup loop
+    loop {
+        let configured: Vec<String> = config.channels.iter().map(|c| c.channel_type.clone()).collect();
+        let mut select_labels: Vec<String> = Vec::new();
+        let mut select_indices: Vec<Option<usize>> = Vec::new();
+
+        for (i, (ch_type, ch_label, implemented)) in available_channels.iter().enumerate() {
+            if !implemented { continue; }
+            if configured.contains(&ch_type.to_string()) {
+                select_labels.push(format!("{} ✓ (reconfigure)", ch_label));
+            } else {
+                select_labels.push(format!("Add {}", ch_label));
+            }
+            select_indices.push(Some(i));
+        }
+        select_labels.push("Done".to_string());
+        select_indices.push(None);
+
+        cli_ui::section_line(&format!(
+            "{}Select a channel to configure:{}",
+            cli_ui::SUBTEXT, cli_ui::RESET
+        ));
+        cli_ui::section_empty();
+
+        let labels_ref: Vec<&str> = select_labels.iter().map(|s| s.as_str()).collect();
+        let choice = cli_ui::section_select(&labels_ref, labels_ref.len() - 1);
+
+        let idx = match select_indices[choice] {
+            Some(i) => i,
+            None => break, // "Done"
+        };
+
+        // Remove existing config if reconfiguring
+        let (ch_type, _, _) = available_channels[idx];
+        config.channels.retain(|c| c.channel_type != ch_type);
+        cli_ui::section_empty();
+        cli_ui::section_footer();
+
+        // ── Run setup for selected channel ──
         let (ch_type, ch_label, _) = available_channels[idx];
 
         if ch_type == "discord" {
@@ -1360,6 +1358,13 @@ async fn cmd_init(config_path: &PathBuf) -> Result<Config> {
             cli_ui::section_ok(&format!("{} configured", ch_label));
             cli_ui::section_footer();
         }
+
+        println!();
+    } // end channel selection + setup loop
+
+    if config.channels.is_empty() {
+        cli_ui::status_msg("ℹ️", "No channels configured. Add later: catclaw channel add");
+        println!();
     }
 
     // Write .env file
@@ -1701,7 +1706,7 @@ fn cmd_agent_edit(config: &Config, name: &str, file: &str) -> Result<()> {
 
 async fn cmd_agent_tools(
     config: &mut Config,
-    config_path: &std::path::Path,
+    _config_path: &std::path::Path,
     name: &str,
     allow: Option<String>,
     deny: Option<String>,
@@ -1714,57 +1719,47 @@ async fn cmd_agent_tools(
     let tools_path = agent.workspace.join("tools.toml");
 
     if allow.is_none() && deny.is_none() && approve.is_none() {
-        // Show current tools + approval
+        // Show current tools
         if let Ok(content) = std::fs::read_to_string(&tools_path) {
             println!("{}", content);
         } else {
             println!("No tools.toml found for agent '{}'", name);
         }
-        let ac = &agent.approval;
-        if !ac.require_approval.is_empty() {
-            println!("approval = [{}]", ac.require_approval.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "));
-        }
         return Ok(());
     }
 
-    // Write tools.toml (allow/deny)
-    let mut content = String::new();
-    if let Some(ref allowed) = allow {
-        let tools: Vec<&str> = allowed.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-        content.push_str(&format!(
-            "allowed = [{}]\n",
-            tools.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", ")
-        ));
-    }
-    if let Some(ref denied) = deny {
-        let tools: Vec<&str> = denied.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-        content.push_str(&format!(
-            "denied = [{}]\n",
-            tools.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", ")
-        ));
-    }
+    // Read existing tools.toml, merge changes, write back
+    let existing = std::fs::read_to_string(&tools_path).unwrap_or_default();
+    let parsed = toml::from_str::<toml::Value>(&existing).ok();
 
-    if allow.is_some() || deny.is_some() {
-        std::fs::write(&tools_path, content)?;
-    }
+    let cur_allowed: Vec<String> = parsed.as_ref()
+        .and_then(|v| v.get("allowed")?.as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()))
+        .unwrap_or_default();
+    let cur_denied: Vec<String> = parsed.as_ref()
+        .and_then(|v| v.get("denied")?.as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()))
+        .unwrap_or_default();
+    let cur_approval: Vec<String> = parsed.as_ref()
+        .and_then(|v| v.get("require_approval")?.as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()))
+        .unwrap_or_default();
 
-    // Write approval config to catclaw.toml
-    if let Some(ref approval_str) = approve {
-        let tools: Vec<String> = approval_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-        if let Some(ac) = config.agents.iter_mut().find(|a| a.id == name) {
-            ac.approval.require_approval = tools;
-        }
-        config.save(config_path)?;
-    }
+    let final_allowed = if let Some(ref a) = allow {
+        a.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    } else { cur_allowed };
+    let final_denied = if let Some(ref d) = deny {
+        d.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    } else { cur_denied };
+    let final_approval: Vec<String> = if let Some(ref ap) = approve {
+        ap.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    } else { cur_approval };
 
-    // Also sync denied list to catclaw.toml approval.blocked
-    if let Some(ref denied) = deny {
-        let tools: Vec<String> = denied.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-        if let Some(ac) = config.agents.iter_mut().find(|a| a.id == name) {
-            ac.approval.blocked = tools;
-        }
-        config.save(config_path)?;
+    let fmt_list = |v: &[String]| -> String {
+        v.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", ")
+    };
+    let mut content = format!("allowed = [{}]\ndenied = [{}]\n", fmt_list(&final_allowed), fmt_list(&final_denied));
+    if !final_approval.is_empty() {
+        content.push_str(&format!("require_approval = [{}]\n", fmt_list(&final_approval)));
     }
+    std::fs::write(&tools_path, content)?;
 
     // Notify gateway to hot-reload (best-effort, ignore if gateway not running)
     let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);

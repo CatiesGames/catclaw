@@ -15,7 +15,7 @@ use std::io;
 use std::time::Instant;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, EnableMouseCapture, DisableMouseCapture, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -297,6 +297,26 @@ impl App {
         action
     }
 
+    fn handle_mouse(&mut self, mouse: &crossterm::event::MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                match self.active_tab {
+                    Tab::Sessions => self.sessions_panel.scroll_up(3),
+                    Tab::Logs => self.logs_panel.scroll_up(3),
+                    _ => {}
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                match self.active_tab {
+                    Tab::Sessions => self.sessions_panel.scroll_down(3),
+                    Tab::Logs => self.logs_panel.scroll_down(3),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Called every tick to process background events regardless of active tab.
     fn tick(&mut self) {
         self.sessions_panel.poll_responses();
@@ -496,7 +516,7 @@ impl App {
 /// Restore terminal state (called on clean exit and panic)
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     // Show cursor
     let _ = execute!(io::stdout(), crossterm::cursor::Show);
 }
@@ -515,7 +535,7 @@ pub async fn run(
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -544,11 +564,17 @@ pub async fn run(
         }
 
         if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                app.handle_event(&key);
-                if app.should_quit {
-                    break;
+            match event::read()? {
+                Event::Key(key) => {
+                    app.handle_event(&key);
+                    if app.should_quit {
+                        break;
+                    }
                 }
+                Event::Mouse(mouse) => {
+                    app.handle_mouse(&mouse);
+                }
+                _ => {}
             }
         }
     }
