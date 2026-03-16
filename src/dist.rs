@@ -384,15 +384,25 @@ fn service_install_macos(exe: &Path, config_path: &Path) -> Result<(), CatClawEr
     std::fs::write(&plist, content)
         .map_err(|e| CatClawError::Service(format!("failed to write plist: {}", e)))?;
 
-    // Load the service
+    // Load the service using modern launchctl API (bootstrap instead of load -w)
+    let uid = unsafe { libc::getuid() };
+    let domain_target = format!("gui/{}", uid);
     let status = std::process::Command::new("launchctl")
-        .args(["load", "-w"])
+        .args(["bootstrap", &domain_target])
         .arg(&plist)
         .status()
-        .map_err(|e| CatClawError::Service(format!("launchctl load failed: {}", e)))?;
+        .map_err(|e| CatClawError::Service(format!("launchctl bootstrap failed: {}", e)))?;
 
     if !status.success() {
-        return Err(CatClawError::Service("launchctl load returned non-zero".into()));
+        // Fallback to legacy load for older macOS
+        let status = std::process::Command::new("launchctl")
+            .args(["load", "-w"])
+            .arg(&plist)
+            .status()
+            .map_err(|e| CatClawError::Service(format!("launchctl load failed: {}", e)))?;
+        if !status.success() {
+            return Err(CatClawError::Service("launchctl load returned non-zero".into()));
+        }
     }
 
     Ok(())
@@ -453,11 +463,14 @@ pub fn service_uninstall() -> Result<(), CatClawError> {
     #[cfg(target_os = "macos")]
     {
         let plist = plist_path();
+        // Use modern bootout API to fully remove from launchd (no residual override records)
+        let uid = unsafe { libc::getuid() };
+        let service_target = format!("gui/{}/com.catclaw.gateway", uid);
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootout", &service_target])
+            .status();
+        // Remove plist file
         if plist.exists() {
-            let _ = std::process::Command::new("launchctl")
-                .args(["unload", "-w"])
-                .arg(&plist)
-                .status();
             std::fs::remove_file(&plist)
                 .map_err(|e| CatClawError::Service(format!("failed to remove plist: {}", e)))?;
         }
@@ -560,18 +573,22 @@ pub fn restart_service() -> Result<(), CatClawError> {
         if !plist.exists() {
             return Err(CatClawError::Service("service not installed".into()));
         }
+        let uid = unsafe { libc::getuid() };
+        let service_target = format!("gui/{}/com.catclaw.gateway", uid);
+        let domain_target = format!("gui/{}", uid);
+        // bootout (stop + unregister)
         let _ = std::process::Command::new("launchctl")
-            .args(["unload", "-w"])
-            .arg(&plist)
+            .args(["bootout", &service_target])
             .status();
         std::thread::sleep(std::time::Duration::from_millis(500));
+        // bootstrap (register + start)
         let status = std::process::Command::new("launchctl")
-            .args(["load", "-w"])
+            .args(["bootstrap", &domain_target])
             .arg(&plist)
             .status()
-            .map_err(|e| CatClawError::Service(format!("launchctl load failed: {}", e)))?;
+            .map_err(|e| CatClawError::Service(format!("launchctl bootstrap failed: {}", e)))?;
         if !status.success() {
-            return Err(CatClawError::Service("launchctl load returned non-zero".into()));
+            return Err(CatClawError::Service("launchctl bootstrap returned non-zero".into()));
         }
         Ok(())
     }

@@ -82,3 +82,7 @@ axum = { version = "0.8", features = ["ws"] }
 
 # SHA256 checksum verification (for self-update)
 sha2 = "0.10"
+
+# Unix UID for launchd domain target
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

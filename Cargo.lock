@@ -330,6 +330,7 @@ dependencies = [
  "dashmap 6.1.0",
  "dialoguer",
  "futures",
+ "libc",
  "poise",
  "ratatui",
  "regex",
