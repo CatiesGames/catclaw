@@ -542,7 +542,7 @@ impl Config {
         }
     }
 
-    /// Create a default config for `catclaw init`
+    /// Create a default config for `catclaw onboard`
     pub fn default_init() -> Self {
         Config {
             general: GeneralConfig {

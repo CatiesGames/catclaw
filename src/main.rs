@@ -123,6 +123,9 @@ enum Commands {
         limit: usize,
     },
 
+    /// Interactive onboarding: setup wizard → start gateway → launch TUI
+    Onboard,
+
     /// Internal hooks called by Claude Code (not for direct user use)
     #[command(hide = true)]
     Hook {
@@ -346,8 +349,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         cli.command,
         Some(Commands::Gateway { command: GatewayCommands::Start { daemon: false } })
     );
-    let is_default = cli.command.is_none();
-    if is_gateway_fg || is_default {
+    let is_tui_mode = matches!(cli.command, Some(Commands::Onboard) | Some(Commands::Tui));
+    if is_gateway_fg || is_tui_mode {
         // Load config early to get log settings
         let config = if cli.config.exists() {
             Config::load(&cli.config).ok()
@@ -370,7 +373,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         if is_gateway_fg {
             logging::init_logging(&log_dir, &log_level);
         } else {
-            // Default mode: file-only logging so console stays clean for TUI
+            // Onboard mode: file-only logging so console stays clean for TUI
             logging::init_file_only_logging(&log_dir, &log_level);
         }
     } else {
@@ -379,17 +382,25 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         None => {
-            // Unified startup: splash → auto-init → ensure gateway → TUI
+            // No subcommand → show help
+            use clap::CommandFactory;
+            Cli::command().print_help().ok();
+            println!();
+            return Ok(());
+        }
+
+        Some(Commands::Onboard) => {
+            // Unified startup: splash → onboard → ensure gateway → TUI
             tui::splash::print_splash_to_terminal();
 
-            // Check if config exists, auto-init if not
+            // Check if config exists, auto-onboard if not
             let config = if cli.config.exists() {
                 cli_ui::spinner_start("Loading configuration...");
                 let cfg = Config::load(&cli.config)?;
                 cli_ui::spinner_finish("✓", "Configuration loaded");
                 cfg
             } else {
-                cmd_init(&cli.config).await?
+                cmd_onboard(&cli.config).await?
             };
 
             load_dotenv();
@@ -909,7 +920,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn cmd_init(config_path: &PathBuf) -> Result<Config> {
+async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
     use dialoguer::{Input, Password};
 
     let is_update = config_path.exists();

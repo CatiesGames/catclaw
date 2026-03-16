@@ -21,6 +21,8 @@
 
 ---
 
+**English** | [繁體中文](README.zh-TW.md)
+
 CatClaw is a Rust daemon that turns your **Claude Code subscription** into a personal AI assistant accessible from Discord, Telegram, and a beautiful terminal UI. Inspired by [OpenClaw](https://github.com/nicekid1/OpenClaw), built from scratch in Rust for performance, reliability, and full Anthropic compliance.
 
 ## Why CatClaw?
@@ -50,7 +52,7 @@ cargo build --release
 ### Launch
 
 ```bash
-./target/release/catclaw
+./target/release/catclaw onboard
 ```
 
 On first run, CatClaw will:
@@ -63,7 +65,7 @@ On subsequent runs, it skips setup and goes straight to gateway + TUI.
 
 ```bash
 # Other ways to run:
-catclaw init                      # Re-run the setup wizard
+catclaw onboard                      # Re-run the setup wizard
 catclaw gateway start             # Start gateway in foreground
 catclaw gateway start -d          # Start gateway as background daemon
 catclaw gateway stop              # Stop the background gateway
@@ -116,13 +118,13 @@ All configuration is managed through the CLI or TUI. No manual file editing requ
 ### Gateway
 
 ```bash
-catclaw                           # Unified: splash → auto-init → background gateway → TUI
+catclaw onboard                   # Onboarding: setup wizard → start gateway → launch TUI
 catclaw gateway start             # Start gateway in foreground
 catclaw gateway start -d          # Start as background daemon
 catclaw gateway stop              # Stop background gateway
 catclaw gateway restart           # Restart daemon
 catclaw gateway status            # Show running status and PID
-catclaw init                      # Re-run the setup wizard
+catclaw onboard                      # Re-run the setup wizard
 catclaw tui                       # Launch TUI only
 ```
 
@@ -394,9 +396,9 @@ timeout_secs = 120                  # approval timeout (global)
 | Scheduling | `croner` (cron expressions) |
 | Logging | `tracing` |
 
-## Contributing
+## Feedback
 
-Contributions are welcome! Please open an issue first to discuss what you'd like to change.
+Found a bug or have a feature request? [Open an issue](https://github.com/CatiesGames/catclaw/issues).
 
 ## License
 

@@ -148,7 +148,7 @@ Claude Code 自動向上搜尋 CLAUDE.md。如果 catclaw binary 在原始碼目
 
 Skills 是 `src/agent/loader.rs` 中的 `const` 字串常量，編譯進 binary。安裝到使用者 workspace 的時機：
 - `catclaw agent new` — 建立新 agent 時自動安裝所有 built-in skills
-- `catclaw init` — 初始化時安裝
+- `catclaw onboard` — 初始化時安裝
 
 **更新 skill 內容後**：`cargo build --release` 產生新 binary，但已安裝的 workspace 檔案不會自動更新。需要手動覆蓋或刪除 `workspace/skills/{name}/SKILL.md` 讓下次 `agent new` 重建。
 
