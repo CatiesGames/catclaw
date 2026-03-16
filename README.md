@@ -38,11 +38,15 @@ CatClaw is a Rust daemon that turns your **Claude Code subscription** into a per
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.75+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 
 ### Install
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/CatiesGames/catclaw/main/install.sh | sh
+```
+
+Or build from source:
 ```bash
 git clone https://github.com/CatiesGames/catclaw.git
 cd catclaw
@@ -52,25 +56,33 @@ cargo build --release
 ### Launch
 
 ```bash
-./target/release/catclaw onboard
+catclaw onboard
 ```
 
 On first run, CatClaw will:
 1. Show the splash logo
 2. Run the interactive setup wizard (verify Claude Code CLI, create your agent, configure channels)
-3. Start the gateway in the background
-4. Launch the TUI
+3. Optionally install as a system service (auto-start on boot)
+4. Start the gateway in the background
+5. Launch the TUI
 
 On subsequent runs, it skips setup and goes straight to gateway + TUI.
 
 ```bash
 # Other ways to run:
-catclaw onboard                      # Re-run the setup wizard
+catclaw onboard                   # Re-run the setup wizard
 catclaw gateway start             # Start gateway in foreground
 catclaw gateway start -d          # Start gateway as background daemon
 catclaw gateway stop              # Stop the background gateway
 catclaw gateway status            # Show gateway status
 catclaw tui                       # Launch TUI only (connects to running gateway)
+
+# Updates & auto-start:
+catclaw update                    # Self-update to latest version
+catclaw update --check            # Check for updates without installing
+catclaw gateway install           # Install as system service (auto-start on boot)
+catclaw gateway uninstall         # Remove the system service
+catclaw uninstall                 # Full uninstall (stop, remove service, delete binary)
 ```
 
 ## Architecture

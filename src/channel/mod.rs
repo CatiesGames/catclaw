@@ -61,6 +61,8 @@ pub struct Attachment {
     pub filename: String,
     pub url: String,
     pub content_type: Option<String>,
+    /// File size in bytes (if available from the platform).
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

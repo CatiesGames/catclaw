@@ -144,6 +144,7 @@ impl EventHandler for Handler {
                 filename: a.filename.clone(),
                 url: a.url.clone(),
                 content_type: a.content_type.clone(),
+                size: Some(a.size as u64),
             })
             .collect();
 
@@ -212,16 +213,28 @@ impl EventHandler for Handler {
             // Send decision to gateway
             let _ = self.approval_tx.send((request_id.clone(), approved));
 
-            // Acknowledge the interaction
+            // Acknowledge the interaction (required by Discord within 3s)
+            // Use UpdateMessage to edit the original embed in-place (no ephemeral reply)
             let label = if approved { "Approved" } else { "Denied" };
             let emoji = if approved { "✅" } else { "❌" };
-            let response = CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new()
-                    .content(format!("{} {} ({})", emoji, label, request_id))
-                    .ephemeral(true),
-            );
+            let color = if approved { 0x00FF00 } else { 0xFF0000 };
+
+            // Rebuild embed with result status, remove buttons
+            let mut response_msg = CreateInteractionResponseMessage::new()
+                .components(vec![]);
+            if let Some(original_embed) = comp.message.embeds.first() {
+                let mut new_embed = CreateEmbed::new()
+                    .title(format!("{} Tool Approval — {}", emoji, label))
+                    .color(color);
+                for field in &original_embed.fields {
+                    new_embed = new_embed.field(&field.name, &field.value, field.inline);
+                }
+                response_msg = response_msg.embed(new_embed);
+            }
+
+            let response = CreateInteractionResponse::UpdateMessage(response_msg);
             if let Err(e) = comp.create_response(&ctx.http, response).await {
-                error!(error = %e, "failed to acknowledge approval interaction");
+                error!(error = %e, "failed to update approval message");
             }
         }
     }

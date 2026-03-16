@@ -19,6 +19,8 @@ pub struct SchedulerConfig {
     pub archive_timeout_hours: u64,
     /// Archive check interval in minutes
     pub archive_check_interval_mins: u64,
+    /// Workspace root path (for attachment cleanup)
+    pub workspace: std::path::PathBuf,
 }
 
 impl Default for SchedulerConfig {
@@ -28,6 +30,7 @@ impl Default for SchedulerConfig {
             heartbeat_interval_mins: 30,
             archive_timeout_hours: 168, // 7 days
             archive_check_interval_mins: 360, // 6 hours
+            workspace: std::path::PathBuf::from("./workspace"),
         }
     }
 }
@@ -73,9 +76,12 @@ pub async fn run(
             next_heartbeat = now + chrono::Duration::minutes(config.heartbeat_interval_mins as i64);
         }
 
-        // ── System: Archive stale sessions ──
+        // ── System: Archive stale sessions + clean old attachments ──
         if now >= next_archive {
             execute_archive(&session_manager, &agent_registry, config.archive_timeout_hours).await;
+            // Clean up downloaded attachments older than archive timeout
+            let max_age_days = config.archive_timeout_hours / 24;
+            crate::router::cleanup_old_attachments(&config.workspace, max_age_days.max(1));
             next_archive = now + chrono::Duration::minutes(config.archive_check_interval_mins as i64);
         }
 

@@ -1386,6 +1386,37 @@ catclaw channel add telegram --token-env TELEGRAM_TOKEN
 ```
 
 `--activation`: `mention` (respond only when @mentioned) or `all` (respond to everything)
+
+---
+
+## Updates
+
+```bash
+catclaw update --check         # Check if a new version is available
+catclaw update                 # Download and install the latest version
+```
+
+After updating, if a system service is installed, it will be automatically restarted.
+
+---
+
+## Auto-Start (System Service)
+
+```bash
+catclaw gateway install        # Install as system service (auto-start on boot)
+catclaw gateway uninstall      # Remove the system service
+catclaw gateway status         # Also shows service status if installed
+```
+
+macOS uses launchd (`~/Library/LaunchAgents/com.catclaw.gateway.plist`), Linux uses systemd user service (`~/.config/systemd/user/catclaw.service`).
+
+---
+
+## Uninstall
+
+```bash
+catclaw uninstall              # Stop gateway, remove service, delete binary
+```
 "#;
 
 const SKILL_INJECTION_GUARD: &str = r#"---

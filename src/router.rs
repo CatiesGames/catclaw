@@ -1,12 +1,17 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::warn;
 use crate::agent::AgentRegistry;
 use crate::channel::{
-    split_at_boundaries, ChannelAdapter, MsgContext, OutboundMessage,
+    split_at_boundaries, Attachment, ChannelAdapter, MsgContext, OutboundMessage,
 };
 use crate::config::BindingConfig;
 use crate::error::Result;
 use crate::session::manager::{SenderInfo, SessionManager};
 use crate::session::{Priority, SessionKey};
+
+/// Maximum file size to auto-download (50 MB).
+const MAX_DOWNLOAD_SIZE: u64 = 50 * 1024 * 1024;
 
 /// Routes inbound messages to the correct agent and session
 pub struct MessageRouter {
@@ -15,6 +20,10 @@ pub struct MessageRouter {
     /// Bindings from catclaw.toml
     bindings: Vec<BindingEntry>,
     default_agent_id: String,
+    /// Workspace root for storing downloaded attachments
+    workspace: PathBuf,
+    /// HTTP client for downloading attachments
+    http_client: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +39,7 @@ impl MessageRouter {
         agent_registry: Arc<std::sync::RwLock<AgentRegistry>>,
         config_bindings: &[BindingConfig],
         default_agent_id: String,
+        workspace: PathBuf,
     ) -> Self {
         let mut bindings: Vec<BindingEntry> = config_bindings
             .iter()
@@ -48,6 +58,8 @@ impl MessageRouter {
             agent_registry,
             bindings,
             default_agent_id,
+            workspace,
+            http_client: reqwest::Client::new(),
         }
     }
 
@@ -121,7 +133,21 @@ impl MessageRouter {
             Priority::Mention
         };
 
-        // 6. Send to session and wait for response
+        // 6. Download attachments to workspace and build message with local paths
+        let message = if ctx.attachments.is_empty() {
+            ctx.text.clone()
+        } else {
+            let att_dir = self.workspace.join("attachments");
+            let _ = std::fs::create_dir_all(&att_dir);
+            let mut parts = vec![ctx.text.clone()];
+            for att in &ctx.attachments {
+                let meta = download_attachment(&self.http_client, att, &att_dir).await;
+                parts.push(format!("\n{}", meta));
+            }
+            parts.join("")
+        };
+
+        // Send to session and wait for response
         let sender = SenderInfo {
             sender_id: Some(ctx.sender_id.clone()),
             sender_name: Some(ctx.sender_name.clone()),
@@ -129,7 +155,7 @@ impl MessageRouter {
         };
         let response = self
             .session_manager
-            .send_and_wait(&session_key, &agent, &ctx.text, priority, &sender, None)
+            .send_and_wait(&session_key, &agent, &message, priority, &sender, None)
             .await?;
 
         // 7. Send response back through adapter (chunked if needed)
@@ -185,6 +211,122 @@ impl MessageRouter {
         }
 
         self.default_agent_id.clone()
+    }
+}
+
+/// Format a byte count into a human-readable string (e.g., "12.3 KB", "1.5 MB").
+fn format_file_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Download an attachment to the workspace and return a metadata string for the agent.
+/// Does NOT read the file content — only provides the local path so the agent can decide.
+async fn download_attachment(
+    client: &reqwest::Client,
+    att: &Attachment,
+    att_dir: &Path,
+) -> String {
+    let size_str = att.size.map(format_file_size).unwrap_or_else(|| "unknown size".into());
+    let type_str = att.content_type.as_deref().unwrap_or("unknown");
+
+    // Skip if too large
+    if let Some(size) = att.size {
+        if size > MAX_DOWNLOAD_SIZE {
+            return format!(
+                "[Attachment: {} ({}, {})]\n  Status: Too large to download (limit: {}). The user may need to share it another way.",
+                att.filename, size_str, type_str, format_file_size(MAX_DOWNLOAD_SIZE)
+            );
+        }
+    }
+
+    // Generate unique local filename: YYYY-MM-DD_{short_uuid}_{original_name}
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    let short_id = &uuid::Uuid::new_v4().to_string()[..8];
+    // Sanitize filename: keep only safe chars
+    let safe_name: String = att.filename.chars().map(|c| {
+        if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+            c
+        } else {
+            '_'
+        }
+    }).collect();
+    let local_name = format!("{}_{}_{}",date, short_id, safe_name);
+    let local_path = att_dir.join(&local_name);
+
+    // Download
+    match client.get(&att.url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.bytes().await {
+                Ok(bytes) => {
+                    if let Err(e) = std::fs::write(&local_path, &bytes) {
+                        warn!(error = %e, filename = %att.filename, "failed to save attachment");
+                        return format!(
+                            "[Attachment: {} ({}, {})]\n  Status: Download failed ({})",
+                            att.filename, size_str, type_str, e
+                        );
+                    }
+                    let actual_size = format_file_size(bytes.len() as u64);
+                    let abs_path = std::fs::canonicalize(&local_path)
+                        .unwrap_or(local_path);
+                    format!(
+                        "[Attachment: {} ({}, {})]\n  Path: {}",
+                        att.filename, actual_size, type_str, abs_path.display()
+                    )
+                }
+                Err(e) => {
+                    warn!(error = %e, filename = %att.filename, "failed to read attachment body");
+                    format!(
+                        "[Attachment: {} ({}, {})]\n  Status: Download failed ({})",
+                        att.filename, size_str, type_str, e
+                    )
+                }
+            }
+        }
+        Ok(resp) => {
+            format!(
+                "[Attachment: {} ({}, {})]\n  Status: Download failed (HTTP {})",
+                att.filename, size_str, type_str, resp.status()
+            )
+        }
+        Err(e) => {
+            warn!(error = %e, filename = %att.filename, "failed to download attachment");
+            format!(
+                "[Attachment: {} ({}, {})]\n  Status: Download failed ({})",
+                att.filename, size_str, type_str, e
+            )
+        }
+    }
+}
+
+/// Remove attachment files older than the given number of days.
+/// Called from the scheduler during archive cleanup.
+pub fn cleanup_old_attachments(workspace: &Path, max_age_days: u64) {
+    let att_dir = workspace.join("attachments");
+    if !att_dir.exists() {
+        return;
+    }
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(max_age_days * 86400);
+    if let Ok(entries) = std::fs::read_dir(&att_dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                let modified = meta.modified().unwrap_or(std::time::SystemTime::now());
+                if modified < cutoff {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
     }
 }
 

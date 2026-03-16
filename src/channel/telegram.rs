@@ -87,16 +87,108 @@ impl ChannelAdapter for TelegramAdapter {
 
         // Use teloxide dispatcher with long polling
         let handler = Update::filter_message().endpoint(
-            move |_bot: Bot, msg: teloxide::types::Message| {
+            move |bot: Bot, msg: teloxide::types::Message| {
                 let msg_tx = msg_tx.clone();
                 let filter_arc = filter_arc.clone();
                 let bot_username = bot_username.clone();
                 async move {
-                    // Ignore non-text messages for now
-                    let text = match msg.text() {
-                        Some(t) => t.to_string(),
-                        None => return Ok::<(), teloxide::RequestError>(()),
-                    };
+                    // Extract text: from text message or caption on media messages
+                    let text = msg
+                        .text()
+                        .or_else(|| msg.caption())
+                        .map(|t| t.to_string())
+                        .unwrap_or_default();
+
+                    // Collect attachments (document, photo, audio, video, voice)
+                    let mut attachments: Vec<super::Attachment> = Vec::new();
+
+                    if let Some(doc) = msg.document() {
+                        if let Ok(file) = bot.get_file(&doc.file.id).await {
+                            let url = format!(
+                                "https://api.telegram.org/file/bot{}/{}",
+                                bot.token(),
+                                file.path
+                            );
+                            attachments.push(super::Attachment {
+                                filename: doc.file_name.clone().unwrap_or_else(|| "document".into()),
+                                url,
+                                content_type: doc.mime_type.as_ref().map(|m| m.to_string()),
+                                size: Some(doc.file.size as u64),
+                            });
+                        }
+                    }
+
+                    if let Some(photos) = msg.photo() {
+                        // Use the largest photo (last in the array)
+                        if let Some(photo) = photos.last() {
+                            if let Ok(file) = bot.get_file(&photo.file.id).await {
+                                let url = format!(
+                                    "https://api.telegram.org/file/bot{}/{}",
+                                    bot.token(),
+                                    file.path
+                                );
+                                attachments.push(super::Attachment {
+                                    filename: "photo.jpg".into(),
+                                    url,
+                                    content_type: Some("image/jpeg".into()),
+                                    size: Some(photo.file.size as u64),
+                                });
+                            }
+                        }
+                    }
+
+                    if let Some(audio) = msg.audio() {
+                        if let Ok(file) = bot.get_file(&audio.file.id).await {
+                            let url = format!(
+                                "https://api.telegram.org/file/bot{}/{}",
+                                bot.token(),
+                                file.path
+                            );
+                            attachments.push(super::Attachment {
+                                filename: audio.file_name.clone().unwrap_or_else(|| "audio".into()),
+                                url,
+                                content_type: audio.mime_type.as_ref().map(|m| m.to_string()),
+                                size: Some(audio.file.size as u64),
+                            });
+                        }
+                    }
+
+                    if let Some(video) = msg.video() {
+                        if let Ok(file) = bot.get_file(&video.file.id).await {
+                            let url = format!(
+                                "https://api.telegram.org/file/bot{}/{}",
+                                bot.token(),
+                                file.path
+                            );
+                            attachments.push(super::Attachment {
+                                filename: video.file_name.clone().unwrap_or_else(|| "video".into()),
+                                url,
+                                content_type: video.mime_type.as_ref().map(|m| m.to_string()),
+                                size: Some(video.file.size as u64),
+                            });
+                        }
+                    }
+
+                    if let Some(voice) = msg.voice() {
+                        if let Ok(file) = bot.get_file(&voice.file.id).await {
+                            let url = format!(
+                                "https://api.telegram.org/file/bot{}/{}",
+                                bot.token(),
+                                file.path
+                            );
+                            attachments.push(super::Attachment {
+                                filename: "voice.ogg".into(),
+                                url,
+                                content_type: voice.mime_type.as_ref().map(|m| m.to_string()),
+                                size: Some(voice.file.size as u64),
+                            });
+                        }
+                    }
+
+                    // Skip messages with no text and no attachments
+                    if text.is_empty() && attachments.is_empty() {
+                        return Ok::<(), teloxide::RequestError>(());
+                    }
 
                     let chat_id_str = msg.chat.id.0.to_string();
                     let is_private = matches!(msg.chat.kind, ChatKind::Private { .. });
@@ -164,7 +256,7 @@ impl ChannelAdapter for TelegramAdapter {
                         sender_id,
                         sender_name,
                         text,
-                        attachments: vec![],
+                        attachments,
                         reply_to: msg.reply_to_message().map(|r| {
                             super::ReplyContext {
                                 message_id: r.id.0.to_string(),
@@ -209,6 +301,19 @@ impl ChannelAdapter for TelegramAdapter {
                         let answer = if approved { "✅ Approved" } else { "❌ Denied" };
                         if let Err(e) = bot.answer_callback_query(&q.id).text(answer).await {
                             error!(error = %e, "failed to answer callback query");
+                        }
+
+                        // Remove inline keyboard from original message
+                        if let Some(msg) = &q.message {
+                            let chat_id = msg.chat().id;
+                            let msg_id = msg.id();
+                            let empty_kb = InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new());
+                            if let Err(e) = bot.edit_message_reply_markup(chat_id, msg_id)
+                                .reply_markup(empty_kb)
+                                .await
+                            {
+                                error!(error = %e, "failed to remove approval keyboard");
+                            }
                         }
                     }
                     Ok::<(), teloxide::RequestError>(())

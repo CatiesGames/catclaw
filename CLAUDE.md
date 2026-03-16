@@ -41,18 +41,18 @@ if let Some(agent) = agent {
 ### ApprovalConfig Default
 `ApprovalConfig` has a manual `Default` impl that sets `timeout_secs = 120`. Do NOT use `#[derive(Default)]` — it would give `timeout_secs = 0`.
 
-### Hot-Reload 規範
-任何 agent 設定變更（tools、approval、model）不論來自 TUI 或 CLI，都必須：
-1. 寫入檔案（`tools.toml` + `catclaw.toml`）
-2. 呼叫 WS `agents.reload_tools` 通知 gateway 更新記憶體中的 `AgentRegistry`
+### Hot-Reload Rules
+Any agent config change (tools, approval, model), whether from TUI or CLI, must:
+1. Write to disk (`tools.toml` + `catclaw.toml`)
+2. Call WS `agents.reload_tools` to notify gateway to update the in-memory `AgentRegistry`
 
-`agents.reload_tools` handler 會從磁碟重新讀取 config 並同步到記憶體，涵蓋 approval、tools、model、fallback_model。
+The `agents.reload_tools` handler re-reads config from disk and syncs to memory, covering approval, tools, model, and fallback_model.
 
-**全域設定**（`config set` 系列）走 WS `config.set`，gateway 自動 hot-reload（adapter filters、log level 等）。`apply_config_set` 返回 `Ok(false)` 表示即時生效，`Ok(true)` 表示需要重啟。
+**Global settings** (`config set` family) go through WS `config.set`, and the gateway auto-reloads (adapter filters, log level, etc.). `apply_config_set` returns `Ok(false)` for immediate effect, `Ok(true)` for requires restart.
 
-**Bindings** 目前存在記憶體中的 `MessageRouter`，修改後需要重啟 gateway 才生效（CLI 和 TUI 行為一致）。
+**Bindings** currently live in the in-memory `MessageRouter`. Changes require a gateway restart to take effect (consistent between CLI and TUI).
 
-**設計原則**：CLI 和 TUI 修改同一項設定時，必須走完全相同的 hot-reload 路徑。不能一邊有通知 gateway 而另一邊沒有。
+**Design principle**: When CLI and TUI modify the same setting, they must follow the exact same hot-reload path. One side cannot notify the gateway while the other does not.
 
 ### Claude Code CLI Flags
 - `--dangerously-skip-permissions` does NOT skip hooks. Hooks (PreToolUse) still fire.
@@ -62,37 +62,37 @@ if let Some(agent) = agent {
 - `--tools` is the whitelist (only these tools available). `--disallowedTools` is the blacklist.
 - `--allowedTools` only controls permission prompts, NOT tool availability.
 
-### CLI 與 TUI 功能對等
-CatClaw 的 CLI（`catclaw` 命令）和 TUI（終端介面）必須能做到**完全相同的操作**。新增任何功能時，必須同時實作：
-- **CLI**（`src/main.rs` 的 subcommand + handler）— agent 透過 Bash tool 代替使用者執行
-- **TUI**（`src/tui/` 對應 panel）— 使用者直接在終端操作
-- **catclaw skill**（`src/agent/loader.rs` 的 `SKILL_CATCLAW`）— 更新 CLI 用法讓 agent 知道怎麼操作
-- **README.md** — 保持文件與實際功能同步
+### CLI / TUI Feature Parity
+CatClaw's CLI (`catclaw` commands) and TUI (terminal interface) must support **exactly the same operations**. When adding any feature, all of the following must be implemented:
+- **CLI** (`src/main.rs` subcommand + handler) — the agent's hands via Bash tool
+- **TUI** (`src/tui/` corresponding panel) — the user's hands via terminal
+- **catclaw skill** (`src/agent/loader.rs` `SKILL_CATCLAW` constant) — the agent's brain (CLI usage docs)
+- **README.md** — keep documentation in sync with actual features
 
-三者缺一不可。CLI 是 agent 的手，TUI 是使用者的手，skill 是 agent 的腦。
+All three are required. CLI is the agent's hands, TUI is the user's hands, skill is the agent's brain.
 
-### Global Plugins 會被載入
-`claude -p` 會自動載入使用者的 global plugins（`~/.claude/plugins/`），包括 pencil、LSP、playground 等。CatClaw 無法排除它們（沒有 `--exclude-plugin` flag）。影響：agent 的 tool 列表和 skill index 會包含不需要的項目，增加 token 消耗。目前無解，記錄待查。
+### Global Plugins Are Loaded
+`claude -p` automatically loads the user's global plugins (`~/.claude/plugins/`), including pencil, LSP, playground, etc. CatClaw cannot exclude them (no `--exclude-plugin` flag). Impact: agent tool lists and skill indexes will contain unnecessary items, increasing token consumption. No solution yet — noted for future investigation.
 
-### Skill 觸發是 Claude 自己判斷的
-Skills 不會自動觸發 — 系統 prompt 只包含 skill index（名稱 + 一行 description），Claude 自己根據 description 決定是否用 `/skill-name` 載入完整內容。如果某個 skill 需要**每次都生效**（如 injection-guard），應該把核心規則精簡版放進 AGENTS.md 或 TOOLS.md（每次都載入），完整版留在 skill 裡。
+### Skill Triggering Is Claude's Decision
+Skills are not auto-triggered — the system prompt only includes a skill index (name + one-line description), and Claude decides whether to use `/skill-name` to load the full content based on the description. If a skill needs to **always be active** (e.g., injection-guard), put a condensed version of the core rules in AGENTS.md or TOOLS.md (loaded every time), and keep the full version in the skill.
 
-### MCP Tools 權限限制（Claude Code CLI）
-- `--tools`（白名單）**只限制 built-in tools**，MCP tools 不受影響。
-- `--disallowedTools`（黑名單）可以擋 MCP tools（`mcp__pencil__*`），但需要列舉。
-- **Global MCP tools（使用者在 Claude Code 層面安裝的）會自動載入到所有 `claude -p` subprocess，CatClaw 無法控制也不該管理。** 這是 Claude Code CLI 的限制，不是 CatClaw 的責任。CatClaw 只管理自己注入的 MCP server（catclaw built-in）和 agent workspace 的 `.mcp.json`。
-- TUI Tools 清單分三區：Built-in Tools、CatClaw MCP Tools、User MCP Servers。不列 global MCP tools。
-- User MCP 跟 skills 一樣是共用 pool：定義放 `workspace/.mcp.json`，所有 agent 共用，各 agent 透過 denied list 控制啟用/禁用。
-- User MCP 目前以 server 為單位整體管理（`mcp__{server}__*`），因為 catclaw 沒有啟動 MCP server 查詢 `tools/list`。未來可改為啟動時查詢具體 tool 列表。
+### MCP Tools Permission Constraints (Claude Code CLI)
+- `--tools` (whitelist) **only restricts built-in tools**, MCP tools are unaffected.
+- `--disallowedTools` (blacklist) can block MCP tools (`mcp__pencil__*`), but requires enumeration.
+- **Global MCP tools (installed at the Claude Code level by the user) are automatically loaded into all `claude -p` subprocesses. CatClaw cannot control and should not manage them.** This is a Claude Code CLI limitation, not CatClaw's responsibility. CatClaw only manages its own injected MCP server (catclaw built-in) and the agent workspace's `.mcp.json`.
+- TUI Tools list has three sections: Built-in Tools, CatClaw MCP Tools, User MCP Servers. Global MCP tools are not listed.
+- User MCP is a shared pool like skills: definitions live in `workspace/.mcp.json`, shared by all agents, each agent controls enable/disable via denied list.
+- User MCP is currently managed at the server level (`mcp__{server}__*`), because catclaw does not start MCP servers to query `tools/list`. Future improvement: query specific tool lists at startup.
 
-### CLAUDE.md 會被 agent 看到
-Claude Code 自動向上搜尋 CLAUDE.md。如果 catclaw binary 在原始碼目錄中運行（如 `target/release/`），agent subprocess 會找到開發用的 CLAUDE.md 並載入。**正式部署時應確保 binary 不在原始碼樹下運行**，或在 workspace 目錄放一個空的 CLAUDE.md 阻斷向上搜尋。
+### CLAUDE.md Is Visible to Agents
+Claude Code automatically searches upward for CLAUDE.md. If the catclaw binary runs inside the source tree (e.g., `target/release/`), agent subprocesses will find and load the development CLAUDE.md. **For production deployment, ensure the binary does not run inside the source tree**, or place an empty CLAUDE.md in the workspace directory to block upward search.
 
-### tools.toml 三態設計
-每個 tool 只存在於一個清單中：`allowed`（直接可用）、`denied`（不可用）、`require_approval`（可用但需核准）。
-- `allowed` + `require_approval` 都會進 `--tools` 白名單（tool 必須「可用」才能被 hook 攔截）
-- `denied` 進 `--disallowedTools` 黑名單
-- `catclaw.toml` 的 `[agents.approval]` 只保留 `timeout_secs`（全域），tool 清單全在 `tools.toml`
+### tools.toml Three-State Design
+Each tool exists in exactly one list: `allowed` (directly usable), `denied` (unavailable), `require_approval` (usable but requires confirmation).
+- `allowed` + `require_approval` both go into the `--tools` whitelist (a tool must be "available" for the hook to intercept it)
+- `denied` goes into the `--disallowedTools` blacklist
+- `catclaw.toml`'s `[agents.approval]` only keeps `timeout_secs` (global); tool lists are entirely in `tools.toml`
 
 ### Serialization Gotchas
 - `ApprovalConfig.timeout_secs`: skip serializing if 120 or 0 (via `is_default_approval_timeout`).
@@ -116,60 +116,61 @@ Claude Code 自動向上搜尋 CLAUDE.md。如果 catclaw binary 在原始碼目
 | `src/config.rs` | `Config`, `ApprovalConfig`, `config_get`/`apply_config_set` |
 | `src/state.rs` | `StateDb` (SQLite WAL), `SessionRow` with platform ID helpers |
 | `src/approval.rs` | Approval types: `PendingApproval`, `ApprovalPendingEvent`, `HookInput` |
+| `src/dist.rs` | Self-update (GitHub Releases) + system service (launchd/systemd) + uninstall |
 | `src/cmd_hook.rs` | PreToolUse hook binary logic |
 | `src/tui/agents.rs` | TUI Agents panel: tools 3-state toggle (allowed/approval/denied) |
 | `src/tui/config_panel.rs` | TUI Config panel: editable settings including `approval.timeout_secs` |
 | `src/scheduler.rs` | Heartbeat, cron, archive cleanup |
 
-## 語言慣例
+## Language Conventions
 
-- **程式碼**：英文（變數名、函式名、struct 名、log message、程式碼註解）
-- **溝通與文件**：中文（與使用者對話、commit 描述、task 名稱、CLAUDE.md 中的說明）
-- **Skill 內容**：英文（agent 操作手冊，因為 Claude Code 主要是英文語境）
-- **README.md**：英文
+- **Code**: English (variable names, function names, struct names, log messages, code comments)
+- **Communication**: Chinese (conversations with the user, commit messages, task names)
+- **Skill content**: English (agent operation manuals, since Claude Code primarily operates in English)
+- **README.md**: English
 
-## 新增 Config Key Checklist
+## New Config Key Checklist
 
-加一個新的可設定項需要改以下所有地方：
+Adding a new configurable key requires changes in all of the following:
 
-1. `src/config.rs` — struct 欄位 + `config_get()` + `apply_config_set()` + serde attributes
-2. `src/tui/config_panel.rs` — `build_entries()` 加 `ConfigEntry` + `completions_for_key()` 如有選項
-3. `src/agent/loader.rs` — `SKILL_CATCLAW` 常量中的 config key 表格
-4. `README.md` — Configuration 段落
+1. `src/config.rs` — struct field + `config_get()` + `apply_config_set()` + serde attributes
+2. `src/tui/config_panel.rs` — `build_entries()` add `ConfigEntry` + `completions_for_key()` if options exist
+3. `src/agent/loader.rs` — `SKILL_CATCLAW` constant's config key table
+4. `README.md` — Configuration section
 
-如果是 per-agent 設定（不是全域）：
-1. `src/config.rs` — `AgentConfig` 或子 struct
-2. `src/tui/agents.rs` — 對應的 UI 操作
+For per-agent settings (not global):
+1. `src/config.rs` — `AgentConfig` or sub-struct
+2. `src/tui/agents.rs` — corresponding UI operation
 3. `src/main.rs` — CLI subcommand flag
-4. `src/ws_server.rs` — `handle_agents_reload_tools` 確保 hot-reload 涵蓋新欄位
-5. `src/agent/mod.rs` — `Agent` struct + `reload_agent_config()` + `claude_args_with_mcp()` 如影響啟動參數
+4. `src/ws_server.rs` — `handle_agents_reload_tools` must cover the new field in hot-reload
+5. `src/agent/mod.rs` — `Agent` struct + `reload_agent_config()` + `claude_args_with_mcp()` if it affects launch arguments
 
-## Embedded Skill 更新流程
+## Embedded Skill Update Flow
 
-Skills 是 `src/agent/loader.rs` 中的 `const` 字串常量，編譯進 binary。安裝到使用者 workspace 的時機：
-- `catclaw agent new` — 建立新 agent 時自動安裝所有 built-in skills
-- `catclaw onboard` — 初始化時安裝
+Skills are `const` string literals in `src/agent/loader.rs`, compiled into the binary. They are installed to the user's workspace at:
+- `catclaw agent new` — all built-in skills are auto-installed when creating a new agent
+- `catclaw onboard` — installed during initialization
 
-**更新 skill 內容後**：`cargo build --release` 產生新 binary，但已安裝的 workspace 檔案不會自動更新。需要手動覆蓋或刪除 `workspace/skills/{name}/SKILL.md` 讓下次 `agent new` 重建。
+**After updating skill content**: `cargo build --release` produces a new binary, but already-installed workspace files are not auto-updated. Manually overwrite or delete `workspace/skills/{name}/SKILL.md` so the next `agent new` recreates it.
 
 ## WS Protocol Methods
 
-Gateway WS server（`/ws`）支援的 JSON-RPC methods：
+JSON-RPC methods supported by the gateway WS server (`/ws`):
 
-| Method | 用途 | Hot-reload |
-|--------|------|-----------|
-| `gateway.status` | 查詢 agent 數量、active sessions | — |
+| Method | Purpose | Hot-reload |
+|--------|---------|-----------|
+| `gateway.status` | Query agent count, active sessions | — |
 | `sessions.list` / `.delete` / `.stop` | Session CRUD | — |
-| `sessions.send` | 發送訊息到 session（streaming/non-streaming）| — |
-| `sessions.transcript` | 讀取 session transcript | — |
-| `sessions.set_model` | 設定 session 的 model override | — |
-| `agents.list` / `.get` / `.default` | Agent 查詢 | — |
-| `agents.reload_tools` | Hot-reload agent config（tools、approval、model）| YES |
+| `sessions.send` | Send message to session (streaming/non-streaming) | — |
+| `sessions.transcript` | Read session transcript | — |
+| `sessions.set_model` | Set session model override | — |
+| `agents.list` / `.get` / `.default` | Agent queries | — |
+| `agents.reload_tools` | Hot-reload agent config (tools, approval, model) | YES |
 | `tasks.list` / `.enable` / `.disable` / `.delete` | Scheduled task CRUD | — |
-| `config.get` / `.set` | 全域設定讀寫 | YES（部分需重啟）|
-| `approval.request` / `.respond` / `.list` | Tool approval 流程 | — |
+| `config.get` / `.set` | Global config read/write | YES (some require restart) |
+| `approval.request` / `.respond` / `.list` | Tool approval flow | — |
 
-新增 WS method 時需更新此表和 `src/ws_server.rs` 的 `dispatch()` 函式。
+When adding a new WS method, update this table and the `dispatch()` function in `src/ws_server.rs`.
 
 ## Build & Test
 
@@ -181,7 +182,7 @@ cargo clippy         # Lint
 
 Always run `cargo check` after changes — zero errors AND zero warnings required.
 
-目前沒有 unit test — 驗證靠 `cargo check`（零錯誤零警告）+ 手動 TUI/CLI 測試。
+No unit tests currently — verification relies on `cargo check` (zero errors, zero warnings) + manual TUI/CLI testing.
 
 ## Dependencies (version constraints)
 
@@ -191,11 +192,11 @@ Always run `cargo check` after changes — zero errors AND zero warnings require
 
 ## Lessons Learned
 
-1. **TUI 直接寫檔不等於 gateway 生效** — 任何影響 gateway 記憶體狀態的改動（agent approval、tool permissions）必須透過 WS method 通知 gateway 做 hot-reload。
-2. **`#[derive(Default)]` 對含預設值的 config struct 是陷阱** — `u64` 的 Default 是 0，不是你想要的 120。手動 impl Default。
-3. **`std::sync::RwLockReadGuard` 不是 `Send`** — 不能跨 `.await` 持有。提取到 local variable 再 await。
-4. **approval hook 只在 `!approval.is_empty()` 時注入** — 如果 config 裡 `require_approval` 為空，`--settings` 不會加到 claude args，hook 不會觸發。
-5. **Config panel 和 Agents panel 的設定分工** — 全域設定（timeout_secs）放 Config panel，per-agent 設定（哪些 tool 需要 approval）放 Agents > Tools。
-6. **功能更新必須同步更新 skill** — catclaw skill（`src/agent/loader.rs` 中的 `SKILL_CATCLAW` 常量）是 agent 的操作手冊。任何新增功能（CLI flag、config key、TUI 操作）都必須反映在 skill 內容中，否則 agent 不知道怎麼教使用者操作。同理 README.md 也要保持同步。
-7. **`Arc<AgentRegistry>` 改為 `Arc<RwLock<AgentRegistry>>`** — 為了支持 hot-reload，registry 需要可變。讀取時用 `.read().unwrap()`，寫入時用 `.write().unwrap()`。所有涉及 `.get()` 的地方需要 `.cloned()` 取得 owned Agent 避免 guard 跨 await。
-8. **Hook subprocess 不能建立新 tokio runtime** — `catclaw hook pre-tool` 作為子進程執行時，`main` 已經是 `#[tokio::main]`（有 runtime）。在 `cmd_hook.rs` 中不能用 `tokio::runtime::Builder` 建立第二個 runtime，否則 panic。改用 `async fn` + `.await`。
+1. **Writing files from TUI does not mean the gateway picks it up** — any change affecting gateway in-memory state (agent approval, tool permissions) must notify the gateway via WS method for hot-reload.
+2. **`#[derive(Default)]` is a trap for config structs with custom defaults** — `u64`'s Default is 0, not the desired 120. Use manual `impl Default`.
+3. **`std::sync::RwLockReadGuard` is not `Send`** — cannot be held across `.await`. Extract to a local variable before awaiting.
+4. **Approval hook is only injected when `!approval.is_empty()`** — if `require_approval` in config is empty, `--settings` is not added to claude args and the hook does not fire.
+5. **Config panel vs Agents panel responsibility split** — global settings (timeout_secs) go in Config panel; per-agent settings (which tools need approval) go in Agents > Tools.
+6. **Feature updates must sync the skill** — the catclaw skill (`SKILL_CATCLAW` constant in `src/agent/loader.rs`) is the agent's operation manual. Any new feature (CLI flag, config key, TUI operation) must be reflected in the skill content, otherwise the agent won't know how to guide the user. Same applies to README.md.
+7. **`Arc<AgentRegistry>` changed to `Arc<RwLock<AgentRegistry>>`** — to support hot-reload, the registry must be mutable. Read with `.read().unwrap()`, write with `.write().unwrap()`. All `.get()` calls need `.cloned()` to get an owned `Agent` and avoid holding the guard across await.
+8. **Hook subprocess cannot create a new tokio runtime** — `catclaw hook pre-tool` runs as a subprocess where `main` is already `#[tokio::main]` (runtime exists). Using `tokio::runtime::Builder` in `cmd_hook.rs` to create a second runtime would panic. Use `async fn` + `.await` instead.

@@ -79,3 +79,6 @@ reqwest = { version = "0.12", features = ["json"] }
 
 # HTTP server (Gateway: WS + MCP on single port)
 axum = { version = "0.8", features = ["ws"] }
+
+# SHA256 checksum verification (for self-update)
+sha2 = "0.10"

@@ -4,6 +4,7 @@ mod channel;
 mod cmd_hook;
 mod cli_ui;
 mod config;
+mod dist;
 mod error;
 mod gateway;
 mod logging;
@@ -123,6 +124,16 @@ enum Commands {
         limit: usize,
     },
 
+    /// Check for updates or self-update CatClaw
+    Update {
+        /// Only check for updates, don't install
+        #[arg(long)]
+        check: bool,
+    },
+
+    /// Uninstall CatClaw (stop gateway, remove service, delete binary)
+    Uninstall,
+
     /// Interactive onboarding: setup wizard → start gateway → launch TUI
     Onboard,
 
@@ -158,6 +169,10 @@ enum GatewayCommands {
     Restart,
     /// Show gateway status
     Status,
+    /// Install as a system service (auto-start on boot)
+    Install,
+    /// Remove the system service
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -389,6 +404,51 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
+        Some(Commands::Update { check }) => {
+            if check {
+                match dist::check_update().await {
+                    Ok(Some(version)) => {
+                        cli_ui::status_msg("📦", &format!("Update available: v{} → run `catclaw update`", version));
+                    }
+                    Ok(None) => {
+                        let current = env!("CARGO_PKG_VERSION");
+                        cli_ui::status_msg("✅", &format!("Already up to date (v{})", current));
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to check for updates: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                match dist::perform_update().await {
+                    Ok(Some(version)) => {
+                        cli_ui::status_msg("✅", &format!("Updated to v{}", version));
+                        // Restart service if installed
+                        if dist::is_service_installed() {
+                            cli_ui::status_msg("🔄", "Restarting service...");
+                            if let Err(e) = dist::restart_service() {
+                                cli_ui::status_msg("⚠️", &format!("Service restart failed: {}", e));
+                            } else {
+                                cli_ui::status_msg("✅", "Service restarted");
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        let current = env!("CARGO_PKG_VERSION");
+                        cli_ui::status_msg("✅", &format!("Already up to date (v{})", current));
+                    }
+                    Err(e) => {
+                        eprintln!("Update failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+
+        Some(Commands::Uninstall) => {
+            dist::cmd_uninstall(&cli.config).await;
+        }
+
         Some(Commands::Onboard) => {
             // Unified startup: splash → onboard → ensure gateway → TUI
             tui::splash::print_splash_to_terminal();
@@ -410,24 +470,37 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
             cli_ui::status_msg("⏳", "Preparing gateway...");
 
-            // Check if a gateway is already running
+            // Check if a gateway is already running (via PID file or service)
             let pid_path = pidfile::pid_path(Some(&config));
             let our_pid = pidfile::read_pid(&pid_path);
             let gateway_running = our_pid
                 .map(|pid| pidfile::is_running(pid))
                 .unwrap_or(false);
 
+            // If service was just installed, it may be starting — wait for it
+            let service_managed = dist::is_service_installed();
+
             if !gateway_running {
-                // Port conflict check before spawning
-                if let Err(e) = check_port_conflict(ws_port, our_pid).await {
-                    eprintln!("{}", e);
-                    std::process::exit(1);
-                }
-                start_background_gateway_quiet(&cli.config)?;
-                let ready = wait_for_gateway(&ws_url, 150).await;
-                if !ready {
-                    eprintln!("Gateway failed to start within timeout.");
-                    std::process::exit(1);
+                if service_managed {
+                    // Service should be starting the gateway — just wait
+                    let ready = wait_for_gateway(&ws_url, 150).await;
+                    if !ready {
+                        eprintln!("Service-managed gateway failed to start within timeout.");
+                        eprintln!("Check logs: ~/Library/Logs/catclaw.error.log");
+                        std::process::exit(1);
+                    }
+                } else {
+                    // No service — spawn daemon manually
+                    if let Err(e) = check_port_conflict(ws_port, our_pid).await {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                    start_background_gateway_quiet(&cli.config)?;
+                    let ready = wait_for_gateway(&ws_url, 150).await;
+                    if !ready {
+                        eprintln!("Gateway failed to start within timeout.");
+                        std::process::exit(1);
+                    }
                 }
             } else {
                 // PID exists — verify WS port is actually reachable
@@ -523,6 +596,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Gateway { command }) => {
             match command {
                 GatewayCommands::Start { daemon } => {
+                    // Warn if service is managing the gateway
+                    if daemon && dist::is_service_installed() {
+                        cli_ui::status_msg("⚠️", "A system service is already managing the gateway.");
+                        cli_ui::status_msg("ℹ️", "Use `catclaw gateway uninstall` to remove it first, or `catclaw gateway restart` to restart the service.");
+                        std::process::exit(1);
+                    }
                     load_dotenv();
                     let config = Config::load(&cli.config)?;
                     let ws_port = config.general.port;
@@ -540,6 +619,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 }
 
                 GatewayCommands::Stop => {
+                    if dist::is_service_installed() {
+                        cli_ui::status_msg("⚠️", "Gateway is managed by a system service (it will auto-restart).");
+                        cli_ui::status_msg("ℹ️", "To stop permanently: catclaw gateway uninstall");
+                    }
                     let config = if cli.config.exists() {
                         Some(Config::load(&cli.config)?)
                     } else {
@@ -550,20 +633,32 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 }
 
                 GatewayCommands::Restart => {
-                    load_dotenv();
-                    let config = Config::load(&cli.config)?;
-                    let pid_path = pidfile::pid_path(Some(&config));
-                    // Stop if running
-                    cmd_gateway_stop(&pid_path);
-                    // Brief pause before restart
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    // Check port then start
-                    let our_pid = pidfile::read_pid(&pid_path);
-                    if let Err(e) = check_port_conflict(config.general.port, our_pid).await {
-                        eprintln!("{}", e);
-                        std::process::exit(1);
+                    if dist::is_service_installed() {
+                        // Service-managed: use service restart
+                        cli_ui::status_msg("🔄", "Restarting via system service...");
+                        match dist::restart_service() {
+                            Ok(()) => cli_ui::status_msg("✅", "Gateway restarted"),
+                            Err(e) => {
+                                eprintln!("Service restart failed: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        load_dotenv();
+                        let config = Config::load(&cli.config)?;
+                        let pid_path = pidfile::pid_path(Some(&config));
+                        // Stop if running
+                        cmd_gateway_stop(&pid_path);
+                        // Brief pause before restart
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        // Check port then start
+                        let our_pid = pidfile::read_pid(&pid_path);
+                        if let Err(e) = check_port_conflict(config.general.port, our_pid).await {
+                            eprintln!("{}", e);
+                            std::process::exit(1);
+                        }
+                        start_background_gateway(&cli.config)?;
                     }
-                    start_background_gateway(&cli.config)?;
                 }
 
                 GatewayCommands::Status => {
@@ -583,6 +678,38 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         }
                         None => {
                             cli_ui::status_msg("⚪", "Gateway not running");
+                        }
+                    }
+                    // Also show service status
+                    if dist::is_service_installed() {
+                        match dist::service_status() {
+                            Ok(status) => println!("{}", status),
+                            Err(e) => cli_ui::status_msg("⚠️", &format!("Service check failed: {}", e)),
+                        }
+                    }
+                }
+
+                GatewayCommands::Install => {
+                    let config_path = if cli.config.exists() {
+                        std::fs::canonicalize(&cli.config).unwrap_or(cli.config.clone())
+                    } else {
+                        cli.config.clone()
+                    };
+                    match dist::service_install(&config_path) {
+                        Ok(()) => cli_ui::status_msg("✅", "Service installed (gateway will auto-start on boot)"),
+                        Err(e) => {
+                            eprintln!("Failed to install service: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+
+                GatewayCommands::Uninstall => {
+                    match dist::service_uninstall() {
+                        Ok(()) => cli_ui::status_msg("✅", "Service uninstalled"),
+                        Err(e) => {
+                            eprintln!("Failed to uninstall service: {}", e);
+                            std::process::exit(1);
                         }
                     }
                 }
@@ -1413,6 +1540,21 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
 
     println!();
     cli_ui::status_msg("✅", "Configuration saved");
+
+    // ── Optional: install as system service ───────────────────────────
+    println!();
+    if cli_ui::section_confirm("Enable auto-start on boot? (runs as background service)", false) {
+        let abs_config = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.clone());
+        match dist::service_install(&abs_config) {
+            Ok(()) => cli_ui::status_msg("✅", "Service installed (gateway will start on boot)"),
+            Err(e) => {
+                cli_ui::status_msg("⚠️", &format!("Service install failed: {}", e));
+                cli_ui::section_hint("You can try again later: catclaw gateway install");
+            }
+        }
+    } else {
+        cli_ui::section_hint("You can enable it later: catclaw gateway install");
+    }
 
     Ok(config)
 }

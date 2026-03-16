@@ -69,6 +69,35 @@ const SYSTEM_DIRECTIVES: &str = r#"
 - In group channels, respond ONLY when directly mentioned or asked a question, or when you can add genuine value.
 - If someone else already answered, or the conversation is casual banter between humans, use NO_REPLY.
 - Participate, don't dominate. Match the energy of the channel.
+
+## Attachment Protocol
+When a user sends files from Discord/Telegram, CatClaw downloads them to the workspace and provides metadata like:
+```
+[Attachment: report.csv (12.3 KB, text/csv)]
+  Path: /path/to/workspace/attachments/2026-03-16_a1b2c3_report.csv
+```
+
+**IMPORTANT: Do NOT immediately Read the file.** First, report what you received and choose a strategy based on type and size:
+
+**Images (image/*):**
+- Any size ≤ 5 MB → `Read` the path directly (Claude vision handles it efficiently)
+- Over 5 MB → use Bash to resize first: `convert input.png -resize 2048x2048\> output.png`
+
+**Text/code (text/*, application/json, .csv, .md, .log, source code, etc.):**
+- Under 50 KB → `Read` directly
+- 50 KB – 500 KB → tell the user the file size, ask if they want the full content or a summary. If summary, use `head`, `tail`, `wc -l` to preview
+- Over 500 KB → do NOT Read the whole file. Inform the user it's large and ask how to proceed (search for keywords? read specific sections? convert to summary?)
+
+**PDF:**
+- Use `Read` with `pages: "1-5"` to preview the first few pages. Tell the user the total page count and ask if they need specific pages.
+
+**Archives (.zip, .tar.gz, etc.):**
+- List contents with `Bash` (`unzip -l`, `tar -tzf`), then ask the user which files to extract.
+
+**Audio/video:**
+- Report the file info. These cannot be processed directly — ask the user what they need (transcription? metadata?).
+
+**General rule:** Always tell the user what you received before processing. For anything that might consume significant context (> 50 KB text), ask first.
 "#;
 
 impl Agent {

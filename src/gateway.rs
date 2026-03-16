@@ -87,6 +87,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         agent_registry.clone(),
         &config.bindings,
         default_agent_id,
+        config.general.workspace.clone(),
     ));
 
     // 6. Create message channel
@@ -178,6 +179,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
             heartbeat_interval_mins: config.heartbeat.as_ref().map_or(30, |h| h.interval_mins),
             archive_timeout_hours: config.general.session_archive_timeout_hours,
             archive_check_interval_mins: 360, // every 6 hours
+            workspace: config.general.workspace.clone(),
         };
         let sched_db = state_db.clone();
         let sched_agents = agent_registry.clone();

@@ -97,13 +97,39 @@ pub async fn run_pre_tool(config_path: &Path, session_key: &str) -> ! {
     let approved = request_approval(&config, session_key, &hook_input, approval.timeout_secs).await;
 
     if approved {
+        // hookSpecificOutput JSON: additionalContext is added to Claude's context
+        // See: https://docs.anthropic.com/en/docs/claude-code/hooks
+        println!(
+            "{}",
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": format!("Approved by user (CatClaw approval system)"),
+                    "additionalContext": format!(
+                        "Tool '{}' was approved by the user through CatClaw's approval system. The user reviewed the tool call and explicitly approved it.",
+                        tool
+                    )
+                }
+            })
+        );
         std::process::exit(0);
     } else {
-        eprintln!(
-            "Tool '{}' was not approved. The user can approve this in the TUI (Ctrl+A) or the originating channel.",
-            tool
+        // hookSpecificOutput with deny: permissionDecisionReason is shown to Claude
+        println!(
+            "{}",
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": format!(
+                        "Tool '{}' was explicitly denied by the user through CatClaw's approval system. Do not retry this tool call without asking the user first.",
+                        tool
+                    )
+                }
+            })
         );
-        std::process::exit(2);
+        std::process::exit(0);
     }
 }
 
@@ -124,7 +150,7 @@ async fn request_approval(
         }
     };
 
-    let request_id = uuid_v4();
+    let request_id = uuid::Uuid::new_v4().to_string();
 
     let params = serde_json::json!({
         "request_id": request_id,
@@ -165,27 +191,3 @@ async fn request_approval(
     }
 }
 
-/// Generate a simple UUID v4 without external dependencies.
-fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut h = DefaultHasher::new();
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().hash(&mut h);
-    std::process::id().hash(&mut h);
-    let a = h.finish();
-    let mut h2 = DefaultHasher::new();
-    a.hash(&mut h2);
-    std::thread::current().id().hash(&mut h2);
-    let b = h2.finish();
-
-    format!(
-        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-        (a >> 32) as u32,
-        (a >> 16) as u16,
-        a as u16 & 0x0fff,
-        (b >> 48) as u16 | 0x8000,
-        b & 0x0000_ffff_ffff_ffff,
-    )
-}
