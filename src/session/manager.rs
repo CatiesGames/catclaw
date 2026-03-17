@@ -165,7 +165,8 @@ impl SessionManager {
                         // Log transcript
                         let transcript =
                             TranscriptLog::open(&agent.workspace, final_id).await?;
-                        transcript.log_system("session_created (with BOOT.md)").await;
+                        let (ch_type, ch_name) = parse_session_key_channel(&session_key);
+                        transcript.log_session_start(&session_key, ch_type, None, ch_name).await;
                         transcript
                             .log_user(
                                 message,
@@ -252,7 +253,8 @@ impl SessionManager {
         // Log transcript
         let transcript = TranscriptLog::open(&agent.workspace, final_id).await?;
         if !is_resume {
-            transcript.log_system("session_created").await;
+            let (ch_type, ch_name) = parse_session_key_channel(&session_key);
+            transcript.log_session_start(&session_key, ch_type, None, ch_name).await;
         }
         transcript
             .log_user(
@@ -426,7 +428,8 @@ impl SessionManager {
             let transcript = TranscriptLog::open(&agent_workspace, &session_id_owned).await.ok();
             if let Some(ref t) = transcript {
                 if !is_resume {
-                    t.log_system("session_created").await;
+                    let (ch_type, ch_name) = parse_session_key_channel(&session_key_owned);
+                    t.log_session_start(&session_key_owned, ch_type, None, ch_name).await;
                 }
                 t.log_user(&message_owned, sender_id.as_deref(), sender_name.as_deref()).await;
             }
@@ -751,5 +754,17 @@ impl SessionManager {
 
     pub fn queue_depth(&self) -> usize {
         self.queue.available_permits()
+    }
+}
+
+/// Extract channel type and name from a session key string.
+/// Key format: `catclaw:{agent_id}:{origin}:{context_id}`
+/// Returns (Some(origin), Some(context_id)) or (None, None).
+fn parse_session_key_channel(key: &str) -> (Option<&str>, Option<&str>) {
+    let parts: Vec<&str> = key.splitn(4, ':').collect();
+    if parts.len() >= 4 {
+        (Some(parts[2]), Some(parts[3]))
+    } else {
+        (None, None)
     }
 }
