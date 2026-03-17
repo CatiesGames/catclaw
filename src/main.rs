@@ -144,6 +144,9 @@ enum Commands {
     /// Interactive onboarding: setup wizard → start gateway → launch TUI
     Onboard,
 
+    /// Show version information
+    Version,
+
     /// Internal hooks called by Claude Code (not for direct user use)
     #[command(hide = true)]
     Hook {
@@ -1039,6 +1042,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+        }
+
+        Some(Commands::Version) => {
+            println!("catclaw {}", env!("CARGO_PKG_VERSION"));
         }
 
         Some(Commands::Hook { command }) => {

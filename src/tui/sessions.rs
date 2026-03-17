@@ -29,7 +29,9 @@ const MODEL_COMPLETIONS: &[&str] = &["opus", "sonnet", "haiku", "clear", "defaul
 enum Mode {
     /// Session list
     List,
-    /// Chat — full panel with inline input
+    /// Chat browse — viewing chat history, scroll with Up/Down, Enter to focus input
+    ChatBrowse,
+    /// Chat input — textarea is focused, typing and editing, Esc to return to browse
     Chat,
 }
 
@@ -275,7 +277,7 @@ impl SessionsPanel {
             if s.origin == "tui" && s.context_id == "default" {
                 self.selected = idx;
                 self.load_transcript();
-                self.mode = Mode::Chat;
+                self.mode = Mode::ChatBrowse;
                 return;
             }
         }
@@ -408,7 +410,7 @@ impl SessionsPanel {
                     });
                     self.messages.clear();
                     self.chat_scroll = 0;
-                    self.mode = Mode::Chat;
+                    self.mode = Mode::ChatBrowse;
                 }
                 ChatEvent::NewSessionQuiet(agent_id) => {
                     let key = format!("catclaw:{}:tui:default", agent_id);
@@ -917,7 +919,7 @@ impl Component for SessionsPanel {
 
                     if pending_at_0 {
                         // Enter pending session directly
-                        self.mode = Mode::Chat;
+                        self.mode = Mode::ChatBrowse;
                     } else if !self.sessions.is_empty() {
                         // Adjust selected for DB sessions if pending is prepended
                         if self.selected != session_idx {
@@ -926,7 +928,7 @@ impl Component for SessionsPanel {
                         if !self.loading {
                             self.load_transcript();
                         }
-                        self.mode = Mode::Chat;
+                        self.mode = Mode::ChatBrowse;
                     }
                     Action::None
                 }
@@ -958,14 +960,87 @@ impl Component for SessionsPanel {
                 }
                 _ => Action::None,
             },
-            Mode::Chat => {
-                // Ctrl+K: stop the running session (kill claude process)
+            Mode::ChatBrowse => {
+                // Ctrl+K: stop the running session
                 if event.code == KeyCode::Char('k') && event.modifiers.contains(KeyModifiers::CONTROL) {
                     if self.loading {
                         self.stop_current_session();
                         self.loading = false;
                         self.loading_since = None;
-                        // Finalize any streaming message
+                        if let Some(last) = self.messages.last_mut() {
+                            if last.streaming {
+                                last.streaming = false;
+                            }
+                        }
+                        let now = chrono::Utc::now();
+                        self.messages.push(ChatMessage {
+                            sender: "system".to_string(),
+                            text: "Session stopped.".to_string(),
+                            is_user: false,
+                            timestamp: now.format("%H:%M").to_string(),
+                            streaming: false,
+                        });
+                    }
+                    return Action::None;
+                }
+
+                match event.code {
+                    // Enter → focus input
+                    KeyCode::Enter => {
+                        // If pending approval and no text, confirm approval
+                        if !self.pending_approvals.is_empty() {
+                            self.respond_approval(self.approval_choice == 0);
+                            self.approval_choice = 0;
+                        } else {
+                            self.mode = Mode::Chat;
+                        }
+                        Action::None
+                    }
+                    // Esc → back to session list
+                    KeyCode::Esc => {
+                        self.mode = Mode::List;
+                        self.refresh();
+                        Action::None
+                    }
+                    // Up/Down → scroll chat history
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.chat_scroll = self.chat_scroll.saturating_sub(1);
+                        Action::None
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.chat_scroll = self.chat_scroll.saturating_add(1);
+                        Action::None
+                    }
+                    KeyCode::PageUp => {
+                        self.chat_scroll = self.chat_scroll.saturating_sub(10);
+                        Action::None
+                    }
+                    KeyCode::PageDown => {
+                        self.chat_scroll = self.chat_scroll.saturating_add(10);
+                        Action::None
+                    }
+                    // Approval interaction
+                    KeyCode::Tab | KeyCode::Left | KeyCode::Right if !self.pending_approvals.is_empty() => {
+                        self.approval_choice = 1 - self.approval_choice;
+                        Action::None
+                    }
+                    // Any printable character → jump to input mode and type
+                    KeyCode::Char(c) if !event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.mode = Mode::Chat;
+                        self.textarea.input(KeyEvent::new(KeyCode::Char(c), event.modifiers));
+                        self.update_slash_completions();
+                        Action::None
+                    }
+                    _ => Action::None,
+                }
+            }
+            Mode::Chat => {
+                // Ctrl+K: stop the running session
+                if event.code == KeyCode::Char('k') && event.modifiers.contains(KeyModifiers::CONTROL) {
+                    if self.loading {
+                        self.stop_current_session();
+                        self.loading = false;
+                        self.loading_since = None;
                         if let Some(last) = self.messages.last_mut() {
                             if last.streaming {
                                 last.streaming = false;
@@ -1008,18 +1083,17 @@ impl Component for SessionsPanel {
                 // Enter sends; Shift+Enter inserts newline
                 if event.code == KeyCode::Enter {
                     if event.modifiers.contains(KeyModifiers::SHIFT) {
-                        // Shift+Enter → newline (pass to textarea below)
+                        // Shift+Enter → newline
                         self.textarea.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
                         self.update_slash_completions();
                         return Action::None;
                     }
-                    // If there are slash completions visible, Enter accepts the completion
-                    // and stays in input mode (lets user continue typing or send again)
+                    // Slash completion accept
                     if !self.slash_completions.is_empty() {
                         self.accept_slash_completion();
                         return Action::None;
                     }
-                    // Plain Enter with empty input + pending approval → confirm approval choice
+                    // Plain Enter with empty input + pending approval → confirm
                     let text: String = self.textarea.lines().join("\n").trim().to_string();
                     if text.is_empty() && !self.pending_approvals.is_empty() {
                         self.respond_approval(self.approval_choice == 0);
@@ -1050,7 +1124,6 @@ impl Component for SessionsPanel {
                             });
                             self.textarea = make_textarea();
                         } else {
-                            // All other text (including /skill-name) → send to claude
                             self.send_message(text);
                             self.textarea = make_textarea();
                         }
@@ -1060,17 +1133,15 @@ impl Component for SessionsPanel {
                     return Action::None;
                 }
 
-                // Esc goes back to list (does NOT interrupt background work)
+                // Esc → back to chat browse (not list)
                 if event.code == KeyCode::Esc {
-                    self.mode = Mode::List;
+                    self.mode = Mode::ChatBrowse;
                     self.slash_completions.clear();
                     self.slash_idx = 0;
-                    // Don't clear pending_session or loading — background work continues
-                    self.refresh();
                     return Action::None;
                 }
 
-                // Chat scroll: PageUp / PageDown
+                // Chat scroll: PageUp / PageDown (always available)
                 match event.code {
                     KeyCode::PageUp => {
                         self.chat_scroll = self.chat_scroll.saturating_sub(10);
@@ -1080,27 +1151,16 @@ impl Component for SessionsPanel {
                         self.chat_scroll = self.chat_scroll.saturating_add(10);
                         return Action::None;
                     }
-                    // Ctrl+Up / Ctrl+Down for line-by-line scroll
-                    KeyCode::Up if event.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.chat_scroll = self.chat_scroll.saturating_sub(1);
-                        return Action::None;
-                    }
-                    KeyCode::Down if event.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.chat_scroll = self.chat_scroll.saturating_add(1);
-                        return Action::None;
-                    }
                     _ => {}
                 }
 
                 // Approval interaction (when there are pending approvals)
                 if !self.pending_approvals.is_empty() {
                     match (event.modifiers, event.code) {
-                        // Left/Right/Tab toggles approve/deny selection
                         (_, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Left) | (KeyModifiers::NONE, KeyCode::Right) => {
                             self.approval_choice = 1 - self.approval_choice;
                             return Action::None;
                         }
-                        // Ctrl+J/K to switch between multiple pending approvals
                         (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
                             if self.approval_selected + 1 < self.pending_approvals.len() {
                                 self.approval_selected += 1;
@@ -1117,7 +1177,7 @@ impl Component for SessionsPanel {
                     }
                 }
 
-                // Pass other input to textarea
+                // Pass other input to textarea (Up/Down move cursor within textarea)
                 self.textarea.input(*event);
                 self.update_slash_completions();
                 Action::None
@@ -1126,7 +1186,7 @@ impl Component for SessionsPanel {
     }
 
     fn captures_input(&self) -> bool {
-        matches!(self.mode, Mode::Chat)
+        matches!(self.mode, Mode::Chat | Mode::ChatBrowse)
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -1141,7 +1201,7 @@ impl Component for SessionsPanel {
 
         match &self.mode {
             Mode::List => self.render_list(frame, area),
-            Mode::Chat => self.render_chat_view(frame, area),
+            Mode::ChatBrowse | Mode::Chat => self.render_chat_view(frame, area),
         }
     }
 }
@@ -1253,7 +1313,9 @@ impl SessionsPanel {
         let has_approval = !self.pending_approvals.is_empty();
         // Layout: [chat messages] [approval inline?] [input line] [help bar]
         let approval_height = if has_approval { 7u16 } else { 0u16 };
-        let input_height = 3u16;
+        // Dynamic input height: 1 line per textarea line + 2 for border, capped at 10
+        let content_lines = self.textarea.lines().len().max(1) as u16;
+        let input_height = (content_lines + 2).min(10);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1282,10 +1344,16 @@ impl SessionsPanel {
             .map(|m| format!(" [{}]", models::model_display_name(&m)))
             .unwrap_or_default();
 
+        let chat_focused = matches!(self.mode, Mode::ChatBrowse);
+        let chat_border = if chat_focused {
+            Style::default().fg(Theme::MAUVE)
+        } else {
+            Style::default().fg(Theme::SURFACE1)
+        };
         let chat_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Theme::SURFACE1))
+            .border_style(chat_border)
             .title(format!(" {}{} ", agent_name, model_label))
             .title_style(Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD));
 
@@ -1317,10 +1385,21 @@ impl SessionsPanel {
         }
 
         // ── Input area ──
+        let input_focused = matches!(self.mode, Mode::Chat);
         let input_border = if self.loading {
             Style::default().fg(Theme::SURFACE2)
-        } else {
+        } else if input_focused {
             Style::default().fg(Theme::MAUVE)
+        } else {
+            Style::default().fg(Theme::SURFACE1)
+        };
+
+        let input_title = if self.loading {
+            " Waiting... "
+        } else if input_focused {
+            " > "
+        } else {
+            " Enter to type "
         };
 
         self.textarea.set_block(
@@ -1328,7 +1407,7 @@ impl SessionsPanel {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(input_border)
-                .title(if self.loading { " Waiting... " } else { " > " })
+                .title(input_title)
                 .title_style(input_border)
                 .padding(Padding::horizontal(1)),
         );
@@ -1445,16 +1524,27 @@ impl SessionsPanel {
         }
 
         // ── Help bar ──
-        let mut help_spans = vec![
-            Span::styled(" Enter", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-            Span::styled(" Send  ", Style::default().fg(Theme::OVERLAY0)),
-            Span::styled("⇧Enter", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-            Span::styled(" Newline  ", Style::default().fg(Theme::OVERLAY0)),
-            Span::styled("Fn↑↓", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-            Span::styled(" Scroll  ", Style::default().fg(Theme::OVERLAY0)),
-            Span::styled("Esc", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-            Span::styled(" Back", Style::default().fg(Theme::OVERLAY0)),
-        ];
+        let mut help_spans = if input_focused {
+            vec![
+                Span::styled(" Enter", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::styled(" Send  ", Style::default().fg(Theme::OVERLAY0)),
+                Span::styled("⇧Enter", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::styled(" Newline  ", Style::default().fg(Theme::OVERLAY0)),
+                Span::styled("Fn↑↓", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::styled(" Scroll  ", Style::default().fg(Theme::OVERLAY0)),
+                Span::styled("Esc", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::styled(" Browse", Style::default().fg(Theme::OVERLAY0)),
+            ]
+        } else {
+            vec![
+                Span::styled(" ↑↓", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::styled(" Scroll  ", Style::default().fg(Theme::OVERLAY0)),
+                Span::styled("Enter", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::styled(" Type  ", Style::default().fg(Theme::OVERLAY0)),
+                Span::styled("Esc", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::styled(" Back", Style::default().fg(Theme::OVERLAY0)),
+            ]
+        };
         if self.loading {
             help_spans.push(Span::styled("  ⌃K", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)));
             help_spans.push(Span::styled(" Stop", Style::default().fg(Theme::OVERLAY0)));

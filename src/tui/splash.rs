@@ -56,8 +56,8 @@ pub fn print_splash_to_terminal() {
         println!("{}{}{}", color, line, ANSI_RESET);
     }
     println!(
-        "{}  v0.1.0{}  •  {}Personal AI Gateway powered by Claude Code{}",
-        ANSI_DIM, ANSI_RESET, ANSI_DIM, ANSI_RESET
+        "{}  v{}{}  •  {}Personal AI Gateway powered by Claude Code{}",
+        ANSI_DIM, env!("CARGO_PKG_VERSION"), ANSI_RESET, ANSI_DIM, ANSI_RESET
     );
     println!(
         "{}  Multi-agent • Multi-channel • Always-on{}",
@@ -122,7 +122,7 @@ pub fn render_splash(frame: &mut Frame, area: Rect, tick: u16) {
     let info_y = y_offset + logo_height + 1;
     if info_y + 7 < area.height {
         let version_line = Line::from(vec![
-            Span::styled("v0.1.0", Style::default().fg(Theme::OVERLAY1)),
+            Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(Theme::OVERLAY1)),
             Span::styled("  •  ", Style::default().fg(Theme::SURFACE2)),
             Span::styled(
                 "Personal AI Gateway powered by Claude Code",

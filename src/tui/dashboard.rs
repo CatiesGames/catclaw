@@ -289,7 +289,7 @@ fn render_gateway_status(
             format!("{} active session(s)", active_sessions),
             Style::default().fg(Theme::SUBTEXT0),
         ),
-        Span::styled("  v0.1.0", Style::default().fg(Theme::SURFACE2)),
+        Span::styled(format!("  v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(Theme::SURFACE2)),
     ]);
 
     let block = Block::default()

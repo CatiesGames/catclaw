@@ -496,7 +496,7 @@ impl App {
             ),
             Span::styled("│ ", Style::default().fg(Theme::SURFACE1).bg(Theme::MANTLE)),
             Span::styled(
-                "v0.1.0 ",
+                format!("v{} ", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(Theme::SURFACE2).bg(Theme::MANTLE),
             ),
         ];
