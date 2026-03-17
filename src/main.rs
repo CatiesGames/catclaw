@@ -323,6 +323,9 @@ enum TaskCommands {
         /// Repeat interval in minutes (e.g., 60 for hourly)
         #[arg(long)]
         every: Option<i64>,
+        /// Absolute time to run (ISO 8601, RFC 3339, or HH:MM / HH:MM:SS for today UTC)
+        #[arg(long)]
+        at: Option<String>,
     },
     /// Enable a task
     Enable {
@@ -892,8 +895,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     in_mins,
                     cron,
                     every,
+                    at,
                 } => {
-                    cmd_task_add(&state_db, &name, &agent, &prompt, in_mins, cron, every)?;
+                    cmd_task_add(&state_db, &name, &agent, &prompt, in_mins, cron, every, at)?;
                 }
                 TaskCommands::Enable { id } => {
                     state_db.enable_task(id)?;
@@ -2061,6 +2065,38 @@ fn cmd_task_list(state_db: &StateDb) -> Result<()> {
     Ok(())
 }
 
+/// Parse an `--at` time string into a UTC DateTime.
+/// Tries in order: ISO 8601, RFC 3339, HH:MM:SS (today UTC), HH:MM (today UTC).
+fn parse_at_time(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    use chrono::{NaiveTime, Utc, TimeZone};
+
+    // Try ISO 8601 / RFC 3339 (with timezone)
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    // Try ISO 8601 without timezone (assume UTC)
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return Ok(Utc.from_utc_datetime(&ndt));
+    }
+    // Try HH:MM:SS (today UTC)
+    if let Ok(t) = NaiveTime::parse_from_str(s, "%H:%M:%S") {
+        let today = Utc::now().date_naive();
+        let ndt = today.and_time(t);
+        return Ok(Utc.from_utc_datetime(&ndt));
+    }
+    // Try HH:MM (today UTC)
+    if let Ok(t) = NaiveTime::parse_from_str(s, "%H:%M") {
+        let today = Utc::now().date_naive();
+        let ndt = today.and_time(t);
+        return Ok(Utc.from_utc_datetime(&ndt));
+    }
+    Err(crate::error::CatClawError::Config(format!(
+        "cannot parse --at time '{}'. Expected ISO 8601 (2026-03-20T09:00:00), RFC 3339, HH:MM, or HH:MM:SS",
+        s
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_task_add(
     state_db: &StateDb,
     name: &str,
@@ -2069,11 +2105,38 @@ fn cmd_task_add(
     in_mins: Option<u64>,
     cron: Option<String>,
     every: Option<i64>,
+    at: Option<String>,
 ) -> Result<()> {
     let now = chrono::Utc::now();
 
+    // Validate mutual exclusivity
+    if at.is_some() && (cron.is_some() || every.is_some() || in_mins.is_some()) {
+        return Err(crate::error::CatClawError::Config(
+            "--at cannot be combined with --cron, --every, or --in-mins".to_string(),
+        ));
+    }
+    if cron.is_some() && every.is_some() {
+        return Err(crate::error::CatClawError::Config(
+            "--cron and --every are mutually exclusive".to_string(),
+        ));
+    }
+    if cron.is_some() && in_mins.is_some() {
+        return Err(crate::error::CatClawError::Config(
+            "--cron cannot be combined with --in-mins".to_string(),
+        ));
+    }
+
     // Determine schedule type and next_run_at
-    let (cron_expr, interval_mins, next_run_at) = if let Some(ref cron_str) = cron {
+    let (cron_expr, interval_mins, next_run_at) = if let Some(ref at_str) = at {
+        // Absolute time one-shot
+        let target = parse_at_time(at_str)?;
+        if target <= now {
+            return Err(crate::error::CatClawError::Config(
+                format!("--at time '{}' is in the past", at_str),
+            ));
+        }
+        (None, None, target.to_rfc3339())
+    } else if let Some(ref cron_str) = cron {
         // Validate cron expression
         let parsed = croner::Cron::new(cron_str).parse().map_err(|e| {
             crate::error::CatClawError::Config(format!("invalid cron expression: {}", e))
