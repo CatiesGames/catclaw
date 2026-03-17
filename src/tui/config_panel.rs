@@ -118,6 +118,12 @@ impl ConfigPanel {
                 editable: true,
             },
             ConfigEntry {
+                key: "timezone".to_string(),
+                value: config.general.timezone.clone().unwrap_or_default(),
+                section: "General".to_string(),
+                editable: true,
+            },
+            ConfigEntry {
                 key: "logging.level".to_string(),
                 value: config.logging.level.clone(),
                 section: "General".to_string(),

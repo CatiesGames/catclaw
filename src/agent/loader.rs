@@ -167,7 +167,7 @@ impl AgentLoader {
         // Default tools.toml
         fs::write(
             workspace.join("tools.toml"),
-            r#"allowed = ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "Agent", "WebFetch", "WebSearch"]
+            r#"allowed = ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "Agent", "WebFetch", "WebSearch", "Skill"]
 denied = []
 "#,
         )?;
@@ -1132,6 +1132,7 @@ catclaw config set <key> <value>  # Set a value
 | `streaming` | true | Streaming mode (true/false) |
 | `default_model` | — | e.g. "sonnet", "opus", "" to clear |
 | `default_fallback_model` | — | Fallback when primary is overloaded |
+| `timezone` | — | IANA timezone (e.g. "Asia/Taipei") for `--at` time parsing. Empty = system local |
 | `logging.level` | debug | error/warn/info/debug/trace — hot-reloads |
 
 ### Approval Keys
@@ -1201,6 +1202,8 @@ catclaw config set approval.timeout_secs 120
 Approval supports wildcard patterns: `"Bash*"` matches all tools starting with Bash, `"*"` matches everything.
 
 **Note:** If you (the agent) have tools marked as requiring approval, your tool calls will pause until the user responds. This is normal — wait for the approval result before proceeding.
+
+**IMPORTANT:** `--approve` configures the approval POLICY (which tools need approval). It does NOT approve a pending request. Pending approvals are handled automatically via the channel UI (Discord buttons, Telegram inline keyboard, TUI banner). You cannot approve or deny a pending request from the CLI — users do this themselves.
 
 ---
 
@@ -1360,7 +1363,7 @@ catclaw task delete <id>                 # Remove a task
 ```
 
 Scheduling options (pick one, mutually exclusive):
-- `--at "<time>"` — Run once at an absolute time (ISO 8601: `2026-03-20T09:00:00` assumed UTC, or `HH:MM` / `HH:MM:SS` for today UTC)
+- `--at "<time>"` — Run once at an absolute time. Times without timezone use the gateway's local timezone (ISO 8601: `2026-03-20T09:00:00`, RFC 3339, or `HH:MM` / `HH:MM:SS` for today)
 - `--in-mins <N>` — Run once after N minutes
 - `--cron "<expr>"` — Cron expression (e.g. `"0 9 * * *"` = daily at 9am)
 - `--every <N>` — Repeat every N minutes

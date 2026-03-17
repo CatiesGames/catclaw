@@ -370,8 +370,8 @@ fn build_skill_index(agent_workspace: &std::path::Path, workspace_root: &std::pa
     lines.sort();
     format!(
         "\n# Available Skills\n\
-         You have these skills loaded. Invoke with `/skill-name` to load the full instructions.\n\
-         Do NOT look up source code or documentation when a skill covers the topic — use the skill instead.\n\n\
+         You have these skills loaded. Use the Skill tool to invoke them (e.g. `Skill(\"catclaw\")`).\n\
+         Do NOT use Bash/Read to manually read skill files — always use the Skill tool instead.\n\n\
          {}\n",
         lines.join("\n")
     )

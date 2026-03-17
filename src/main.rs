@@ -897,7 +897,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     every,
                     at,
                 } => {
-                    cmd_task_add(&state_db, &name, &agent, &prompt, in_mins, cron, every, at)?;
+                    cmd_task_add(&state_db, &name, &agent, &prompt, in_mins, cron, every, at, config.general.timezone.as_deref())?;
                 }
                 TaskCommands::Enable { id } => {
                     state_db.enable_task(id)?;
@@ -2066,29 +2066,55 @@ fn cmd_task_list(state_db: &StateDb) -> Result<()> {
 }
 
 /// Parse an `--at` time string into a UTC DateTime.
-/// Tries in order: ISO 8601, RFC 3339, HH:MM:SS (today UTC), HH:MM (today UTC).
-fn parse_at_time(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+/// Tries in order: ISO 8601/RFC 3339 (with timezone), naive datetime (configured/local TZ),
+/// HH:MM:SS (today), HH:MM (today).
+/// `tz_name`: IANA timezone from config (e.g. "Asia/Taipei"). Falls back to system local TZ.
+fn parse_at_time(s: &str, tz_name: Option<&str>) -> Result<chrono::DateTime<chrono::Utc>> {
     use chrono::{NaiveTime, Utc, TimeZone};
 
-    // Try ISO 8601 / RFC 3339 (with timezone)
+    // Try ISO 8601 / RFC 3339 (with explicit timezone — use as-is)
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
         return Ok(dt.with_timezone(&Utc));
     }
-    // Try ISO 8601 without timezone (assume UTC)
+
+    // Helper: convert naive datetime to UTC using configured or local timezone
+    let naive_to_utc = |ndt: chrono::NaiveDateTime| -> Option<chrono::DateTime<Utc>> {
+        if let Some(tz_str) = tz_name {
+            if let Ok(tz) = tz_str.parse::<chrono_tz::Tz>() {
+                return tz.from_local_datetime(&ndt).earliest().map(|dt| dt.with_timezone(&Utc));
+            }
+        }
+        chrono::Local.from_local_datetime(&ndt).earliest().map(|dt| dt.with_timezone(&Utc))
+    };
+
+    // Today's date in the configured timezone (or local)
+    let today = if let Some(tz_str) = tz_name {
+        if let Ok(tz) = tz_str.parse::<chrono_tz::Tz>() {
+            Utc::now().with_timezone(&tz).date_naive()
+        } else {
+            chrono::Local::now().date_naive()
+        }
+    } else {
+        chrono::Local::now().date_naive()
+    };
+
+    // Try ISO 8601 without timezone
     if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-        return Ok(Utc.from_utc_datetime(&ndt));
+        if let Some(utc) = naive_to_utc(ndt) {
+            return Ok(utc);
+        }
     }
-    // Try HH:MM:SS (today UTC)
+    // Try HH:MM:SS (today)
     if let Ok(t) = NaiveTime::parse_from_str(s, "%H:%M:%S") {
-        let today = Utc::now().date_naive();
-        let ndt = today.and_time(t);
-        return Ok(Utc.from_utc_datetime(&ndt));
+        if let Some(utc) = naive_to_utc(today.and_time(t)) {
+            return Ok(utc);
+        }
     }
-    // Try HH:MM (today UTC)
+    // Try HH:MM (today)
     if let Ok(t) = NaiveTime::parse_from_str(s, "%H:%M") {
-        let today = Utc::now().date_naive();
-        let ndt = today.and_time(t);
-        return Ok(Utc.from_utc_datetime(&ndt));
+        if let Some(utc) = naive_to_utc(today.and_time(t)) {
+            return Ok(utc);
+        }
     }
     Err(crate::error::CatClawError::Config(format!(
         "cannot parse --at time '{}'. Expected ISO 8601 (2026-03-20T09:00:00), RFC 3339, HH:MM, or HH:MM:SS",
@@ -2106,6 +2132,7 @@ fn cmd_task_add(
     cron: Option<String>,
     every: Option<i64>,
     at: Option<String>,
+    timezone: Option<&str>,
 ) -> Result<()> {
     let now = chrono::Utc::now();
 
@@ -2129,7 +2156,7 @@ fn cmd_task_add(
     // Determine schedule type and next_run_at
     let (cron_expr, interval_mins, next_run_at) = if let Some(ref at_str) = at {
         // Absolute time one-shot
-        let target = parse_at_time(at_str)?;
+        let target = parse_at_time(at_str, timezone)?;
         if target <= now {
             return Err(crate::error::CatClawError::Config(
                 format!("--at time '{}' is in the past", at_str),

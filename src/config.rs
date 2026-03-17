@@ -71,6 +71,11 @@ pub struct GeneralConfig {
     /// External processes do not have access to this file, providing local auth.
     #[serde(default)]
     pub ws_token: String,
+
+    /// IANA timezone for interpreting naive times in `--at` (e.g. "Asia/Taipei").
+    /// Falls back to system local timezone if not set.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -401,6 +406,7 @@ impl Config {
             "streaming" => Ok(self.general.streaming.to_string()),
             "default_model" => Ok(self.general.default_model.clone().unwrap_or_default()),
             "default_fallback_model" => Ok(self.general.default_fallback_model.clone().unwrap_or_default()),
+            "timezone" => Ok(self.general.timezone.clone().unwrap_or_default()),
             "logging.level" => Ok(self.logging.level.clone()),
             "heartbeat.enabled" => Ok(self.heartbeat.as_ref().is_some_and(|h| h.enabled).to_string()),
             "heartbeat.interval_mins" => Ok(self.heartbeat.as_ref().map_or(30, |h| h.interval_mins).to_string()),
@@ -511,6 +517,18 @@ impl Config {
                 self.general.state_db = value.into();
                 Ok(true)
             }
+            "timezone" => {
+                if value.is_empty() {
+                    self.general.timezone = None;
+                } else {
+                    // Validate IANA timezone name
+                    value.parse::<chrono_tz::Tz>().map_err(|_| {
+                        CatClawError::Config(format!("unknown timezone '{}'. Use IANA name like 'Asia/Taipei'", value))
+                    })?;
+                    self.general.timezone = Some(value.to_string());
+                }
+                Ok(false)
+            }
             other => {
                 if let Some(rest) = other.strip_prefix("channels[") {
                     if let Some((idx_str, field)) = rest.split_once("].") {
@@ -579,6 +597,7 @@ impl Config {
                 default_model: None,
                 default_fallback_model: None,
                 ws_token: generate_token(),
+                timezone: None,
             },
             channels: vec![],
             agents: vec![AgentConfig {

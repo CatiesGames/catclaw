@@ -37,6 +37,7 @@ regex = "1"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 
 # Discord
 serenity = { version = "0.12", features = ["client", "gateway", "model", "cache"] }
