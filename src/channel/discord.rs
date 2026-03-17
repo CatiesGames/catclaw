@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serenity::all::{
-    ButtonStyle, ChannelId, ChannelType as SerenityChannelType, Context, CreateActionRow,
-    CreateButton, CreateChannel, CreateEmbed, CreateInteractionResponse,
+    ButtonStyle, ChannelId, ChannelType as SerenityChannelType, Command, Context, CreateActionRow,
+    CreateButton, CreateChannel, CreateCommand, CreateEmbed, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateMessage, CreateThread, EditChannel, EditMessage,
     EventHandler, GatewayIntents, GuildId, Interaction, Message, MessageId, PermissionOverwrite,
     PermissionOverwriteType, Permissions, ReactionType, RoleId, Ready, UserId,
@@ -123,17 +123,13 @@ impl EventHandler for Handler {
         }
 
         // Resolve human-readable channel name from cache
-        let channel_name = if is_dm {
-            Some(format!("dm.{}", msg.author.name))
-        } else if let Some(guild_id) = msg.guild_id {
-            _ctx.cache
-                .guild(guild_id)
-                .and_then(|guild| {
-                    guild.channels.get(&msg.channel_id).map(|ch| ch.name.clone())
-                })
-        } else {
-            None
-        };
+        let channel_name = resolve_channel_name(
+            &_ctx.cache,
+            msg.channel_id,
+            msg.guild_id,
+            is_dm,
+            &msg.author.name,
+        );
 
         // Build MsgContext
         let text = msg.content.clone();
@@ -191,7 +187,16 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn ready(&self, _ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        // Register global slash commands
+        let commands = vec![
+            CreateCommand::new("stop").description("Stop the current session"),
+            CreateCommand::new("new").description("Start a new session (archives current)"),
+        ];
+        if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
+            error!(error = %e, "failed to register global slash commands");
+        }
+
         info!(
             user = %ready.user.name,
             guilds = ready.guilds.len(),
@@ -200,43 +205,155 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        if let Interaction::Component(comp) = interaction {
-            let custom_id = comp.data.custom_id.clone();
-            let (request_id, approved) = if let Some(rid) = custom_id.strip_prefix("approve:") {
-                (rid.to_string(), true)
-            } else if let Some(rid) = custom_id.strip_prefix("deny:") {
-                (rid.to_string(), false)
-            } else {
-                return;
-            };
+        match interaction {
+            Interaction::Command(cmd) => {
+                let name = cmd.data.name.as_str();
+                if name == "stop" || name == "new" {
+                    // Ephemeral ack (only visible to the invoking user)
+                    let ack = CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content(format!("Running /{}...", name))
+                            .ephemeral(true),
+                    );
+                    let _ = cmd.create_response(&ctx.http, ack).await;
 
-            // Send decision to gateway
-            let _ = self.approval_tx.send((request_id.clone(), approved));
+                    // Build MsgContext and route through normal pipeline
+                    let channel_id_str = cmd.channel_id.get().to_string();
+                    let is_dm = cmd.guild_id.is_none();
+                    let sender_id = cmd.user.id.get().to_string();
+                    let sender_name = cmd.user.name.clone();
 
-            // Acknowledge the interaction (required by Discord within 3s)
-            // Use UpdateMessage to edit the original embed in-place (no ephemeral reply)
-            let label = if approved { "Approved" } else { "Denied" };
-            let emoji = if approved { "✅" } else { "❌" };
-            let color = if approved { 0x00FF00 } else { 0xFF0000 };
+                    let channel_name = resolve_channel_name(
+                        &ctx.cache,
+                        cmd.channel_id,
+                        cmd.guild_id,
+                        is_dm,
+                        &sender_name,
+                    );
 
-            // Rebuild embed with result status, remove buttons
-            let mut response_msg = CreateInteractionResponseMessage::new()
-                .components(vec![]);
-            if let Some(original_embed) = comp.message.embeds.first() {
-                let mut new_embed = CreateEmbed::new()
-                    .title(format!("{} Tool Approval — {}", emoji, label))
-                    .color(color);
-                for field in &original_embed.fields {
-                    new_embed = new_embed.field(&field.name, &field.value, field.inline);
+                    let peer_id = if is_dm {
+                        sender_id.clone()
+                    } else {
+                        channel_id_str.clone()
+                    };
+
+                    // Detect if the command was invoked inside a thread.
+                    // Cache::channel() only searches guild.channels (not threads),
+                    // so we also check guild.threads for thread channels.
+                    let thread_id = if !is_dm {
+                        let is_thread = cmd.guild_id.and_then(|gid| {
+                            ctx.cache.guild(gid).map(|guild| {
+                                // Check guild.channels first, then guild.threads
+                                guild
+                                    .channels
+                                    .get(&cmd.channel_id)
+                                    .map(|ch| ch.kind)
+                                    .or_else(|| {
+                                        guild
+                                            .threads
+                                            .iter()
+                                            .find(|t| t.id == cmd.channel_id)
+                                            .map(|t| t.kind)
+                                    })
+                                    .map(|kind| {
+                                        kind == SerenityChannelType::PublicThread
+                                            || kind == SerenityChannelType::PrivateThread
+                                    })
+                                    .unwrap_or(false)
+                            })
+                        });
+                        if is_thread == Some(true) {
+                            Some(channel_id_str.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    let guild_id_str = cmd.guild_id.map(|g| g.get().to_string());
+
+                    let msg_ctx = MsgContext {
+                        channel_type: ChannelType::Discord,
+                        channel_id: channel_id_str,
+                        peer_id,
+                        sender_id,
+                        sender_name,
+                        text: format!("/{}", name),
+                        attachments: vec![],
+                        reply_to: None,
+                        thread_id,
+                        is_direct_message: is_dm,
+                        raw_event: serde_json::json!({
+                            "guild_id": &guild_id_str,
+                        }),
+                        channel_name,
+                        guild_id: guild_id_str,
+                    };
+
+                    if let Err(e) = self.msg_tx.send(msg_ctx).await {
+                        error!(error = %e, "failed to send slash command to router");
+                    }
                 }
-                response_msg = response_msg.embed(new_embed);
             }
+            Interaction::Component(comp) => {
+                let custom_id = comp.data.custom_id.clone();
+                let (request_id, approved) =
+                    if let Some(rid) = custom_id.strip_prefix("approve:") {
+                        (rid.to_string(), true)
+                    } else if let Some(rid) = custom_id.strip_prefix("deny:") {
+                        (rid.to_string(), false)
+                    } else {
+                        return;
+                    };
 
-            let response = CreateInteractionResponse::UpdateMessage(response_msg);
-            if let Err(e) = comp.create_response(&ctx.http, response).await {
-                error!(error = %e, "failed to update approval message");
+                // Send decision to gateway
+                let _ = self.approval_tx.send((request_id.clone(), approved));
+
+                // Acknowledge the interaction (required by Discord within 3s)
+                let label = if approved { "Approved" } else { "Denied" };
+                let emoji = if approved { "✅" } else { "❌" };
+                let color = if approved { 0x00FF00 } else { 0xFF0000 };
+
+                let mut response_msg =
+                    CreateInteractionResponseMessage::new().components(vec![]);
+                if let Some(original_embed) = comp.message.embeds.first() {
+                    let mut new_embed = CreateEmbed::new()
+                        .title(format!("{} Tool Approval — {}", emoji, label))
+                        .color(color);
+                    for field in &original_embed.fields {
+                        new_embed =
+                            new_embed.field(&field.name, &field.value, field.inline);
+                    }
+                    response_msg = response_msg.embed(new_embed);
+                }
+
+                let response = CreateInteractionResponse::UpdateMessage(response_msg);
+                if let Err(e) = comp.create_response(&ctx.http, response).await {
+                    error!(error = %e, "failed to update approval message");
+                }
             }
+            _ => {}
         }
+    }
+}
+
+/// Resolve a human-readable channel name from the serenity cache.
+fn resolve_channel_name(
+    cache: &serenity::cache::Cache,
+    channel_id: ChannelId,
+    guild_id: Option<GuildId>,
+    is_dm: bool,
+    sender_name: &str,
+) -> Option<String> {
+    if is_dm {
+        Some(format!("dm.{}", sender_name))
+    } else if let Some(guild_id) = guild_id {
+        cache
+            .guild(guild_id)
+            .and_then(|guild| guild.channels.get(&channel_id).map(|ch| ch.name.clone()))
+    } else {
+        None
     }
 }
 

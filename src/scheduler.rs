@@ -10,7 +10,7 @@ use crate::agent::{Agent, AgentRegistry};
 use crate::session::manager::{SenderInfo, SessionManager};
 use crate::session::transcript::TranscriptLog;
 use crate::session::{Priority, SessionKey};
-use crate::state::StateDb;
+use crate::state::{SessionRow, StateDb};
 
 /// Tracks session IDs currently undergoing diary extraction to prevent duplicates.
 /// Shared between scheduler ticks — if a `claude -p` call takes longer than 60s,
@@ -87,7 +87,7 @@ pub async fn run(
 
         // ── System: Archive stale sessions + clean old attachments ──
         if now >= next_archive {
-            execute_archive(&session_manager, &agent_registry, config.archive_timeout_hours).await;
+            execute_archive(&session_manager, config.archive_timeout_hours).await;
             // Clean up downloaded attachments older than archive timeout
             let max_age_days = config.archive_timeout_hours / 24;
             crate::router::cleanup_old_attachments(&config.workspace, max_age_days.max(1));
@@ -246,7 +246,6 @@ async fn execute_prompt(
 /// Find and archive stale sessions
 async fn execute_archive(
     session_manager: &SessionManager,
-    agent_registry: &std::sync::RwLock<AgentRegistry>,
     archive_timeout_hours: u64,
 ) {
     match session_manager.find_stale_sessions(archive_timeout_hours) {
@@ -256,20 +255,14 @@ async fn execute_archive(
             }
             info!(count = stale.len(), "archiving stale sessions");
             for session in stale {
-                let agent = agent_registry.read().unwrap().get(&session.agent_id).cloned();
-                if let Some(agent) = agent {
-                    if let Err(e) = session_manager
-                        .archive_with_summary(&session.session_key, &agent)
-                        .await
-                    {
-                        error!(
-                            session = %session.session_key,
-                            error = %e,
-                            "failed to archive session"
-                        );
-                    }
-                } else {
-                    let _ = session_manager.archive(&session.session_key).await;
+                // Diary extraction already happened via check_diary_extraction
+                // (idle 30 min trigger), so just archive — no new content to extract.
+                if let Err(e) = session_manager.archive(&session.session_key).await {
+                    error!(
+                        session = %session.session_key,
+                        error = %e,
+                        "failed to archive session"
+                    );
                 }
             }
         }
@@ -389,123 +382,126 @@ async fn check_diary_extraction(
             None => continue,
         };
 
-        // Open transcript and read since last marker
-        let transcript = match TranscriptLog::open(&agent.workspace, &session.session_id).await {
-            Ok(t) => t,
-            Err(e) => {
-                warn!(session = %session.session_key, error = %e, "diary: failed to open transcript");
-                continue;
-            }
-        };
-
-        let (entries, marker_found) = transcript.read_since_last_marker().await;
-
-        // If a marker already exists and there are no new entries since, skip silently
-        // (avoids writing diary_skipped on every tick for already-processed sessions)
-        if marker_found && entries.is_empty() {
-            continue;
-        }
-
-        // Count user turns
-        let user_turns = entries.iter().filter(|e| e.role == "user").count();
-        if user_turns < DIARY_MIN_USER_TURNS {
-            // Only write the skip marker if no marker exists yet (first evaluation)
-            // or if there are new entries since the last marker
-            if !marker_found || !entries.is_empty() {
-                transcript
-                    .log_system(&format!(
-                        "diary_skipped (reason: insufficient content, {} user turn{})",
-                        user_turns,
-                        if user_turns == 1 { "" } else { "s" }
-                    ))
-                    .await;
-            }
-            debug!(session = %session.session_key, user_turns, "diary: skipped, too few user turns");
-            continue;
-        }
-
-        // Check if all assistant responses are NO_REPLY or HEARTBEAT_OK
-        let has_meaningful_response = entries.iter().any(|e| {
-            e.role == "assistant" && {
-                let t = e.content.trim();
-                t != "NO_REPLY" && t != "HEARTBEAT_OK"
-            }
-        });
-        if !has_meaningful_response {
-            if !marker_found || !entries.is_empty() {
-                transcript
-                    .log_system("diary_skipped (reason: no meaningful assistant responses)")
-                    .await;
-            }
-            debug!(session = %session.session_key, "diary: skipped, no meaningful responses");
-            continue;
-        }
-
-        // Build readable transcript and extract channel info for the diary header
-        let readable = TranscriptLog::format_readable(&entries);
-
-        // Determine channel label from session key (e.g., "discord #chat")
-        let channel_label = build_channel_label(&session.session_key);
-
-        // Extract timestamp from first entry
-        let time_label = entries
-            .first()
-            .and_then(|e| {
-                chrono::DateTime::parse_from_rfc3339(&e.timestamp)
-                    .ok()
-                    .map(|dt| dt.format("%H:%M").to_string())
-            })
-            .unwrap_or_else(|| "??:??".to_string());
-
-        info!(session = %session.session_key, user_turns, "diary: generating diary entry");
-
         // Mark as in-flight to prevent duplicate extraction on next tick
         in_flight.lock().unwrap().insert(session.session_id.clone());
 
-        match generate_diary(&agent, &readable).await {
-            DiaryResult::Entry(diary_text) => {
-                let today = now.format("%Y-%m-%d").to_string();
-                let diary_path = agent.workspace.join("memory").join(format!("{}.md", today));
-
-                // Ensure memory dir exists
-                let memory_dir = agent.workspace.join("memory");
-                if let Err(e) = tokio::fs::create_dir_all(&memory_dir).await {
-                    error!(error = %e, "diary: failed to create memory dir");
-                    continue;
-                }
-
-                // Append diary entry with header
-                let entry = format!(
-                    "\n---\n\n### {} — {}\n\n{}\n",
-                    channel_label, time_label, diary_text
-                );
-                if let Err(e) = append_to_file(&diary_path, &entry).await {
-                    error!(error = %e, path = %diary_path.display(), "diary: failed to write diary entry");
-                    continue;
-                }
-
-                transcript.log_system("diary_extracted").await;
-                info!(
-                    agent = %agent.id,
-                    session = %session.session_key,
-                    path = %diary_path.display(),
-                    "diary: entry written"
-                );
-            }
-            DiaryResult::NoDiary => {
-                transcript
-                    .log_system("diary_skipped (reason: LLM returned NO_DIARY)")
-                    .await;
-                debug!(session = %session.session_key, "diary: LLM said NO_DIARY");
-            }
-            DiaryResult::Error(e) => {
-                error!(session = %session.session_key, error = %e, "diary: generation failed");
-                // Don't write a marker on error — will retry next tick
-            }
-        }
+        extract_diary_for_session(&agent, &session).await;
 
         // Remove from in-flight set (allows retry on error, or re-check on next tick)
         in_flight.lock().unwrap().remove(&session.session_id);
+    }
+}
+
+/// Extract a diary entry from a single session's transcript and append it to the
+/// agent's daily memory file (`memory/YYYY-MM-DD.md`).
+///
+/// Reads transcript entries since the last diary marker, validates content quality
+/// (minimum user turns, meaningful responses), generates a diary via `claude -p`,
+/// and writes a `diary_extracted` or `diary_skipped` marker to the transcript.
+///
+/// Safe to call on sessions in any state (idle, active, archived).
+/// Does NOT change session state — caller is responsible for lifecycle management.
+pub async fn extract_diary_for_session(agent: &Agent, session: &SessionRow) {
+    let transcript = match TranscriptLog::open(&agent.workspace, &session.session_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(session = %session.session_key, error = %e, "diary: failed to open transcript");
+            return;
+        }
+    };
+
+    let (entries, marker_found) = transcript.read_since_last_marker().await;
+
+    // If a marker already exists and there are no new entries since, skip silently
+    if marker_found && entries.is_empty() {
+        return;
+    }
+
+    // Count user turns
+    let user_turns = entries.iter().filter(|e| e.role == "user").count();
+    if user_turns < DIARY_MIN_USER_TURNS {
+        if !marker_found || !entries.is_empty() {
+            transcript
+                .log_system(&format!(
+                    "diary_skipped (reason: insufficient content, {} user turn{})",
+                    user_turns,
+                    if user_turns == 1 { "" } else { "s" }
+                ))
+                .await;
+        }
+        debug!(session = %session.session_key, user_turns, "diary: skipped, too few user turns");
+        return;
+    }
+
+    // Check if all assistant responses are NO_REPLY or HEARTBEAT_OK
+    let has_meaningful_response = entries.iter().any(|e| {
+        e.role == "assistant" && {
+            let t = e.content.trim();
+            t != "NO_REPLY" && t != "HEARTBEAT_OK"
+        }
+    });
+    if !has_meaningful_response {
+        if !marker_found || !entries.is_empty() {
+            transcript
+                .log_system("diary_skipped (reason: no meaningful assistant responses)")
+                .await;
+        }
+        debug!(session = %session.session_key, "diary: skipped, no meaningful responses");
+        return;
+    }
+
+    // Build readable transcript and extract channel info for the diary header
+    let readable = TranscriptLog::format_readable(&entries);
+    let channel_label = build_channel_label(&session.session_key);
+    let time_label = entries
+        .first()
+        .and_then(|e| {
+            chrono::DateTime::parse_from_rfc3339(&e.timestamp)
+                .ok()
+                .map(|dt| dt.format("%H:%M").to_string())
+        })
+        .unwrap_or_else(|| "??:??".to_string());
+
+    info!(session = %session.session_key, user_turns, "diary: generating diary entry");
+
+    match generate_diary(agent, &readable).await {
+        DiaryResult::Entry(diary_text) => {
+            let today = Utc::now().format("%Y-%m-%d").to_string();
+            let diary_path = agent.workspace.join("memory").join(format!("{}.md", today));
+
+            let memory_dir = agent.workspace.join("memory");
+            if let Err(e) = tokio::fs::create_dir_all(&memory_dir).await {
+                error!(error = %e, "diary: failed to create memory dir");
+                return;
+            }
+
+            let entry = format!(
+                "\n---\n\n### {} — {}\n\n{}\n",
+                channel_label, time_label, diary_text
+            );
+            if let Err(e) = append_to_file(&diary_path, &entry).await {
+                error!(error = %e, path = %diary_path.display(), "diary: failed to write diary entry");
+                return;
+            }
+
+            transcript.log_system("diary_extracted").await;
+            info!(
+                agent = %agent.id,
+                session = %session.session_key,
+                path = %diary_path.display(),
+                "diary: entry written"
+            );
+        }
+        DiaryResult::NoDiary => {
+            transcript
+                .log_system("diary_skipped (reason: LLM returned NO_DIARY)")
+                .await;
+            debug!(session = %session.session_key, "diary: LLM said NO_DIARY");
+        }
+        DiaryResult::Error(e) => {
+            error!(session = %session.session_key, error = %e, "diary: generation failed");
+            // Don't write a marker on error — will retry next tick
+        }
     }
 }
 

@@ -83,6 +83,16 @@ impl ChannelAdapter for TelegramAdapter {
             .await
             .map_err(|e| CatClawError::Telegram(format!("failed to get bot info: {}", e)))?;
         let bot_username = me.username.clone().unwrap_or_default();
+
+        // Register bot commands for the /stop and /new menu items
+        let commands = vec![
+            teloxide::types::BotCommand::new("stop", "Stop the current session"),
+            teloxide::types::BotCommand::new("new", "Start a new session (archives current)"),
+        ];
+        if let Err(e) = bot.set_my_commands(commands).await {
+            error!(error = %e, "failed to register Telegram bot commands");
+        }
+
         info!(username = %bot_username, "Telegram bot connected");
 
         // Use teloxide dispatcher with long polling
@@ -211,7 +221,12 @@ impl ChannelAdapter for TelegramAdapter {
                         filter.activation_for("telegram:chat", &chat_id_str).to_string()
                     };
 
-                    let should_respond = match activation.as_str() {
+                    // Bot commands (/stop, /new) bypass activation filter (explicit intent)
+                    // but still respect sender allow-list (checked above)
+                    let cmd_name = text.split('@').next().unwrap_or("");
+                    let is_bot_command = cmd_name == "/stop" || cmd_name == "/new";
+
+                    let should_respond = is_bot_command || match activation.as_str() {
                         "all" => true,
                         "mention" => {
                             is_private

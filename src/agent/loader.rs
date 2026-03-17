@@ -1350,6 +1350,8 @@ All agents see these servers by default. Each agent controls access via the TUI 
 ```bash
 catclaw task list                        # List all tasks
 catclaw task add <name> --agent <id> --prompt "..." --in-mins 60
+catclaw task add <name> --agent <id> --prompt "..." --at "17:00"
+catclaw task add <name> --agent <id> --prompt "..." --at "2026-03-20T09:00:00"
 catclaw task add <name> --agent <id> --prompt "..." --cron "0 9 * * *"
 catclaw task add <name> --agent <id> --prompt "..." --every 30
 catclaw task enable <id>                 # Enable a task
@@ -1357,10 +1359,31 @@ catclaw task disable <id>                # Disable a task
 catclaw task delete <id>                 # Remove a task
 ```
 
-Scheduling options (pick one):
+Scheduling options (pick one, mutually exclusive):
+- `--at "<time>"` — Run once at an absolute time (ISO 8601: `2026-03-20T09:00:00` assumed UTC, or `HH:MM` / `HH:MM:SS` for today UTC)
 - `--in-mins <N>` — Run once after N minutes
 - `--cron "<expr>"` — Cron expression (e.g. `"0 9 * * *"` = daily at 9am)
 - `--every <N>` — Repeat every N minutes
+
+### Scheduling Best Practices
+
+**IMPORTANT: All scheduling MUST use `catclaw task add`.** Never use `sleep`, Claude Code's built-in Task tool, or any form of polling/waiting — these block the session and waste resources.
+
+After creating a scheduled task, immediately confirm to the user and end the conversation. Do NOT keep the session alive.
+
+**Common patterns:**
+
+Reminder:
+```bash
+catclaw task add "提醒開會" --agent main --prompt "Send a reminder to the user: 下午三點有會議。Use the appropriate CatClaw MCP send tool to deliver the message."  --at "14:55"
+```
+
+Daily digest:
+```bash
+catclaw task add "日報" --agent main --prompt "Summarize today's activity and post to the user via the appropriate CatClaw MCP send tool." --cron "0 18 * * *"
+```
+
+**Prompt context:** The `--prompt` should contain the complete instruction — what to do, where to send it, and any relevant context. When the task triggers, a new independent session runs the prompt; it has no memory of the original conversation. The agent will automatically discover available channel tools from its MCP server.
 
 ---
 
@@ -1370,6 +1393,9 @@ Scheduling options (pick one):
 catclaw session list           # List all sessions with state and agent
 catclaw session delete <key>   # Delete a session (key = agent:origin:context)
 ```
+
+Channel commands: Users can type `/stop` or `/new` in Discord/Telegram to stop/start sessions.
+These are platform slash commands registered by CatClaw — they appear in the Discord command menu and Telegram bot command menu.
 
 ---
 

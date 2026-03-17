@@ -64,6 +64,11 @@ impl SessionManager {
         self
     }
 
+    /// Access the underlying state database.
+    pub fn state_db(&self) -> &StateDb {
+        &self.state_db
+    }
+
     /// Send a message to a session, creating or resuming as needed.
     /// Returns the response text.
     ///
@@ -629,92 +634,6 @@ impl SessionManager {
         self.state_db
             .update_session_state(session_key, "archived")?;
         info!(session_key = %session_key, "archived session");
-        Ok(())
-    }
-
-    /// Archive a session with a summary saved to agent memory
-    pub async fn archive_with_summary(
-        &self,
-        session_key: &str,
-        agent: &Agent,
-    ) -> Result<()> {
-        // Find the session to get its ID
-        let session = self.state_db.get_session(session_key)?;
-        if let Some(row) = session {
-            // Read transcript
-            let transcript = TranscriptLog::open(&agent.workspace, &row.session_id).await?;
-            let entries = transcript.read_last(30).await;
-
-            if !entries.is_empty() {
-                // Build a summary prompt from the last entries
-                let readable = TranscriptLog::format_readable(&entries);
-                let summary_prompt = format!(
-                    "Summarize this conversation for long-term memory. \
-                     Focus on: decisions made, user preferences learned, \
-                     important context, and action items. Be concise.\n\n\
-                     ---\n\n{}",
-                    readable
-                );
-
-                // Spawn a one-shot claude to generate the summary.
-                // Acquire a concurrency permit so archive summaries respect the same limit.
-                let _summary_permit = self.queue.acquire(Priority::Cron).await;
-                let summary_args = vec![
-                    "-p".to_string(),
-                    "--output-format".to_string(),
-                    "text".to_string(),
-                    "--max-turns".to_string(),
-                    "1".to_string(),
-                ];
-                match ClaudeHandle::spawn_with_prompt(summary_args, &summary_prompt).await {
-                    Ok(mut handle) => {
-                        if let Ok(summary) = handle.wait_for_result().await {
-                            // Write summary to the date of last activity (not today)
-                            let date = chrono::DateTime::parse_from_rfc3339(&row.last_activity_at)
-                                .map(|dt| dt.format("%Y-%m-%d").to_string())
-                                .unwrap_or_else(|_| Utc::now().format("%Y-%m-%d").to_string());
-                            let memory_dir = agent.workspace.join("memory");
-                            let _ = std::fs::create_dir_all(&memory_dir);
-                            let memory_path = memory_dir.join(format!("{}.md", date));
-
-                            let entry = format!(
-                                "\n## Session Archive: {} → {}\n\n{}\n",
-                                row.origin,
-                                row.context_id,
-                                summary.trim()
-                            );
-
-                            // Append to daily memory file
-                            let mut existing = std::fs::read_to_string(&memory_path)
-                                .unwrap_or_default();
-                            existing.push_str(&entry);
-                            let _ = std::fs::write(&memory_path, existing);
-
-                            // Log to transcript
-                            transcript
-                                .log_system(&format!("session_archived (summary saved to memory/{}.md)", date))
-                                .await;
-
-                            info!(
-                                session_key = %session_key,
-                                memory_file = %format!("memory/{}.md", date),
-                                "archived session with summary"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            session_key = %session_key,
-                            "failed to generate archive summary, archiving without summary"
-                        );
-                    }
-                }
-            }
-        }
-
-        self.state_db
-            .update_session_state(session_key, "archived")?;
         Ok(())
     }
 

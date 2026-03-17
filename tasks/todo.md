@@ -108,6 +108,13 @@
 - [ ] MCP server 層面的權限檢查（需要知道當前 session 的 agent_id → 查 tools.toml → 過濾 tools/list 和 tools/call）
 - [ ] TUI Agents panel 加入 MCP action 權限編輯
 
+## DONE: Discord/Telegram Slash Commands 支援
+- [x] `interaction_create` 處理 `Interaction::Command`
+- [x] Slash command 內容路由到 router（當作一般訊息處理）
+- [x] Ephemeral ack + router 回覆
+- [x] 在 `ready()` 註冊 global commands（`/stop`, `/new`）
+- [x] Telegram `set_my_commands` 註冊 bot command 選單
+
 ## Known Bugs / UX Issues
 - [x] Init channel 選擇：改為逐一 Confirm 詢問，預設 yes，不再用 MultiSelect
 - [x] Init 每步操作提示更明確（y/n 確認）

@@ -74,6 +74,9 @@ All three are required. CLI is the agent's hands, TUI is the user's hands, skill
 ### Global Plugins Are Loaded
 `claude -p` automatically loads the user's global plugins (`~/.claude/plugins/`), including pencil, LSP, playground, etc. CatClaw cannot exclude them (no `--exclude-plugin` flag). Impact: agent tool lists and skill indexes will contain unnecessary items, increasing token consumption. No solution yet — noted for future investigation.
 
+### Scheduled Tasks: `--at` One-Shot
+`catclaw task add` supports `--at` for absolute-time one-shot scheduling. Accepts ISO 8601 (`2026-03-20T09:00:00`), RFC 3339, or `HH:MM` / `HH:MM:SS` (today UTC). Mutually exclusive with `--cron`, `--every`, `--in-mins`. Time must be in the future.
+
 ### Skill Triggering Is Claude's Decision
 Skills are not auto-triggered — the system prompt only includes a skill index (name + one-line description), and Claude decides whether to use `/skill-name` to load the full content based on the description. If a skill needs to **always be active** (e.g., injection-guard), put a condensed version of the core rules in AGENTS.md or TOOLS.md (loaded every time), and keep the full version in the skill.
 
@@ -109,7 +112,7 @@ Each tool exists in exactly one list: `allowed` (directly usable), `denied` (una
 | `src/session/manager.rs` | `SessionManager`, `SenderInfo`, session lifecycle (create/resume/fork/archive) |
 | `src/session/claude.rs` | `ClaudeHandle` — subprocess spawn, stdin/stdout streaming |
 | `src/channel/mod.rs` | `ChannelAdapter` trait, `MsgContext`, `OutboundMessage`, `send_approval()` |
-| `src/channel/discord.rs` | Discord adapter: serenity handler, approval embed+buttons, `interaction_create` |
+| `src/channel/discord.rs` | Discord adapter: serenity handler, slash commands (`/stop`, `/new`), approval embed+buttons, `interaction_create` |
 | `src/channel/telegram.rs` | Telegram adapter: teloxide dispatcher, approval inline keyboard, `callback_query` |
 | `src/agent/mod.rs` | `Agent`, `AgentRegistry`, `ToolPermissions`, claude args builder, system prompt |
 | `src/agent/loader.rs` | Agent workspace creation, skill management, TOML loading |
@@ -203,6 +206,8 @@ Always do the complete fix. Never leave warnings, tech debt, or half-done work w
 
 ## Lessons Learned
 
+**When to add a lesson:** Whenever the user corrects a wrong assumption, a bug is caused by misunderstanding the architecture, or a code review catches an issue that could have been avoided with better knowledge. Write the lesson here immediately — this is the single source of truth for project-specific lessons across all sessions.
+
 1. **Writing files from TUI does not mean the gateway picks it up** — any change affecting gateway in-memory state (agent approval, tool permissions) must notify the gateway via WS method for hot-reload.
 2. **`#[derive(Default)]` is a trap for config structs with custom defaults** — `u64`'s Default is 0, not the desired 120. Use manual `impl Default`.
 3. **`std::sync::RwLockReadGuard` is not `Send`** — cannot be held across `.await`. Extract to a local variable before awaiting.
@@ -211,3 +216,4 @@ Always do the complete fix. Never leave warnings, tech debt, or half-done work w
 6. **Feature updates must sync the skill** — the catclaw skill (`SKILL_CATCLAW` constant in `src/agent/loader.rs`) is the agent's operation manual. Any new feature (CLI flag, config key, TUI operation) must be reflected in the skill content, otherwise the agent won't know how to guide the user. Same applies to README.md.
 7. **`Arc<AgentRegistry>` changed to `Arc<RwLock<AgentRegistry>>`** — to support hot-reload, the registry must be mutable. Read with `.read().unwrap()`, write with `.write().unwrap()`. All `.get()` calls need `.cloned()` to get an owned `Agent` and avoid holding the guard across await.
 8. **Hook subprocess cannot create a new tokio runtime** — `catclaw hook pre-tool` runs as a subprocess where `main` is already `#[tokio::main]` (runtime exists). Using `tokio::runtime::Builder` in `cmd_hook.rs` to create a second runtime would panic. Use `async fn` + `.await` instead.
+9. **Transcript JSONL is ours, not Claude's** — CatClaw's transcript is written by `send_and_wait` (immediate append on each event), not by the Claude subprocess. After `stop_session()` kills the subprocess, no new events are produced, so the transcript is already complete. Don't assume async flush issues or add sleeps before reading transcript. **Rule:** Before reasoning about race conditions, clarify data flow ownership — who writes, when, and where.

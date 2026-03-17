@@ -103,8 +103,9 @@ impl MessageRouter {
 
         let session_key = SessionKey::new(&agent.id, origin, &context_id);
 
-        // 4. Handle /stop command — kill running session
-        let text_trimmed = ctx.text.trim();
+        // 4. Handle /stop and /new commands
+        // Strip Telegram bot mention suffix (e.g. "/stop@BotName" → "/stop")
+        let text_trimmed = ctx.text.trim().split('@').next().unwrap_or("");
         if text_trimmed == "/stop" {
             let key_str = session_key.to_key_string();
             let stopped = self.session_manager.stop_session(&key_str);
@@ -112,6 +113,48 @@ impl MessageRouter {
                 "Session stopped.".to_string()
             } else {
                 "No active session to stop.".to_string()
+            };
+            adapter
+                .send(OutboundMessage {
+                    channel_type: ctx.channel_type,
+                    channel_id: ctx.channel_id.clone(),
+                    peer_id: ctx.peer_id.clone(),
+                    text: reply,
+                    thread_id: ctx.thread_id.clone(),
+                    reply_to_message_id: None,
+                })
+                .await?;
+            return Ok(());
+        }
+
+        if text_trimmed == "/new" {
+            let key_str = session_key.to_key_string();
+            let session_row = self
+                .session_manager
+                .state_db()
+                .get_session(&key_str)?;
+            let is_active = session_row
+                .as_ref()
+                .map(|row| row.state != "archived")
+                .unwrap_or(false);
+            let reply = if is_active {
+                // Stop any running process first and wait briefly for cleanup
+                if self.session_manager.stop_session(&key_str) {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                // Archive immediately so next message starts a fresh session
+                self.session_manager.archive(&key_str).await?;
+
+                // Diary extraction in background (doesn't block the user)
+                let agent_clone = agent.clone();
+                let row = session_row.unwrap(); // safe: is_active implies Some
+                tokio::spawn(async move {
+                    crate::scheduler::extract_diary_for_session(&agent_clone, &row).await;
+                });
+
+                "Session archived. Next message starts a new session.".to_string()
+            } else {
+                "No active session.".to_string()
             };
             adapter
                 .send(OutboundMessage {
