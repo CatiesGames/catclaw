@@ -420,6 +420,16 @@ impl SessionManager {
             let mut result_text = String::new();
             let mut final_session_id = session_id_owned.clone();
             let mut stopped = false;
+            let mut tool_uses: Vec<super::transcript::ToolUseEntry> = Vec::new();
+
+            // Open transcript log and write user message immediately
+            let transcript = TranscriptLog::open(&agent_workspace, &session_id_owned).await.ok();
+            if let Some(ref t) = transcript {
+                if !is_resume {
+                    t.log_system("session_created").await;
+                }
+                t.log_user(&message_owned, sender_id.as_deref(), sender_name.as_deref()).await;
+            }
 
             info!(session_key = %session_key_owned, is_running = handle.is_running(), "streaming: entering event loop");
             let mut got_first_event = false;
@@ -453,6 +463,10 @@ impl SessionManager {
                             }
                             ClaudeEvent::ToolUseStart { name, input } => {
                                 let _ = event_tx.send(SessionEvent::ToolUse { name: name.clone(), input: input.clone() });
+                                tool_uses.push(super::transcript::ToolUseEntry {
+                                    name: name.clone(),
+                                    input: input.clone(),
+                                });
                             }
                             ClaudeEvent::Result { result, session_id } => {
                                 if !session_id.is_empty() {
@@ -504,19 +518,10 @@ impl SessionManager {
 
             info!(session_key = %session_key_owned, result_len = result_text.len(), "streaming: event loop ended");
 
-            // Log transcript
-            if let Ok(transcript) = TranscriptLog::open(&agent_workspace, &final_session_id).await {
-                if !is_resume {
-                    transcript.log_system("session_created").await;
-                }
-                transcript
-                    .log_user(
-                        &message_owned,
-                        sender_id.as_deref(),
-                        sender_name.as_deref(),
-                    )
-                    .await;
-                transcript.log_assistant(&result_text, None).await;
+            // Log assistant response with tool uses to transcript
+            if let Some(ref t) = transcript {
+                let tools = if tool_uses.is_empty() { None } else { Some(tool_uses) };
+                t.log_assistant(&result_text, tools).await;
             }
 
             // Update DB
