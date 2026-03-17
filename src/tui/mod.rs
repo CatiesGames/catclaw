@@ -15,7 +15,11 @@ use std::io;
 use std::time::Instant;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, EnableMouseCapture, DisableMouseCapture, MouseEventKind},
+    event::{
+        self, Event, KeyCode, KeyEvent, KeyModifiers,
+        EnableMouseCapture, DisableMouseCapture, MouseEventKind,
+        KeyboardEnhancementFlags, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -515,6 +519,7 @@ impl App {
 
 /// Restore terminal state (called on clean exit and panic)
 fn restore_terminal() {
+    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     // Show cursor
@@ -536,6 +541,11 @@ pub async fn run(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Enable kitty keyboard protocol so Shift+Enter is distinguishable from Enter
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+    );
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
