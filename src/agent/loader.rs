@@ -733,31 +733,20 @@ When a conversation gets very long:
 3. **Don't wait until it's too late** — write things down early and often. It's better to have redundant notes than to lose context
 4. **Recent conversation is the most valuable** — the last few exchanges are what the user cares about right now. Older context can be summarized, but recent intent and decisions should be captured precisely
 
-### Memory Maintenance (During Heartbeats)
+### Memory System (Automatic)
 
-Periodically (every few days), use a heartbeat to maintain your memory:
+CatClaw automatically manages your memory in two layers:
 
-1. Read through recent `memory/YYYY-MM-DD.md` files (last 3-7 days)
-2. Identify significant events, lessons, preferences, or insights worth keeping long-term
-3. Update `MEMORY.md` with distilled learnings — concise, organized by topic
-4. Remove outdated info from `MEMORY.md` that's no longer relevant or has been superseded
-5. You don't need to delete daily files — they're your raw archive
+1. **Daily diary** — After each conversation goes idle (30 min), the system
+   reads your transcript and writes a diary entry in `memory/YYYY-MM-DD.md`
+   using your personality. You don't need to write daily notes yourself.
 
-Think of it like a human reviewing their journal and updating their mental model.
-Daily files are raw notes; `MEMORY.md` is curated wisdom.
+2. **Long-term distillation** — Every 3 days during heartbeat, the system
+   asks you to review recent diary entries and update `MEMORY.md` with
+   lasting patterns and learnings.
 
-**What belongs in MEMORY.md:**
-- User preferences and communication style
-- Recurring project context and decisions
-- Lessons learned from mistakes
-- Important relationships, names, facts
-- Workflow patterns that work well
-
-**What to remove from MEMORY.md:**
-- Completed one-off tasks
-- Temporary context that's no longer relevant
-- Information that's been superseded by newer entries
-- Anything that's gotten stale or wrong
+You can still write to `memory/YYYY-MM-DD.md` or `MEMORY.md` manually
+at any time — the automatic system only appends, never overwrites.
 
 ### Session Continuity
 
@@ -812,8 +801,11 @@ This content is sent as the first message when a new session is created.
 
 const HEARTBEAT_TEMPLATE: &str = r#"# HEARTBEAT.md
 
-# Keep this file empty (or with only comments) to skip heartbeat tasks.
-# Add tasks below when you want the agent to check something periodically.
+Check for pending notifications, scheduled task results, and system events.
+If nothing needs attention, reply HEARTBEAT_OK.
+
+# Memory distillation tasks are automatically appended to your heartbeat
+# message by the system when it's time to update MEMORY.md.
 "#;
 
 // ---------------------------------------------------------------------------
@@ -1243,10 +1235,14 @@ Agent workspaces: `~/.catclaw/workspace/agents/{agent_id}/`
 
 Use `Read` and `Edit` tools directly to view and modify these MD files (personality, memory, etc.). **Do not manually edit `tools.toml` or `catclaw.toml`** — use `catclaw agent tools` and `catclaw config set` instead.
 
-**Memory discipline:**
-- `MEMORY.md` — concise, structured, `##` headings by topic
-- `memory/YYYY-MM-DD.md` — raw daily notes
-- During heartbeats: distill daily notes into MEMORY.md
+**Memory system (automatic):**
+- Transcripts are saved for every conversation (transcripts/{session_id}.jsonl)
+- After conversation idle (30 min), system writes diary to `memory/YYYY-MM-DD.md`
+  using the agent's personality (reads SOUL.md, USER.md, IDENTITY.md, MEMORY.md)
+- Every 3 days during heartbeat, agent distills diary entries into `MEMORY.md`
+- Manual writes to memory files are always allowed and preserved
+- `memory/.last_distill` tracks when MEMORY.md was last updated
+- Diary extraction state tracked via markers in transcript JSONL
 
 ---
 

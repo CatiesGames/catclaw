@@ -120,7 +120,15 @@ Each tool exists in exactly one list: `allowed` (directly usable), `denied` (una
 | `src/cmd_hook.rs` | PreToolUse hook binary logic |
 | `src/tui/agents.rs` | TUI Agents panel: tools 3-state toggle (allowed/approval/denied) |
 | `src/tui/config_panel.rs` | TUI Config panel: editable settings including `approval.timeout_secs` |
-| `src/scheduler.rs` | Heartbeat, cron, archive cleanup |
+| `src/scheduler.rs` | Heartbeat, cron, archive cleanup, diary extraction, memory distillation |
+
+## Automatic Memory System
+
+Two-layer system in `src/scheduler.rs` that transforms transcripts into agent memory:
+
+1. **Layer 1 — Diary extraction** (`check_diary_extraction()`): Every scheduler tick, checks idle sessions (idle > 30 min, origin ≠ system, ≥ 2 user turns, has meaningful responses). Spawns a standalone `claude -p --max-turns 1` with the agent's personality files (SOUL/USER/IDENTITY/MEMORY.md) to write a diary entry. Output appended to `memory/YYYY-MM-DD.md`. Tracks state via `diary_extracted`/`diary_skipped` markers in transcript JSONL.
+
+2. **Layer 2 — Distillation** (`check_distillation_due()` + `execute_heartbeat()`): Every 3 days (tracked by `memory/.last_distill`), appends distillation instructions to the heartbeat message asking the agent to review diary files and update MEMORY.md. Excludes today's diary file (Layer 1 may still be writing). If `.last_distill` is missing, requires oldest diary ≥ 3 days old before first trigger. No extra LLM call — piggybacks on the heartbeat session.
 
 ## Language Conventions
 

@@ -19,6 +19,15 @@ pub struct TranscriptEntry {
     pub sender_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use: Option<Vec<ToolUseEntry>>,
+    /// Channel metadata (only on system entries)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +54,29 @@ impl TranscriptLog {
         Ok(TranscriptLog { path })
     }
 
+    /// Log session start with channel metadata
+    pub async fn log_session_start(
+        &self,
+        session_key: &str,
+        channel_type: Option<&str>,
+        channel_id: Option<&str>,
+        channel_name: Option<&str>,
+    ) {
+        let entry = TranscriptEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            role: "system".to_string(),
+            content: "session_created".to_string(),
+            sender_id: None,
+            sender_name: None,
+            tool_use: None,
+            channel_type: channel_type.map(String::from),
+            channel_id: channel_id.map(String::from),
+            channel_name: channel_name.map(String::from),
+            session_key: Some(session_key.to_string()),
+        };
+        self.append(&entry).await;
+    }
+
     /// Append a user message to the transcript
     pub async fn log_user(
         &self,
@@ -59,6 +91,10 @@ impl TranscriptLog {
             sender_id: sender_id.map(String::from),
             sender_name: sender_name.map(String::from),
             tool_use: None,
+            channel_type: None,
+            channel_id: None,
+            channel_name: None,
+            session_key: None,
         };
         self.append(&entry).await;
     }
@@ -72,6 +108,10 @@ impl TranscriptLog {
             sender_id: None,
             sender_name: None,
             tool_use: tools,
+            channel_type: None,
+            channel_id: None,
+            channel_name: None,
+            session_key: None,
         };
         self.append(&entry).await;
     }
@@ -85,6 +125,10 @@ impl TranscriptLog {
             sender_id: None,
             sender_name: None,
             tool_use: None,
+            channel_type: None,
+            channel_id: None,
+            channel_name: None,
+            session_key: None,
         };
         self.append(&entry).await;
     }
@@ -133,6 +177,29 @@ impl TranscriptLog {
             out.push_str(&format!("[{}] {}: {}\n", entry.timestamp, name, entry.content));
         }
         out
+    }
+
+    /// Read entries since the last diary marker (`diary_extracted` or `diary_skipped`).
+    ///
+    /// Returns `(entries_after_marker, marker_was_found)`.
+    /// If no marker exists, returns all entries.
+    pub async fn read_since_last_marker(&self) -> (Vec<TranscriptEntry>, bool) {
+        let all = self.read_all().await;
+
+        // Find the last diary marker (scanning from the end)
+        let marker_pos = all.iter().rposition(|e| {
+            e.role == "system"
+                && (e.content.starts_with("diary_extracted")
+                    || e.content.starts_with("diary_skipped"))
+        });
+
+        match marker_pos {
+            Some(pos) => {
+                let entries = all[(pos + 1)..].to_vec();
+                (entries, true)
+            }
+            None => (all, false),
+        }
     }
 
     pub fn path(&self) -> &Path {
