@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEvent, KeyModifiers,
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
         EnableMouseCapture, DisableMouseCapture, MouseEventKind,
         KeyboardEnhancementFlags, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     },
@@ -575,7 +575,7 @@ pub async fn run(
 
         if event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
-                Event::Key(key) => {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     app.handle_event(&key);
                     if app.should_quit {
                         break;
