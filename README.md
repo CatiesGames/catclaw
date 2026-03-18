@@ -5,18 +5,8 @@
   <img src="https://img.shields.io/badge/status-alpha-yellow" alt="Status">
 </p>
 
-```
-     ██████╗  █████╗ ████████╗ ██████╗██╗      █████╗ ██╗    ██╗
-    ██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝██║     ██╔══██╗██║    ██║
-    ██║      ███████║   ██║   ██║     ██║     ███████║██║ █╗ ██║
-    ██║      ██╔══██║   ██║   ██║     ██║     ██╔══██║██║███╗██║
-    ╚██████╗ ██║  ██║   ██║   ╚██████╗███████╗██║  ██║╚███╔███╔╝
-     ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝
-```
-
 <p align="center">
-  <strong>Personal AI Gateway powered by Claude Code</strong><br>
-  <em>Multi-agent &bull; Multi-channel &bull; Always-on</em>
+  <img src="assets/splash.png" alt="CatClaw Splash" width="600">
 </p>
 
 ---
