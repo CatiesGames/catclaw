@@ -402,10 +402,10 @@ async fn check_diary_extraction(
 /// Safe to call on sessions in any state (idle, active, archived).
 /// Does NOT change session state — caller is responsible for lifecycle management.
 pub async fn extract_diary_for_session(agent: &Agent, session: &SessionRow) {
-    let transcript = match TranscriptLog::open(&agent.workspace, &session.session_id).await {
-        Ok(t) => t,
-        Err(e) => {
-            warn!(session = %session.session_key, error = %e, "diary: failed to open transcript");
+    let transcript = match TranscriptLog::open_existing(&agent.workspace, &session.session_id).await {
+        Some(t) => t,
+        None => {
+            // No transcript file — nothing to extract
             return;
         }
     };

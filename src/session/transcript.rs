@@ -95,6 +95,32 @@ impl TranscriptLog {
         Ok(TranscriptLog { path })
     }
 
+    /// Open an existing transcript file for a session. Returns None if no file exists.
+    /// Does NOT create a new file — use this for read-only operations like diary extraction.
+    pub async fn open_existing(agent_workspace: &Path, session_id: &str) -> Option<Self> {
+        let dir = agent_workspace.join("transcripts");
+
+        // Try plain {session_id}.jsonl
+        let plain = dir.join(format!("{}.jsonl", session_id));
+        if plain.exists() {
+            return Some(TranscriptLog { path: plain });
+        }
+
+        // Try labeled *_{session_id}.jsonl
+        let suffix = format!("_{}.jsonl", session_id);
+        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.ends_with(&suffix) {
+                        return Some(TranscriptLog { path: entry.path() });
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     /// Log session start with channel metadata
     pub async fn log_session_start(
         &self,

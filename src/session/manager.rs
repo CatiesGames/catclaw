@@ -167,20 +167,22 @@ impl SessionManager {
                             .as_deref()
                             .unwrap_or(&new_id);
 
-                        // Log transcript (new session — include label for readable filename)
-                        let label = super::transcript::label_from_session_key(&session_key);
-                        let transcript =
-                            TranscriptLog::open_with_label(&agent.workspace, final_id, Some(&label)).await?;
-                        let (ch_type, ch_name) = parse_session_key_channel(&session_key);
-                        transcript.log_session_start(&session_key, ch_type, None, ch_name).await;
-                        transcript
-                            .log_user(
-                                message,
-                                sender.sender_id.as_deref(),
-                                sender.sender_name.as_deref(),
-                            )
-                            .await;
-                        transcript.log_assistant(&response, None).await;
+                        // Log transcript (skip for system sessions like heartbeat/cron)
+                        if key.origin != "system" {
+                            let label = super::transcript::label_from_session_key(&session_key);
+                            let transcript =
+                                TranscriptLog::open_with_label(&agent.workspace, final_id, Some(&label)).await?;
+                            let (ch_type, ch_name) = parse_session_key_channel(&session_key);
+                            transcript.log_session_start(&session_key, ch_type, None, ch_name).await;
+                            transcript
+                                .log_user(
+                                    message,
+                                    sender.sender_id.as_deref(),
+                                    sender.sender_name.as_deref(),
+                                )
+                                .await;
+                            transcript.log_assistant(&response, None).await;
+                        }
 
                         // Update session_id if claude returned one
                         if let Some(real_id) = &handle.session_id {
@@ -256,29 +258,31 @@ impl SessionManager {
             .as_deref()
             .unwrap_or(&session_id);
 
-        // Log transcript (pass label for new sessions so filename is readable)
-        let label = if !is_resume {
-            Some(super::transcript::label_from_session_key(&session_key))
-        } else {
-            None
-        };
-        let transcript = TranscriptLog::open_with_label(
-            &agent.workspace,
-            final_id,
-            label.as_deref(),
-        ).await?;
-        if !is_resume {
-            let (ch_type, ch_name) = parse_session_key_channel(&session_key);
-            transcript.log_session_start(&session_key, ch_type, None, ch_name).await;
+        // Log transcript (skip for system sessions like heartbeat/cron)
+        if key.origin != "system" {
+            let label = if !is_resume {
+                Some(super::transcript::label_from_session_key(&session_key))
+            } else {
+                None
+            };
+            let transcript = TranscriptLog::open_with_label(
+                &agent.workspace,
+                final_id,
+                label.as_deref(),
+            ).await?;
+            if !is_resume {
+                let (ch_type, ch_name) = parse_session_key_channel(&session_key);
+                transcript.log_session_start(&session_key, ch_type, None, ch_name).await;
+            }
+            transcript
+                .log_user(
+                    message,
+                    sender.sender_id.as_deref(),
+                    sender.sender_name.as_deref(),
+                )
+                .await;
+            transcript.log_assistant(&response, None).await;
         }
-        transcript
-            .log_user(
-                message,
-                sender.sender_id.as_deref(),
-                sender.sender_name.as_deref(),
-            )
-            .await;
-        transcript.log_assistant(&response, None).await;
 
         // Update session_id if claude returned one (may differ from what we set)
         if let Some(real_id) = &handle.session_id {
@@ -423,6 +427,7 @@ impl SessionManager {
         let message_owned = message.to_string();
         let session_key_owned = session_key.clone();
         let session_id_owned = session_id.clone();
+        let is_system = key.origin == "system";
 
         // Move permit into the spawned task so concurrency is held until completion
         tokio::spawn(async move {
@@ -439,20 +444,25 @@ impl SessionManager {
             let mut stopped = false;
             let mut tool_uses: Vec<super::transcript::ToolUseEntry> = Vec::new();
 
-            // Open transcript log and write user message immediately
-            let label = if !is_resume {
-                Some(super::transcript::label_from_session_key(&session_key_owned))
+            // Open transcript log and write user message (skip for system sessions)
+            let transcript = if !is_system {
+                let label = if !is_resume {
+                    Some(super::transcript::label_from_session_key(&session_key_owned))
+                } else {
+                    None
+                };
+                let t = TranscriptLog::open_with_label(&agent_workspace, &session_id_owned, label.as_deref()).await.ok();
+                if let Some(ref t) = t {
+                    if !is_resume {
+                        let (ch_type, ch_name) = parse_session_key_channel(&session_key_owned);
+                        t.log_session_start(&session_key_owned, ch_type, None, ch_name).await;
+                    }
+                    t.log_user(&message_owned, sender_id.as_deref(), sender_name.as_deref()).await;
+                }
+                t
             } else {
                 None
             };
-            let transcript = TranscriptLog::open_with_label(&agent_workspace, &session_id_owned, label.as_deref()).await.ok();
-            if let Some(ref t) = transcript {
-                if !is_resume {
-                    let (ch_type, ch_name) = parse_session_key_channel(&session_key_owned);
-                    t.log_session_start(&session_key_owned, ch_type, None, ch_name).await;
-                }
-                t.log_user(&message_owned, sender_id.as_deref(), sender_name.as_deref()).await;
-            }
 
             info!(session_key = %session_key_owned, is_running = handle.is_running(), "streaming: entering event loop");
             let mut got_first_event = false;
