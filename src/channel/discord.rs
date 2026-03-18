@@ -188,20 +188,33 @@ impl EventHandler for Handler {
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
-        // Register global slash commands
-        let commands = vec![
-            CreateCommand::new("stop").description("Stop the current session"),
-            CreateCommand::new("new").description("Start a new session (archives current)"),
-        ];
-        if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
-            error!(error = %e, "failed to register global slash commands");
-        }
-
         info!(
             user = %ready.user.name,
             guilds = ready.guilds.len(),
             "Discord bot connected"
         );
+
+        // Register global slash commands (retry on transient HTTP errors)
+        let commands = vec![
+            CreateCommand::new("stop").description("Stop the current session"),
+            CreateCommand::new("new").description("Start a new session (archives current)"),
+        ];
+        for attempt in 1..=3 {
+            match Command::set_global_commands(&ctx.http, commands.clone()).await {
+                Ok(_) => {
+                    info!("registered global slash commands");
+                    break;
+                }
+                Err(e) => {
+                    if attempt < 3 {
+                        error!(error = %e, attempt, "failed to register slash commands, retrying...");
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    } else {
+                        error!(error = %e, "failed to register slash commands after 3 attempts");
+                    }
+                }
+            }
+        }
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
