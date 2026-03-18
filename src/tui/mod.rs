@@ -36,6 +36,47 @@ use crate::ws_client::GatewayClient;
 
 use theme::Theme;
 
+/// Convert a UTC timestamp string (RFC 3339 or "YYYY-MM-DDTHH:MM:SS") to local time display.
+/// Returns "YYYY-MM-DD HH:MM:SS" in the system's local timezone.
+fn utc_to_local_display(ts: &str) -> String {
+    use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
+    // Try RFC 3339 first
+    if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+        return dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+    // Try naive datetime (assume UTC)
+    if ts.len() >= 19 {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(&ts[..19], "%Y-%m-%dT%H:%M:%S") {
+            let utc_dt = Utc.from_utc_datetime(&ndt);
+            return utc_dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string();
+        }
+    }
+    // Fallback: just trim and replace T
+    if ts.len() >= 19 {
+        ts[..19].replace('T', " ")
+    } else {
+        ts.to_string()
+    }
+}
+
+/// Get a human-readable label for the system's local timezone (e.g. "UTC+8", "UTC-5").
+fn local_timezone_label() -> String {
+    let offset = chrono::Local::now().offset().local_minus_utc();
+    let hours = offset / 3600;
+    let mins = (offset.abs() % 3600) / 60;
+    if mins == 0 {
+        if hours >= 0 {
+            format!("UTC+{}", hours)
+        } else {
+            format!("UTC{}", hours)
+        }
+    } else if hours >= 0 {
+        format!("UTC+{}:{:02}", hours, mins)
+    } else {
+        format!("UTC{}:{:02}", hours, mins)
+    }
+}
+
 /// Actions that components can emit
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

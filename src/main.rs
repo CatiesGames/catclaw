@@ -329,18 +329,18 @@ enum TaskCommands {
     },
     /// Enable a task
     Enable {
-        /// Task ID
-        id: i64,
+        /// Task ID or name
+        id_or_name: String,
     },
     /// Disable a task
     Disable {
-        /// Task ID
-        id: i64,
+        /// Task ID or name
+        id_or_name: String,
     },
     /// Delete a task
     Delete {
-        /// Task ID
-        id: i64,
+        /// Task ID or name
+        id_or_name: String,
     },
 }
 
@@ -899,15 +899,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 } => {
                     cmd_task_add(&state_db, &name, &agent, &prompt, in_mins, cron, every, at, config.general.timezone.as_deref())?;
                 }
-                TaskCommands::Enable { id } => {
+                TaskCommands::Enable { id_or_name } => {
+                    let id = resolve_task_id(&state_db, &id_or_name)?;
                     state_db.enable_task(id)?;
                     println!("Task {} enabled.", id);
                 }
-                TaskCommands::Disable { id } => {
+                TaskCommands::Disable { id_or_name } => {
+                    let id = resolve_task_id(&state_db, &id_or_name)?;
                     state_db.disable_task(id)?;
                     println!("Task {} disabled.", id);
                 }
-                TaskCommands::Delete { id } => {
+                TaskCommands::Delete { id_or_name } => {
+                    let id = resolve_task_id(&state_db, &id_or_name)?;
                     state_db.delete_task(id)?;
                     println!("Task {} deleted.", id);
                 }
@@ -2048,8 +2051,8 @@ fn cmd_task_list(state_db: &StateDb) -> Result<()> {
             "one-shot".to_string()
         };
 
-        // Format next_run_at to local-ish display
-        let next = &t.next_run_at[..19].replace('T', " ");
+        // Format next_run_at to local timezone display
+        let next = format_utc_to_local(&t.next_run_at);
 
         println!(
             "{:<4} {:<25} {:<10} {:<8} {:<20} {}",
@@ -2063,6 +2066,31 @@ fn cmd_task_list(state_db: &StateDb) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve a task ID from either a numeric ID or a task name.
+fn resolve_task_id(state_db: &crate::state::StateDb, id_or_name: &str) -> Result<i64> {
+    if let Ok(id) = id_or_name.parse::<i64>() {
+        return Ok(id);
+    }
+    state_db
+        .find_task_id_by_name(id_or_name)?
+        .ok_or_else(|| crate::error::CatClawError::Config(format!("task '{}' not found", id_or_name)))
+}
+
+/// Format a UTC timestamp string to local timezone display.
+fn format_utc_to_local(ts: &str) -> String {
+    use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
+    if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+        return dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+    if ts.len() >= 19 {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(&ts[..19], "%Y-%m-%dT%H:%M:%S") {
+            let utc_dt = Utc.from_utc_datetime(&ndt);
+            return utc_dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string();
+        }
+    }
+    if ts.len() >= 19 { ts[..19].replace('T', " ") } else { ts.to_string() }
 }
 
 /// Parse an `--at` time string into a UTC DateTime.
@@ -2198,10 +2226,10 @@ fn cmd_task_add(
         payload: Some(prompt.to_string()),
     })?;
 
-    let next_display = &next_run_at[..19].replace('T', " ");
+    let next_display = format_utc_to_local(&next_run_at);
     println!("Task #{} created: \"{}\"", id, name);
     println!("  Agent: {}", agent);
-    println!("  Next run: {} UTC", next_display);
+    println!("  Next run: {}", next_display);
 
     if cron.is_some() {
         println!("  Schedule: cron");

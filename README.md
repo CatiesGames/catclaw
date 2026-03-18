@@ -193,9 +193,9 @@ catclaw task add <name> --agent main \
   --prompt "Check inbox" --every 30               # Repeat every 30 minutes
 catclaw task add <name> --agent main \
   --prompt "Morning briefing" --cron "0 9 * * *"  # Cron schedule
-catclaw task enable <id>                          # Enable a task
-catclaw task disable <id>                         # Disable a task
-catclaw task delete <id>                          # Delete a task
+catclaw task enable <id|name>                     # Enable a task (by ID or name)
+catclaw task disable <id|name>                    # Disable a task
+catclaw task delete <id|name>                     # Delete a task
 ```
 
 ### Configuration

@@ -1357,9 +1357,9 @@ catclaw task add <name> --agent <id> --prompt "..." --at "17:00"
 catclaw task add <name> --agent <id> --prompt "..." --at "2026-03-20T09:00:00"
 catclaw task add <name> --agent <id> --prompt "..." --cron "0 9 * * *"
 catclaw task add <name> --agent <id> --prompt "..." --every 30
-catclaw task enable <id>                 # Enable a task
-catclaw task disable <id>                # Disable a task
-catclaw task delete <id>                 # Remove a task
+catclaw task enable <id|name>             # Enable a task (by ID or name)
+catclaw task disable <id|name>            # Disable a task
+catclaw task delete <id|name>             # Remove a task
 ```
 
 Scheduling options (pick one, mutually exclusive):

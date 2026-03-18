@@ -150,10 +150,9 @@ async fn tick_user_tasks(
             let next = *now + chrono::Duration::minutes(interval_mins);
             state_db.update_task_schedule(task.id, &next.to_rfc3339(), &last_run)?;
         } else {
-            // One-shot: disable after execution
-            info!(task_id = task.id, name = %task.name, "one-shot task completed, disabling");
-            state_db.update_task_schedule(task.id, &last_run, &last_run)?;
-            state_db.disable_task(task.id)?;
+            // One-shot: delete after execution
+            info!(task_id = task.id, name = %task.name, "one-shot task completed, deleting");
+            state_db.delete_task(task.id)?;
         }
     }
 

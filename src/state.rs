@@ -552,6 +552,14 @@ impl StateDb {
         Ok(())
     }
 
+    /// Find a task ID by name. Returns the first match.
+    pub fn find_task_id_by_name(&self, name: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id FROM scheduled_tasks WHERE name = ?1 LIMIT 1")?;
+        let id = stmt.query_row(params![name], |row| row.get(0)).optional()?;
+        Ok(id)
+    }
+
     pub fn get_task(&self, id: i64) -> Result<Option<ScheduledTaskRow>> {
         let conn = self.conn.lock().unwrap();
         let row = conn

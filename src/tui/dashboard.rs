@@ -738,7 +738,7 @@ fn format_next_run_relative(ts: &str) -> String {
         }
         return format!("in {}h {}m", h, m);
     }
-    dt.format("%Y-%m-%d %H:%M").to_string()
+    dt.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()
 }
 
 fn state_icon(state: &str) -> (&'static str, Color) {

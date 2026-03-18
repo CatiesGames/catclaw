@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tracing::error;
 
 use super::theme::Theme;
-use super::{Action, Component};
+use super::{local_timezone_label, utc_to_local_display, Action, Component};
 use crate::ws_client::GatewayClient;
 
 /// Task info from WebSocket
@@ -129,11 +129,7 @@ impl TasksPanel {
     }
 
     fn format_next_run(task: &TaskInfo) -> String {
-        if task.next_run_at.len() >= 19 {
-            task.next_run_at[..19].replace('T', " ")
-        } else {
-            task.next_run_at.clone()
-        }
+        utc_to_local_display(&task.next_run_at)
     }
 }
 
@@ -263,7 +259,7 @@ impl Component for TasksPanel {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Theme::SURFACE1))
-                    .title(" Tasks ")
+                    .title(format!(" Tasks ({}) ", local_timezone_label()))
                     .title_style(Style::default().fg(Theme::MAUVE)),
             );
 
