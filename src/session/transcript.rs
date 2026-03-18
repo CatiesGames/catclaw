@@ -38,19 +38,60 @@ pub struct ToolUseEntry {
 
 /// Manages transcript files for a session, stored under the agent's workspace.
 ///
-/// Layout: {agent_workspace}/transcripts/{session_id}.jsonl
+/// Layout: {agent_workspace}/transcripts/{label}_{session_id}.jsonl
+/// Falls back to {session_id}.jsonl for backward compatibility.
 pub struct TranscriptLog {
     path: PathBuf,
 }
 
 #[allow(dead_code)]
 impl TranscriptLog {
-    /// Create a new transcript log for a session.
-    /// Ensures the transcripts/ directory exists.
+    /// Open (or create) a transcript log for a session.
+    /// If `label` is provided and no existing file is found, creates `{label}_{session_id}.jsonl`.
+    /// Falls back to `{session_id}.jsonl` for backward compatibility with existing transcripts.
     pub async fn open(agent_workspace: &Path, session_id: &str) -> Result<Self> {
+        Self::open_with_label(agent_workspace, session_id, None).await
+    }
+
+    /// Open with an explicit label (e.g. "discord_general" from the session key).
+    pub async fn open_with_label(
+        agent_workspace: &Path,
+        session_id: &str,
+        label: Option<&str>,
+    ) -> Result<Self> {
         let dir = agent_workspace.join("transcripts");
         fs::create_dir_all(&dir).await?;
-        let path = dir.join(format!("{}.jsonl", session_id));
+
+        // Try to find an existing file matching this session_id (any label prefix)
+        let plain = dir.join(format!("{}.jsonl", session_id));
+        if plain.exists() {
+            return Ok(TranscriptLog { path: plain });
+        }
+
+        // Check for existing labeled file via glob: *_{session_id}.jsonl
+        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+            let suffix = format!("_{}.jsonl", session_id);
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.ends_with(&suffix) {
+                        return Ok(TranscriptLog { path: entry.path() });
+                    }
+                }
+            }
+        }
+
+        // Create new file with label if provided
+        let filename = if let Some(lbl) = label {
+            let safe = sanitize_label(lbl);
+            if safe.is_empty() {
+                format!("{}.jsonl", session_id)
+            } else {
+                format!("{}_{}.jsonl", safe, session_id)
+            }
+        } else {
+            format!("{}.jsonl", session_id)
+        };
+        let path = dir.join(filename);
         Ok(TranscriptLog { path })
     }
 
@@ -234,4 +275,30 @@ impl TranscriptLog {
             }
         }
     }
+}
+
+/// Build a transcript label from a session key.
+/// e.g. "main:discord:dm.Boze" → "discord_dm.Boze"
+/// Extracts origin and context_id, dropping the agent_id prefix.
+pub fn label_from_session_key(session_key: &str) -> String {
+    let parts: Vec<&str> = session_key.splitn(3, ':').collect();
+    if parts.len() >= 3 {
+        format!("{}_{}", parts[1], parts[2])
+    } else {
+        session_key.to_string()
+    }
+}
+
+/// Sanitize a label for use in filenames: keep alphanumeric, dot, dash, underscore.
+fn sanitize_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

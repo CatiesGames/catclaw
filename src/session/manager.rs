@@ -167,9 +167,10 @@ impl SessionManager {
                             .as_deref()
                             .unwrap_or(&new_id);
 
-                        // Log transcript
+                        // Log transcript (new session — include label for readable filename)
+                        let label = super::transcript::label_from_session_key(&session_key);
                         let transcript =
-                            TranscriptLog::open(&agent.workspace, final_id).await?;
+                            TranscriptLog::open_with_label(&agent.workspace, final_id, Some(&label)).await?;
                         let (ch_type, ch_name) = parse_session_key_channel(&session_key);
                         transcript.log_session_start(&session_key, ch_type, None, ch_name).await;
                         transcript
@@ -255,8 +256,17 @@ impl SessionManager {
             .as_deref()
             .unwrap_or(&session_id);
 
-        // Log transcript
-        let transcript = TranscriptLog::open(&agent.workspace, final_id).await?;
+        // Log transcript (pass label for new sessions so filename is readable)
+        let label = if !is_resume {
+            Some(super::transcript::label_from_session_key(&session_key))
+        } else {
+            None
+        };
+        let transcript = TranscriptLog::open_with_label(
+            &agent.workspace,
+            final_id,
+            label.as_deref(),
+        ).await?;
         if !is_resume {
             let (ch_type, ch_name) = parse_session_key_channel(&session_key);
             transcript.log_session_start(&session_key, ch_type, None, ch_name).await;
@@ -430,7 +440,12 @@ impl SessionManager {
             let mut tool_uses: Vec<super::transcript::ToolUseEntry> = Vec::new();
 
             // Open transcript log and write user message immediately
-            let transcript = TranscriptLog::open(&agent_workspace, &session_id_owned).await.ok();
+            let label = if !is_resume {
+                Some(super::transcript::label_from_session_key(&session_key_owned))
+            } else {
+                None
+            };
+            let transcript = TranscriptLog::open_with_label(&agent_workspace, &session_id_owned, label.as_deref()).await.ok();
             if let Some(ref t) = transcript {
                 if !is_resume {
                     let (ch_type, ch_name) = parse_session_key_channel(&session_key_owned);
