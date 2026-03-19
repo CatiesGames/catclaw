@@ -1497,11 +1497,11 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
                 cli_ui::TEXT, cli_ui::RESET, cli_ui::TEAL, cli_ui::RESET
             ));
             cli_ui::section_line(&format!(
-                "{}2.{} Select your workspace → Paste the YAML manifest below → Create",
+                "{}2.{} Select your workspace → Paste the JSON manifest below → Create",
                 cli_ui::MAUVE, cli_ui::RESET
             ));
             cli_ui::section_line(&format!(
-                "{}3.{} {}Settings → Socket Mode{} → Generate an {}App-Level Token{} (name it anything)",
+                "{}3.{} {}Settings → Socket Mode{} → Generate App-Level Token (scope: {}connections:write{})",
                 cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET, cli_ui::TEAL, cli_ui::RESET
             ));
             cli_ui::section_line(&format!(
