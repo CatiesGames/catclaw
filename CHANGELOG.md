@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/CatiesGames/catclaw/compare/v0.11.0...v0.11.1) (2026-03-19)
+
+
+### Bug Fixes
+
+* Slack upload_file 改用 form-encoded 呼叫 getUploadURLExternal ([49bdb4b](https://github.com/CatiesGames/catclaw/commit/49bdb4bf46751141b134a8680d17c2924bc1ded3))
+
 ## [0.11.0](https://github.com/CatiesGames/catclaw/compare/v0.10.3...v0.11.0) (2026-03-19)
 
 
