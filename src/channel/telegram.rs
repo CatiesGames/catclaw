@@ -360,8 +360,16 @@ impl ChannelAdapter for TelegramAdapter {
             .parse()
             .map_err(|_| CatClawError::Telegram("invalid chat_id".into()))?;
 
-        bot.send_message(ChatId(chat_id), &msg.text)
-            .await
+        let mut req = bot.send_message(ChatId(chat_id), &msg.text);
+
+        // Reply in forum topic thread if thread_id is set
+        if let Some(ref tid) = msg.thread_id {
+            if let Ok(thread_int) = tid.parse::<i32>() {
+                req = req.message_thread_id(ThreadId(TgMessageId(thread_int)));
+            }
+        }
+
+        req.await
             .map_err(|e| CatClawError::Telegram(format!("send_message: {}", e)))?;
 
         Ok(())
@@ -457,6 +465,7 @@ impl ChannelAdapter for TelegramAdapter {
             message_editing: true,
             max_message_length: 4096,
             attachments: true,
+            streaming: false,
         }
     }
 

@@ -13,14 +13,14 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
-CatClaw is a Rust daemon that turns your **Claude Code subscription** into a personal AI assistant accessible from Discord, Telegram, and a beautiful terminal UI. Inspired by [OpenClaw](https://github.com/nicekid1/OpenClaw), built from scratch in Rust for performance, reliability, and full Anthropic compliance.
+CatClaw is a Rust daemon that turns your **Claude Code subscription** into a personal AI assistant accessible from Discord, Telegram, Slack, and a beautiful terminal UI. Inspired by OpenClaw, built from scratch in Rust for performance, reliability, and full Anthropic compliance.
 
 ## Why CatClaw?
 
 - **Use your Claude Code subscription** &mdash; no API keys, no surprise bills. CatClaw spawns `claude -p` subprocesses that use your existing Claude Code plan.
 - **Multi-agent** &mdash; define multiple AI personas (main assistant, research expert, code reviewer), each with their own personality, memory, and tool permissions.
-- **Multi-channel** &mdash; talk to your agents from Discord, Telegram, or the built-in TUI. All channels share the same session and memory system.
-- **Tool approval system** &mdash; require user confirmation before agents execute sensitive tools (Bash, Edit, etc.) with inline approval UI in TUI and Discord/Telegram buttons.
+- **Multi-channel** &mdash; talk to your agents from Discord, Telegram, Slack, or the built-in TUI. All channels share the same session and memory system.
+- **Tool approval system** &mdash; require user confirmation before agents execute sensitive tools (Bash, Edit, etc.) with inline approval UI in TUI and Discord/Telegram/Slack buttons.
 - **Stateless gateway** &mdash; all state persisted to SQLite. Kill the daemon anytime, restart, and everything picks up where it left off.
 - **Beautiful TUI** &mdash; Catppuccin Mocha themed terminal interface with 8 panels for managing everything.
 
@@ -81,10 +81,10 @@ catclaw uninstall                 # Full uninstall (stop, remove service, delete
 ┌──────────────────────────────────────────────────────────────────┐
 │                       CatClaw Gateway (Rust)                     │
 │                                                                  │
-│  ┌─────────────┐ ┌─────────────┐                                │
-│  │  Discord     │ │  Telegram   │    Channel Adapters            │
-│  │  Adapter     │ │  Adapter    │                                │
-│  └──────┬───────┘ └──────┬──────┘                                │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐                 │
+│  │  Discord     │ │  Telegram   │ │  Slack      │  Adapters      │
+│  │  Adapter     │ │  Adapter    │ │  Adapter    │                │
+│  └──────┬───────┘ └──────┬──────┘ └──────┬──────┘                │
 │         └────────────────┘                                        │
 │                  ▼                                                │
 │  ┌────────────────────────────────────────────────────────────┐  │
@@ -156,6 +156,9 @@ catclaw channel add discord \
   --activation mention                            # Add Discord channel
 catclaw channel add telegram \
   --token-env CATCLAW_TELEGRAM_TOKEN              # Add Telegram channel
+catclaw channel add slack \
+  --token-env CATCLAW_SLACK_BOT_TOKEN \
+  --app-token-env CATCLAW_SLACK_APP_TOKEN         # Add Slack channel
 ```
 
 ### Bindings (Channel → Agent routing)
@@ -163,6 +166,7 @@ catclaw channel add telegram \
 ```bash
 catclaw bind "discord:channel:222222" research    # Bind a channel to an agent
 catclaw bind "telegram:*" main                    # Bind all Telegram to main
+catclaw bind "slack:channel:C12345" research      # Bind a Slack channel to an agent
 catclaw bind "*" main                             # Global fallback
 ```
 
@@ -267,7 +271,7 @@ require_approval = ["Edit", "Write"]
 
 - **allowed** &mdash; tool runs freely
 - **denied** &mdash; tool is completely blocked
-- **require_approval** &mdash; tool runs only after user approves (via TUI inline widget, Discord button, or Telegram keyboard)
+- **require_approval** &mdash; tool runs only after user approves (via TUI inline widget, Discord button, Telegram keyboard, or Slack Block Kit button)
 
 Manage via TUI (Agents → `t` Tools → Space to cycle states) or CLI (`catclaw agent tools`).
 
@@ -280,6 +284,7 @@ CatClaw ships with built-in skills and supports installing custom ones:
 | `catclaw` | CatClaw system administration (agent knows all CLI commands) |
 | `discord` | Discord formatting and MCP tool usage |
 | `telegram` | Telegram formatting and MCP tool usage |
+| `slack` | Slack formatting and MCP tool usage |
 | `sessions-history` | Query transcripts from other sessions |
 | `injection-guard` | Defend against prompt injection from external content |
 
@@ -309,7 +314,7 @@ MCP tools appear in the TUI Tools panel under "User MCP Servers" and can be deni
 |---|---|---|
 | **Discord** | ✅ | Threads, typing indicator, approval buttons, 32 MCP actions |
 | **Telegram** | ✅ | Long polling, forum topics, approval keyboard, 26 MCP actions |
-| **Slack** | Planned | — |
+| **Slack** | ✅ | Socket Mode, threads, native AI streaming, approval buttons, 17 MCP actions |
 | **TUI** | ✅ | Direct chat with streaming, inline approval widget |
 
 **Activation modes** (DMs always respond; this controls group/server channels):
@@ -330,6 +335,8 @@ Agent wants to list Discord channels
 **Discord** (32 tools): messages, reactions, pins, threads, channels, categories, permissions, guilds, members, roles, emojis, moderation, events, stickers.
 
 **Telegram** (26 tools): messages, pins, chat info/management, moderation, polls, forum topics, permissions, invite links.
+
+**Slack** (17 tools): messages, reactions, pins, channels, threads, users.
 
 ## Session Management
 
@@ -372,6 +379,11 @@ activation = "mention"
 [[channels]]
 type = "telegram"
 token_env = "CATCLAW_TELEGRAM_TOKEN"
+
+[[channels]]
+type = "slack"
+token_env = "CATCLAW_SLACK_BOT_TOKEN"
+app_token_env = "CATCLAW_SLACK_APP_TOKEN"
 activation = "mention"
 
 [[agents]]
@@ -390,6 +402,7 @@ timeout_secs = 120                  # approval timeout (global)
 | Async runtime | `tokio` |
 | Discord | `serenity` + `poise` |
 | Telegram | `teloxide` |
+| Slack | `reqwest` + `tokio-tungstenite` (Socket Mode) |
 | HTTP server (WS + MCP) | `axum` |
 | CLI | `clap` (derive) |
 | Database | `rusqlite` (bundled SQLite, WAL) |

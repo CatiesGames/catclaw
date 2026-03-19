@@ -1,4 +1,5 @@
 pub mod discord;
+pub mod slack;
 pub mod telegram;
 
 use async_trait::async_trait;
@@ -93,6 +94,8 @@ pub struct ChannelCapabilities {
     pub message_editing: bool,
     pub max_message_length: usize,
     pub attachments: bool,
+    /// Whether the adapter supports native streaming (e.g. Slack AI streaming API).
+    pub streaming: bool,
 }
 
 /// Guard that stops typing indicator when dropped
@@ -168,6 +171,31 @@ pub trait ChannelAdapter: Send + Sync {
             reply_to_message_id: None,
         })
         .await
+    }
+
+    /// Start a native streaming message (for adapters that support it).
+    /// Returns the message timestamp/ID that subsequent append/stop calls reference.
+    #[allow(dead_code)]
+    async fn send_stream_start(&self, _channel_id: &str, _thread_ts: &str) -> Result<String> {
+        Err(crate::error::CatClawError::Channel(
+            "streaming not supported by this adapter".into(),
+        ))
+    }
+
+    /// Append text to an ongoing stream.
+    #[allow(dead_code)]
+    async fn send_stream_append(&self, _msg_ts: &str, _channel_id: &str, _text: &str) -> Result<()> {
+        Err(crate::error::CatClawError::Channel(
+            "streaming not supported by this adapter".into(),
+        ))
+    }
+
+    /// Stop (finalize) a streaming message. Optional final text replaces the full message body.
+    #[allow(dead_code)]
+    async fn send_stream_stop(&self, _msg_ts: &str, _channel_id: &str, _text: Option<&str>) -> Result<()> {
+        Err(crate::error::CatClawError::Channel(
+            "streaming not supported by this adapter".into(),
+        ))
     }
 
     /// Execute a platform-specific action (for MCP tool calls).

@@ -117,6 +117,10 @@ pub struct ChannelConfig {
     /// Sender IDs denied in groups (checked before allow; works in any policy)
     #[serde(default)]
     pub group_deny: Vec<String>,
+
+    /// Environment variable name for the app-level token (Slack Socket Mode only).
+    #[serde(default)]
+    pub app_token_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,6 +434,7 @@ impl Config {
                                     "group_policy" => Ok(ch.group_policy.clone()),
                                     "group_allow" => Ok(ch.group_allow.join(",")),
                                     "group_deny" => Ok(ch.group_deny.join(",")),
+                                    "app_token_env" => Ok(ch.app_token_env.clone().unwrap_or_default()),
                                     _ => Err(CatClawError::Config(format!("unknown channel field: {}", field))),
                                 };
                             }
@@ -569,6 +574,10 @@ impl Config {
                             "group_deny" => { ch.group_deny = split_csv(value); Ok(false) }
                             "token_env" => {
                                 ch.token_env = value.to_string();
+                                Ok(true)
+                            }
+                            "app_token_env" => {
+                                ch.app_token_env = if value.is_empty() { None } else { Some(value.to_string()) };
                                 Ok(true)
                             }
                             _ => Err(CatClawError::Config(format!("unknown channel field: {}", field))),

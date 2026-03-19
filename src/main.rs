@@ -360,6 +360,9 @@ enum ChannelCommands {
         /// Activation mode (mention, all)
         #[arg(long, default_value = "mention")]
         activation: String,
+        /// Environment variable name for the app-level token (Slack Socket Mode only)
+        #[arg(long)]
+        app_token_env: Option<String>,
     },
     /// List configured channels
     List,
@@ -1019,6 +1022,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     token_env,
                     guilds,
                     activation,
+                    app_token_env,
                 } => {
                     config.channels.push(crate::config::ChannelConfig {
                         channel_type,
@@ -1032,6 +1036,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         group_policy: "open".to_string(),
                         group_allow: vec![],
                         group_deny: vec![],
+                        app_token_env,
                     });
                     config.save(&cli.config)?;
                     println!("Channel added. Config saved.");
@@ -1196,7 +1201,7 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
     let available_channels: Vec<(&str, &str, bool)> = vec![
         ("discord", "Discord", true),
         ("telegram", "Telegram", true),
-        ("slack", "Slack", false),
+        ("slack", "Slack", true),
     ];
 
     // Load existing .env if present (from ~/.catclaw/.env)
@@ -1373,6 +1378,7 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
                 group_policy: "open".to_string(),
                 group_allow: vec![],
                 group_deny: vec![],
+                app_token_env: None,
             });
 
             std::env::set_var(env_var_name, &token);
@@ -1473,11 +1479,175 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
                 group_policy: "open".to_string(),
                 group_allow: vec![],
                 group_deny: vec![],
+                app_token_env: None,
             });
 
             std::env::set_var(env_var_name, &token);
             println!();
             cli_ui::status_msg("✅", "Telegram configured (token saved to .env)");
+            println!();
+        } else if ch_type == "slack" {
+            println!();
+            cli_ui::section_header("💬", "Slack App Setup");
+            cli_ui::section_empty();
+            cli_ui::section_line(&format!(
+                "{}1.{} Go to {}https://api.slack.com/apps{} → {}Create New App{} → From Scratch",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::SAPPHIRE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}2.{} {}Socket Mode{} → Enable → Create App-Level Token (scope: {}connections:write{})",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET, cli_ui::TEAL, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}3.{} {}OAuth & Permissions{} → Add Bot Token Scopes:",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_hint("  chat:write, channels:history, channels:read, groups:history,");
+            cli_ui::section_hint("  groups:read, im:history, im:read, mpim:history, mpim:read,");
+            cli_ui::section_hint("  reactions:read, reactions:write, pins:read, pins:write,");
+            cli_ui::section_hint("  users:read, commands, assistant:write");
+            cli_ui::section_line(&format!(
+                "{}4.{} {}Event Subscriptions{} → Enable → Subscribe to bot events:",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_hint("  message.channels, message.groups, message.im, message.mpim,");
+            cli_ui::section_hint("  app_mention, assistant_thread_started, assistant_thread_context_changed");
+            cli_ui::section_line(&format!(
+                "{}5.{} {}Agents & AI Apps{} → Enable (for streaming + thinking indicator)",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}6.{} Install app to workspace → copy {}Bot Token{} (xoxb-...) and {}App Token{} (xapp-...)",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_empty();
+            cli_ui::section_divider();
+            cli_ui::section_empty();
+
+            // Bot Token
+            let bot_env = "CATCLAW_SLACK_BOT_TOKEN";
+            let existing_bot = std::env::var(bot_env).ok();
+
+            let bot_token = if let Some(ref t) = existing_bot {
+                cli_ui::section_ok(&format!(
+                    "{} found in environment ({}...)",
+                    bot_env,
+                    &t[..t.len().min(8)]
+                ));
+                cli_ui::section_empty();
+                cli_ui::section_footer();
+
+                let use_existing = cli_ui::section_select(
+                    &["Use existing token", "Enter a new token"],
+                    0,
+                );
+                cli_ui::section_empty();
+                if use_existing == 0 {
+                    t.clone()
+                } else {
+                    cli_ui::section_footer();
+                    Password::new()
+                        .with_prompt("  Paste your Slack Bot Token (xoxb-...)")
+                        .interact()
+                        .unwrap_or_default()
+                }
+            } else {
+                cli_ui::section_footer();
+                Password::new()
+                    .with_prompt("  Paste your Slack Bot Token (xoxb-...)")
+                    .interact()
+                    .unwrap_or_default()
+            };
+
+            if bot_token.is_empty() {
+                cli_ui::status_msg("⚠️", "No bot token provided — skipping Slack");
+                println!();
+                continue;
+            }
+
+            write_env_var(&mut env_lines, bot_env, &bot_token);
+
+            // App-Level Token
+            println!();
+            let app_env = "CATCLAW_SLACK_APP_TOKEN";
+            let existing_app = std::env::var(app_env).ok();
+
+            let app_token = if let Some(ref t) = existing_app {
+                cli_ui::section_ok(&format!(
+                    "{} found in environment ({}...)",
+                    app_env,
+                    &t[..t.len().min(8)]
+                ));
+                cli_ui::section_empty();
+                cli_ui::section_footer();
+
+                let use_existing = cli_ui::section_select(
+                    &["Use existing token", "Enter a new token"],
+                    0,
+                );
+                cli_ui::section_empty();
+                if use_existing == 0 {
+                    t.clone()
+                } else {
+                    cli_ui::section_footer();
+                    Password::new()
+                        .with_prompt("  Paste your Slack App-Level Token (xapp-...)")
+                        .interact()
+                        .unwrap_or_default()
+                }
+            } else {
+                cli_ui::section_footer();
+                Password::new()
+                    .with_prompt("  Paste your Slack App-Level Token (xapp-...)")
+                    .interact()
+                    .unwrap_or_default()
+            };
+
+            if app_token.is_empty() {
+                cli_ui::status_msg("⚠️", "No app token provided — skipping Slack");
+                println!();
+                continue;
+            }
+
+            write_env_var(&mut env_lines, app_env, &app_token);
+
+            // Activation mode
+            println!();
+            cli_ui::section_header("📡", "Activation Mode");
+            cli_ui::section_empty();
+            cli_ui::section_hint("DMs are always responded to. This setting controls channels:");
+            cli_ui::section_empty();
+            let act_idx = cli_ui::section_select(
+                &["mention — respond only when @mentioned in channels", "all — respond to every message in channels"],
+                0,
+            );
+            cli_ui::section_empty();
+            cli_ui::section_footer();
+            let activation = if act_idx == 0 {
+                "mention".to_string()
+            } else {
+                "all".to_string()
+            };
+
+            config.channels.push(crate::config::ChannelConfig {
+                channel_type: ch_type.to_string(),
+                token_env: bot_env.to_string(),
+                guilds: vec![],
+                activation,
+                overrides: vec![],
+                dm_policy: "open".to_string(),
+                dm_allow: vec![],
+                dm_deny: vec![],
+                group_policy: "open".to_string(),
+                group_allow: vec![],
+                group_deny: vec![],
+                app_token_env: Some(app_env.to_string()),
+            });
+
+            std::env::set_var(bot_env, &bot_token);
+            std::env::set_var(app_env, &app_token);
+            println!();
+            cli_ui::status_msg("✅", "Slack configured (tokens saved to .env)");
             println!();
         } else {
             // Generic channel setup (for future adapters)
@@ -1511,6 +1681,7 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
                 group_policy: "open".to_string(),
                 group_allow: vec![],
                 group_deny: vec![],
+                app_token_env: None,
             });
 
             std::env::set_var(&env_var_name, &token);

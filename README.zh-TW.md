@@ -13,14 +13,14 @@
 
 [English](README.md) | **繁體中文**
 
-CatClaw 是一個 Rust 常駐程式，將你的 **Claude Code 訂閱**轉化為可從 Discord、Telegram 及終端 TUI 存取的個人 AI 助理。靈感來自 [OpenClaw](https://github.com/nicekid1/OpenClaw)，以 Rust 從零打造，追求效能、穩定性與 Anthropic 合規。
+CatClaw 是一個 Rust 常駐程式，將你的 **Claude Code 訂閱**轉化為可從 Discord、Telegram、Slack 及終端 TUI 存取的個人 AI 助理。靈感來自 OpenClaw，以 Rust 從零打造，追求效能、穩定性與 Anthropic 合規。
 
 ## 為什麼選 CatClaw？
 
 - **使用你的 Claude Code 訂閱** — 不需要 API key、不會有意外帳單。CatClaw 產生 `claude -p` 子程序，直接使用你現有的 Claude Code 方案。
 - **多代理（Multi-agent）** — 定義多個 AI 角色（主助理、研究專家、程式碼審查員），各自擁有獨立的人格、記憶和工具權限。
-- **多頻道（Multi-channel）** — 從 Discord、Telegram 或內建 TUI 與你的代理對話，所有頻道共用同一套會話和記憶系統。
-- **工具核准系統** — 要求使用者在代理執行敏感工具（Bash、Edit 等）前進行確認，TUI、Discord 按鈕和 Telegram 鍵盤都有內建的核准 UI。
+- **多頻道（Multi-channel）** — 從 Discord、Telegram、Slack 或內建 TUI 與你的代理對話，所有頻道共用同一套會話和記憶系統。
+- **工具核准系統** — 要求使用者在代理執行敏感工具（Bash、Edit 等）前進行確認，TUI、Discord 按鈕、Telegram 鍵盤和 Slack Block Kit 按鈕都有內建的核准 UI。
 - **無狀態閘道器** — 所有狀態持久化至 SQLite。隨時終止常駐程式、重啟，一切從中斷處繼續。
 - **精美 TUI** — Catppuccin Mocha 主題的終端介面，8 個面板管理一切。
 
@@ -157,7 +157,7 @@ require_approval = ["Edit", "Write"]
 |------|------|------|
 | **Discord** | ✅ | 討論串、打字指示器、核准按鈕、32 個 MCP 工具 |
 | **Telegram** | ✅ | 長輪詢、論壇主題、核准鍵盤、26 個 MCP 工具 |
-| **Slack** | 規劃中 | — |
+| **Slack** | ✅ | Socket Mode、執行緒、原生 AI 串流、核准按鈕、17 個 MCP 工具 |
 | **TUI** | ✅ | 串流對話、內嵌核准小工具 |
 
 ### 內建 MCP 伺服器

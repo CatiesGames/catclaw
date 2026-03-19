@@ -9,6 +9,7 @@ use dashmap::DashMap;
 
 use crate::agent::{AgentLoader, AgentRegistry};
 use crate::channel::discord::DiscordAdapter;
+use crate::channel::slack::SlackAdapter;
 use crate::channel::telegram::TelegramAdapter;
 use crate::channel::{AdapterFilter, ChannelAdapter, MsgContext};
 use crate::config::Config;
@@ -146,6 +147,27 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 });
 
                 info!("telegram adapter started");
+            }
+            "slack" => {
+                let (sa, filter) = SlackAdapter::from_config(channel_config)?;
+                adapter_filters.push(filter);
+                let adapter = Arc::new(sa);
+
+                // Take approval_rx before moving adapter into the start task
+                if let Some(rx) = adapter.take_approval_rx().await {
+                    approval_receivers.push(rx);
+                }
+
+                adapters.push(adapter.clone());
+
+                let tx = msg_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = adapter.start(tx).await {
+                        error!(error = %e, "slack adapter error");
+                    }
+                });
+
+                info!("slack adapter started");
             }
             other => {
                 warn!(adapter = other, "unknown channel adapter type, skipping");

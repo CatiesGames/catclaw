@@ -1,0 +1,1259 @@
+use async_trait::async_trait;
+use dashmap::DashMap;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex, RwLock};
+use tracing::{error, info, warn};
+
+use super::{
+    ActionInfo, AdapterFilter, Attachment, ChannelAdapter, ChannelCapabilities, ChannelType,
+    MsgContext, OutboundMessage, TypingGuard,
+};
+use crate::error::{CatClawError, Result};
+
+/// Slack channel adapter using Socket Mode (WebSocket) + Web API.
+///
+/// Requires two tokens:
+/// - Bot Token (`xoxb-`): used for Web API calls (chat.postMessage, etc.)
+/// - App-Level Token (`xapp-`): used to open Socket Mode WebSocket connection
+pub struct SlackAdapter {
+    bot_token: String,
+    app_token: String,
+    filter: Arc<std::sync::RwLock<AdapterFilter>>,
+    http: reqwest::Client,
+    /// Bot's own user ID (resolved via auth.test on start), used for mention detection.
+    bot_user_id: RwLock<Option<String>>,
+    /// Sender half for approval decisions from interactive buttons → gateway.
+    approval_tx: mpsc::UnboundedSender<(String, bool)>,
+    /// Receiver half — taken once by gateway.
+    approval_rx: Mutex<Option<mpsc::UnboundedReceiver<(String, bool)>>>,
+    /// User display name cache: user_id → display_name
+    user_cache: DashMap<String, String>,
+    /// Channel name cache: channel_id → channel_name
+    channel_cache: DashMap<String, String>,
+}
+
+impl SlackAdapter {
+    pub fn new(
+        bot_token: String,
+        app_token: String,
+        filter: Arc<std::sync::RwLock<AdapterFilter>>,
+    ) -> Self {
+        let (approval_tx, approval_rx) = mpsc::unbounded_channel();
+        SlackAdapter {
+            bot_token,
+            app_token,
+            filter,
+            http: reqwest::Client::new(),
+            bot_user_id: RwLock::new(None),
+            approval_tx,
+            approval_rx: Mutex::new(Some(approval_rx)),
+            user_cache: DashMap::new(),
+            channel_cache: DashMap::new(),
+        }
+    }
+
+    /// Take the approval receiver (called once by gateway to wire into approval handling).
+    pub async fn take_approval_rx(&self) -> Option<mpsc::UnboundedReceiver<(String, bool)>> {
+        self.approval_rx.lock().await.take()
+    }
+
+    pub fn from_config(
+        config: &crate::config::ChannelConfig,
+    ) -> Result<(Self, Arc<std::sync::RwLock<AdapterFilter>>)> {
+        let bot_token = std::env::var(&config.token_env).map_err(|_| {
+            CatClawError::Config(format!(
+                "environment variable {} not set",
+                config.token_env
+            ))
+        })?;
+
+        // Validate bot token format
+        if !bot_token.starts_with("xoxb-") {
+            return Err(CatClawError::Config(format!(
+                "slack bot token (from {}) should start with 'xoxb-'. \
+                 Did you swap the bot token and app token?",
+                config.token_env
+            )));
+        }
+
+        let app_token_env = config.app_token_env.as_deref().ok_or_else(|| {
+            CatClawError::Config(
+                "slack adapter requires 'app_token_env' for Socket Mode".into(),
+            )
+        })?;
+        let app_token = std::env::var(app_token_env).map_err(|_| {
+            CatClawError::Config(format!(
+                "environment variable {} not set",
+                app_token_env
+            ))
+        })?;
+
+        // Validate app token format
+        if !app_token.starts_with("xapp-") {
+            return Err(CatClawError::Config(format!(
+                "slack app-level token (from {}) should start with 'xapp-'. \
+                 Did you swap the bot token and app token?",
+                app_token_env
+            )));
+        }
+
+        let filter = Arc::new(std::sync::RwLock::new(AdapterFilter::from_config(config)));
+
+        Ok((
+            SlackAdapter::new(bot_token, app_token, filter.clone()),
+            filter,
+        ))
+    }
+
+    /// Get a clone of the shared filter Arc (for gateway hot-reload).
+    #[allow(dead_code)]
+    pub fn filter(&self) -> Arc<std::sync::RwLock<AdapterFilter>> {
+        self.filter.clone()
+    }
+
+    // ── Internal helpers ──────────────────────────────────────────────
+
+    /// Call a Slack Web API method. Returns the JSON response body.
+    async fn api(
+        &self,
+        method: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        slack_api(&self.http, &self.bot_token, method, body).await
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for SlackAdapter {
+    async fn start(&self, msg_tx: mpsc::Sender<MsgContext>) -> Result<()> {
+        // Resolve bot user ID via auth.test
+        let auth = self.api("auth.test", &serde_json::json!({})).await?;
+        let bot_uid = auth
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        info!(bot_user_id = %bot_uid, "Slack bot authenticated");
+        {
+            let mut uid = self.bot_user_id.write().await;
+            *uid = Some(bot_uid.clone());
+        }
+
+        // Socket Mode reconnection loop
+        let filter_arc = self.filter.clone();
+        let approval_tx = self.approval_tx.clone();
+        let http = self.http.clone();
+        let bot_token = self.bot_token.clone();
+        let app_token = self.app_token.clone();
+        let user_cache = self.user_cache.clone();
+        let channel_cache = self.channel_cache.clone();
+
+        let mut backoff_secs = 1u64;
+
+        loop {
+            // 1. Get WSS URL
+            let wss_url = match slack_api(&http, &app_token, "apps.connections.open", &serde_json::json!({})).await {
+                Ok(resp) => match resp.get("url").and_then(|u| u.as_str()) {
+                    Some(url) => url.to_string(),
+                    None => {
+                        error!("apps.connections.open did not return URL");
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                        backoff_secs = (backoff_secs * 2).min(60);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    error!(error = %e, "failed to open socket mode connection");
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(60);
+                    continue;
+                }
+            };
+
+            // 2. Connect WebSocket
+            let ws_stream = match tokio_tungstenite::connect_async(&wss_url).await {
+                Ok((stream, _)) => {
+                    info!("slack socket mode connected");
+                    backoff_secs = 1;
+                    stream
+                }
+                Err(e) => {
+                    error!(error = %e, "slack websocket connect failed");
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(60);
+                    continue;
+                }
+            };
+
+            // 3. Event loop
+            use futures::{SinkExt, StreamExt};
+            let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+            let mut disconnected = false;
+            while let Some(frame) = ws_rx.next().await {
+                let frame = match frame {
+                    Ok(f) => f,
+                    Err(e) => {
+                        warn!(error = %e, "slack ws frame error");
+                        disconnected = true;
+                        break;
+                    }
+                };
+
+                let text = match frame {
+                    tokio_tungstenite::tungstenite::Message::Text(t) => t,
+                    tokio_tungstenite::tungstenite::Message::Ping(data) => {
+                        let _ = ws_tx
+                            .send(tokio_tungstenite::tungstenite::Message::Pong(data))
+                            .await;
+                        continue;
+                    }
+                    tokio_tungstenite::tungstenite::Message::Close(_) => {
+                        info!("slack ws received close frame");
+                        disconnected = true;
+                        break;
+                    }
+                    _ => continue,
+                };
+
+                let envelope: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(error = %e, "failed to parse slack envelope");
+                        continue;
+                    }
+                };
+
+                let envelope_id = envelope
+                    .get("envelope_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let envelope_type = envelope
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                // Acknowledge the envelope. For interactive payloads, include
+                // an empty payload so Slack clears the loading spinner immediately.
+                if !envelope_id.is_empty() {
+                    let ack = if envelope_type == "interactive" {
+                        serde_json::json!({"envelope_id": &envelope_id, "payload": {}})
+                    } else {
+                        serde_json::json!({"envelope_id": &envelope_id})
+                    };
+                    let _ = ws_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            ack.to_string(),
+                        ))
+                        .await;
+                }
+
+                match envelope_type {
+                    "events_api" => {
+                        let payload = match envelope.get("payload") {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        let event = match payload.get("event") {
+                            Some(e) => e,
+                            None => continue,
+                        };
+                        let event_type = event
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        // Handle assistant_thread_started: auto-respond in assistant threads
+                        if event_type == "assistant_thread_started" {
+                            // Set initial status to indicate we're ready
+                            let channel = event
+                                .get("assistant_thread")
+                                .and_then(|at| at.get("channel_id"))
+                                .and_then(|v| v.as_str())
+                                .or_else(|| event.get("channel").and_then(|v| v.as_str()))
+                                .unwrap_or("");
+                            let thread_ts = event
+                                .get("assistant_thread")
+                                .and_then(|at| at.get("thread_ts"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if !channel.is_empty() && !thread_ts.is_empty() {
+                                let _ = slack_api(
+                                    &http,
+                                    &bot_token,
+                                    "assistant.threads.setStatus",
+                                    &serde_json::json!({
+                                        "channel_id": channel,
+                                        "thread_ts": thread_ts,
+                                        "status": "is thinking..."
+                                    }),
+                                ).await;
+                            }
+                            continue;
+                        }
+
+                        if event_type == "assistant_thread_context_changed" {
+                            // Context changed events are informational, skip
+                            continue;
+                        }
+
+                        // Only handle message events
+                        if event_type != "message" && event_type != "app_mention" {
+                            continue;
+                        }
+
+                        // Skip subtypes like message_changed, bot_message, etc.
+                        // but allow file_share (user uploaded a file with optional caption)
+                        let subtype = event.get("subtype").and_then(|v| v.as_str());
+                        if let Some(st) = subtype {
+                            if st != "file_share" {
+                                continue;
+                            }
+                        }
+                        let event_user = event
+                            .get("user")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if event_user.is_empty() || event_user == bot_uid {
+                            continue;
+                        }
+
+                        let channel_id = event
+                            .get("channel")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let text_raw = event
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let thread_ts = event
+                            .get("thread_ts")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let team_id = event
+                            .get("team")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        // DM detection: channel IDs starting with "D" are DMs
+                        let is_dm = channel_id.starts_with('D');
+
+                        // Check sender policy
+                        let activation = {
+                            let filter = filter_arc.read().unwrap();
+                            if !filter.is_sender_allowed(is_dm, event_user) {
+                                continue;
+                            }
+                            filter
+                                .activation_for("slack:channel", &channel_id)
+                                .to_string()
+                        };
+
+                        // Strip bot mention from text for cleaner input
+                        let mention_tag = format!("<@{}>", bot_uid);
+                        let clean_text = text_raw.replace(&mention_tag, "").trim().to_string();
+
+                        // Bot commands bypass activation (explicit intent)
+                        let cmd = clean_text.split_whitespace().next().unwrap_or("");
+                        let is_bot_command = cmd == "/stop" || cmd == "/new";
+
+                        let should_respond = is_bot_command
+                            || match activation.as_str() {
+                                "all" => true,
+                                "mention" => {
+                                    is_dm
+                                        || event_type == "app_mention"
+                                        || text_raw.contains(&mention_tag)
+                                }
+                                _ => false,
+                            };
+
+                        if !should_respond {
+                            continue;
+                        }
+
+                        // Collect attachments from Slack files
+                        let mut attachments = Vec::new();
+                        if let Some(files) = event.get("files").and_then(|f| f.as_array()) {
+                            for file in files {
+                                let filename = file
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("file")
+                                    .to_string();
+                                // url_private_download requires bot token auth
+                                let url = file
+                                    .get("url_private_download")
+                                    .or_else(|| file.get("url_private"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let content_type = file
+                                    .get("mimetype")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                let size = file.get("size").and_then(|v| v.as_u64());
+                                if !url.is_empty() {
+                                    attachments.push(Attachment {
+                                        filename,
+                                        url,
+                                        content_type,
+                                        size,
+                                    });
+                                }
+                            }
+                        }
+
+                        // Resolve sender name
+                        let sender_name = resolve_user_name_cached(
+                            &http,
+                            &bot_token,
+                            &user_cache,
+                            event_user,
+                        )
+                        .await;
+
+                        // Resolve channel name for session key context (cached)
+                        let channel_name = if is_dm {
+                            Some(format!("dm.{}", sender_name))
+                        } else if let Some(cached) = channel_cache.get(&channel_id) {
+                            Some(cached.clone())
+                        } else {
+                            let name = match slack_api(
+                                &http,
+                                &bot_token,
+                                "conversations.info",
+                                &serde_json::json!({"channel": &channel_id}),
+                            )
+                            .await
+                            {
+                                Ok(resp) => resp
+                                    .get("channel")
+                                    .and_then(|c| c.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.to_string()),
+                                Err(_) => None,
+                            };
+                            if let Some(ref n) = name {
+                                channel_cache.insert(channel_id.clone(), n.clone());
+                            }
+                            name
+                        };
+
+                        let ctx = MsgContext {
+                            channel_type: ChannelType::Slack,
+                            channel_id: channel_id.clone(),
+                            peer_id: channel_id.clone(),
+                            sender_id: event_user.to_string(),
+                            sender_name,
+                            text: clean_text,
+                            attachments,
+                            reply_to: None,
+                            thread_id: thread_ts,
+                            is_direct_message: is_dm,
+                            raw_event: serde_json::json!({
+                                "team": &team_id,
+                                "channel_type": if is_dm { "dm" } else { "channel" },
+                            }),
+                            channel_name,
+                            guild_id: if team_id.is_empty() {
+                                None
+                            } else {
+                                Some(team_id)
+                            },
+                        };
+
+                        if let Err(e) = msg_tx.send(ctx).await {
+                            error!(error = %e, "failed to send slack message to router");
+                        }
+                    }
+
+                    "interactive" => {
+                        // Block Kit button clicks (approval flow)
+                        let payload = match envelope.get("payload") {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        let actions = match payload.get("actions").and_then(|a| a.as_array()) {
+                            Some(a) => a,
+                            None => continue,
+                        };
+                        for action in actions {
+                            let action_id = action
+                                .get("action_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let (request_id, approved) =
+                                if let Some(rid) = action_id.strip_prefix("approve:") {
+                                    (rid.to_string(), true)
+                                } else if let Some(rid) = action_id.strip_prefix("deny:") {
+                                    (rid.to_string(), false)
+                                } else {
+                                    continue;
+                                };
+                            let _ = approval_tx.send((request_id, approved));
+                        }
+                    }
+
+                    "slash_commands" => {
+                        let payload = match envelope.get("payload") {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        let command = payload
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let channel_id = payload
+                            .get("channel_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let user_id = payload
+                            .get("user_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let team_id = payload
+                            .get("team_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        let slash_text = match command {
+                            "/stop" => "/stop",
+                            "/new" => "/new",
+                            _ => continue,
+                        };
+
+                        let is_dm = channel_id.starts_with('D');
+
+                        // Check sender policy (slash commands bypass activation but
+                        // still respect sender allowlist, same as Telegram)
+                        {
+                            let filter = filter_arc.read().unwrap();
+                            if !filter.is_sender_allowed(is_dm, &user_id) {
+                                continue;
+                            }
+                        }
+
+                        let sender_name = resolve_user_name_cached(
+                            &http,
+                            &bot_token,
+                            &user_cache,
+                            &user_id,
+                        )
+                        .await;
+
+                        let ctx = MsgContext {
+                            channel_type: ChannelType::Slack,
+                            channel_id: channel_id.clone(),
+                            peer_id: channel_id.clone(),
+                            sender_id: user_id,
+                            sender_name,
+                            text: slash_text.to_string(),
+                            attachments: vec![],
+                            reply_to: None,
+                            thread_id: None,
+                            is_direct_message: is_dm,
+                            raw_event: serde_json::json!({
+                                "team": &team_id,
+                            }),
+                            channel_name: None,
+                            guild_id: if team_id.is_empty() {
+                                None
+                            } else {
+                                Some(team_id)
+                            },
+                        };
+
+                        if let Err(e) = msg_tx.send(ctx).await {
+                            error!(error = %e, "failed to send slack slash command to router");
+                        }
+                    }
+
+                    "disconnect" => {
+                        info!("slack socket mode received disconnect, will reconnect");
+                        disconnected = true;
+                        break;
+                    }
+
+                    _ => {
+                        // hello, etc. — ignore
+                    }
+                }
+            }
+
+            if disconnected {
+                info!("slack socket mode disconnected, reconnecting...");
+                // Clean disconnect (server-initiated) — reset backoff and reconnect quickly
+                backoff_secs = 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+
+            // Stream ended without explicit disconnect
+            warn!("slack ws stream ended unexpectedly, reconnecting...");
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs * 2).min(60);
+        }
+    }
+
+    async fn send(&self, msg: OutboundMessage) -> Result<()> {
+        let mut body = serde_json::json!({
+            "channel": msg.channel_id,
+            "text": msg.text,
+        });
+        if let Some(ref ts) = msg.thread_id {
+            body["thread_ts"] = serde_json::Value::String(ts.clone());
+        }
+        self.api("chat.postMessage", &body).await?;
+        Ok(())
+    }
+
+    async fn send_approval(
+        &self,
+        channel_id: &str,
+        _peer_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+    ) -> Result<()> {
+        let input_str = serde_json::to_string_pretty(tool_input)
+            .unwrap_or_else(|_| tool_input.to_string());
+        let input_preview = if input_str.len() > 3000 {
+            format!("{}...", &input_str[..3000])
+        } else {
+            input_str
+        };
+
+        let blocks = serde_json::json!([
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "Approval Required", "emoji": true}
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": format!("*Tool:* `{}`\n```{}```", tool_name, input_preview)
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Approve", "emoji": true},
+                        "style": "primary",
+                        "action_id": format!("approve:{}", request_id)
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Deny", "emoji": true},
+                        "style": "danger",
+                        "action_id": format!("deny:{}", request_id)
+                    }
+                ]
+            }
+        ]);
+
+        self.api(
+            "chat.postMessage",
+            &serde_json::json!({
+                "channel": channel_id,
+                "text": format!("Approval Required: {}", tool_name),
+                "blocks": blocks,
+            }),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn start_typing(&self, _channel_id: &str, _peer_id: &str) -> Result<TypingGuard> {
+        // Slack's typing indicator (assistant.threads.setStatus) requires a thread_ts
+        // which the ChannelAdapter trait doesn't provide. The thinking status is instead
+        // set by the assistant_thread_started event handler when a new assistant thread
+        // begins, and cleared automatically when the bot replies.
+        Ok(TypingGuard::noop())
+    }
+
+    async fn create_thread(&self, channel_id: &str, title: &str) -> Result<String> {
+        let resp = self
+            .api(
+                "chat.postMessage",
+                &serde_json::json!({
+                    "channel": channel_id,
+                    "text": title,
+                }),
+            )
+            .await?;
+        resp.get("ts")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| CatClawError::Slack("chat.postMessage did not return ts".into()))
+    }
+
+    fn name(&self) -> &str {
+        "slack"
+    }
+
+    fn capabilities(&self) -> ChannelCapabilities {
+        ChannelCapabilities {
+            threading: true,
+            // Slack's assistant.threads.setStatus requires thread_ts which the trait
+            // doesn't provide. Thinking status is set via assistant_thread_started instead.
+            typing_indicator: false,
+            message_editing: true,
+            max_message_length: 40000,
+            attachments: true,
+            streaming: true,
+        }
+    }
+
+    // ── Streaming API ─────────────────────────────────────────────────
+
+    async fn send_stream_start(&self, channel_id: &str, thread_ts: &str) -> Result<String> {
+        let mut body = serde_json::json!({
+            "channel": channel_id,
+        });
+        if !thread_ts.is_empty() {
+            body["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
+        }
+        let resp = self.api("chat.startStream", &body).await?;
+        resp.get("ts")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| CatClawError::Slack("chat.startStream did not return ts".into()))
+    }
+
+    async fn send_stream_append(&self, msg_ts: &str, channel_id: &str, text: &str) -> Result<()> {
+        self.api(
+            "chat.appendStream",
+            &serde_json::json!({
+                "channel": channel_id,
+                "ts": msg_ts,
+                "text": text,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn send_stream_stop(&self, msg_ts: &str, channel_id: &str, text: Option<&str>) -> Result<()> {
+        let mut body = serde_json::json!({
+            "channel": channel_id,
+            "ts": msg_ts,
+        });
+        if let Some(final_text) = text {
+            body["text"] = serde_json::Value::String(final_text.to_string());
+        }
+        self.api("chat.stopStream", &body).await?;
+        Ok(())
+    }
+
+    // ── Platform actions (MCP tools) ──────────────────────────────────
+
+    async fn execute(&self, action: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        match action {
+            // ── Messages ──────────────────────────────────────────────
+            "send_message" => {
+                let channel = p_str(&params, "channel")?;
+                let text = p_str(&params, "text")?;
+                let mut body = serde_json::json!({"channel": channel, "text": text});
+                if let Some(ts) = params.get("thread_ts").and_then(|v| v.as_str()) {
+                    body["thread_ts"] = serde_json::Value::String(ts.to_string());
+                }
+                let resp = self.api("chat.postMessage", &body).await?;
+                let ts = resp.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(serde_json::json!({"ts": ts, "ok": true}))
+            }
+            "edit_message" => {
+                let channel = p_str(&params, "channel")?;
+                let ts = p_str(&params, "ts")?;
+                let text = p_str(&params, "text")?;
+                self.api(
+                    "chat.update",
+                    &serde_json::json!({"channel": channel, "ts": ts, "text": text}),
+                )
+                .await?;
+                Ok(serde_json::json!({"edited": true}))
+            }
+            "delete_message" => {
+                let channel = p_str(&params, "channel")?;
+                let ts = p_str(&params, "ts")?;
+                self.api(
+                    "chat.delete",
+                    &serde_json::json!({"channel": channel, "ts": ts}),
+                )
+                .await?;
+                Ok(serde_json::json!({"deleted": true}))
+            }
+            "get_messages" => {
+                let channel = p_str(&params, "channel")?;
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20);
+                let resp = self
+                    .api(
+                        "conversations.history",
+                        &serde_json::json!({"channel": channel, "limit": limit}),
+                    )
+                    .await?;
+                Ok(resp
+                    .get("messages")
+                    .cloned()
+                    .unwrap_or(serde_json::json!([])))
+            }
+
+            // ── Reactions ─────────────────────────────────────────────
+            "react" => {
+                let channel = p_str(&params, "channel")?;
+                let ts = p_str(&params, "ts")?;
+                let emoji = p_str(&params, "name")?;
+                self.api(
+                    "reactions.add",
+                    &serde_json::json!({"channel": channel, "timestamp": ts, "name": emoji}),
+                )
+                .await?;
+                Ok(serde_json::json!({"ok": true}))
+            }
+            "delete_reaction" => {
+                let channel = p_str(&params, "channel")?;
+                let ts = p_str(&params, "ts")?;
+                let emoji = p_str(&params, "name")?;
+                self.api(
+                    "reactions.remove",
+                    &serde_json::json!({"channel": channel, "timestamp": ts, "name": emoji}),
+                )
+                .await?;
+                Ok(serde_json::json!({"ok": true}))
+            }
+            "get_reactions" => {
+                let channel = p_str(&params, "channel")?;
+                let ts = p_str(&params, "ts")?;
+                let resp = self
+                    .api(
+                        "reactions.get",
+                        &serde_json::json!({"channel": channel, "timestamp": ts, "full": true}),
+                    )
+                    .await?;
+                Ok(resp
+                    .get("message")
+                    .and_then(|m| m.get("reactions"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!([])))
+            }
+
+            // ── Pins ──────────────────────────────────────────────────
+            "pin_message" => {
+                let channel = p_str(&params, "channel")?;
+                let ts = p_str(&params, "ts")?;
+                self.api(
+                    "pins.add",
+                    &serde_json::json!({"channel": channel, "timestamp": ts}),
+                )
+                .await?;
+                Ok(serde_json::json!({"pinned": true}))
+            }
+            "unpin_message" => {
+                let channel = p_str(&params, "channel")?;
+                let ts = p_str(&params, "ts")?;
+                self.api(
+                    "pins.remove",
+                    &serde_json::json!({"channel": channel, "timestamp": ts}),
+                )
+                .await?;
+                Ok(serde_json::json!({"unpinned": true}))
+            }
+            "list_pins" => {
+                let channel = p_str(&params, "channel")?;
+                let resp = self
+                    .api("pins.list", &serde_json::json!({"channel": channel}))
+                    .await?;
+                Ok(resp.get("items").cloned().unwrap_or(serde_json::json!([])))
+            }
+
+            // ── Channels ──────────────────────────────────────────────
+            "get_channels" => {
+                let types = params
+                    .get("types")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("public_channel,private_channel");
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(200);
+                let resp = self
+                    .api(
+                        "conversations.list",
+                        &serde_json::json!({"types": types, "limit": limit}),
+                    )
+                    .await?;
+                Ok(resp
+                    .get("channels")
+                    .cloned()
+                    .unwrap_or(serde_json::json!([])))
+            }
+            "channel_info" => {
+                let channel = p_str(&params, "channel")?;
+                let resp = self
+                    .api(
+                        "conversations.info",
+                        &serde_json::json!({"channel": channel}),
+                    )
+                    .await?;
+                Ok(resp
+                    .get("channel")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({})))
+            }
+            "create_channel" => {
+                let name = p_str(&params, "name")?;
+                let is_private = params
+                    .get("is_private")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let resp = self
+                    .api(
+                        "conversations.create",
+                        &serde_json::json!({"name": name, "is_private": is_private}),
+                    )
+                    .await?;
+                Ok(resp
+                    .get("channel")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({})))
+            }
+            "archive_channel" => {
+                let channel = p_str(&params, "channel")?;
+                self.api(
+                    "conversations.archive",
+                    &serde_json::json!({"channel": channel}),
+                )
+                .await?;
+                Ok(serde_json::json!({"archived": true}))
+            }
+
+            // ── Threads ───────────────────────────────────────────────
+            "get_thread_replies" => {
+                let channel = p_str(&params, "channel")?;
+                let ts = p_str(&params, "ts")?;
+                let resp = self
+                    .api(
+                        "conversations.replies",
+                        &serde_json::json!({"channel": channel, "ts": ts}),
+                    )
+                    .await?;
+                Ok(resp
+                    .get("messages")
+                    .cloned()
+                    .unwrap_or(serde_json::json!([])))
+            }
+
+            // ── Users ─────────────────────────────────────────────────
+            "user_info" => {
+                let user = p_str(&params, "user")?;
+                let resp = self
+                    .api("users.info", &serde_json::json!({"user": user}))
+                    .await?;
+                Ok(resp.get("user").cloned().unwrap_or(serde_json::json!({})))
+            }
+            "list_users" => {
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(200);
+                let resp = self
+                    .api("users.list", &serde_json::json!({"limit": limit}))
+                    .await?;
+                Ok(resp
+                    .get("members")
+                    .cloned()
+                    .unwrap_or(serde_json::json!([])))
+            }
+
+            _ => Err(CatClawError::Channel(format!(
+                "slack action '{}' not supported",
+                action
+            ))),
+        }
+    }
+
+    fn supported_actions(&self) -> Vec<ActionInfo> {
+        slack_action_infos()
+    }
+}
+
+// ── Free functions ────────────────────────────────────────────────────
+
+/// Generic Slack Web API caller.
+async fn slack_api(
+    client: &reqwest::Client,
+    token: &str,
+    method: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let url = format!("https://slack.com/api/{}", method);
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json; charset=utf-8")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| CatClawError::Slack(format!("{}: {}", method, e)))?;
+
+    let status = resp.status();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| CatClawError::Slack(format!("{}: failed to parse response: {}", method, e)))?;
+
+    if !status.is_success() {
+        return Err(CatClawError::Slack(format!(
+            "{}: HTTP {}",
+            method, status
+        )));
+    }
+
+    let ok = json.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !ok {
+        let err = json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown_error");
+        return Err(CatClawError::Slack(format!("{}: {}", method, err)));
+    }
+
+    Ok(json)
+}
+
+/// Resolve user name with shared cache (used from inside the event loop where &self isn't available).
+async fn resolve_user_name_cached(
+    http: &reqwest::Client,
+    token: &str,
+    cache: &DashMap<String, String>,
+    user_id: &str,
+) -> String {
+    if let Some(name) = cache.get(user_id) {
+        return name.clone();
+    }
+    let name = match slack_api(
+        http,
+        token,
+        "users.info",
+        &serde_json::json!({"user": user_id}),
+    )
+    .await
+    {
+        Ok(resp) => resp
+            .get("user")
+            .and_then(|u| {
+                u.get("profile")
+                    .and_then(|p| p.get("display_name").and_then(|n| n.as_str()))
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| u.get("real_name").and_then(|n| n.as_str()))
+                    .or_else(|| u.get("name").and_then(|n| n.as_str()))
+            })
+            .unwrap_or("Unknown")
+            .to_string(),
+        Err(_) => "Unknown".to_string(),
+    };
+    cache.insert(user_id.to_string(), name.clone());
+    name
+}
+
+// ── Parameter helpers ─────────────────────────────────────────────────
+
+fn p_str<'a>(params: &'a serde_json::Value, field: &str) -> Result<&'a str> {
+    params
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CatClawError::Slack(format!("missing '{}'", field)))
+}
+
+// ── Action schema definitions ─────────────────────────────────────────
+
+fn slack_action(name: &str, description: &str, schema: serde_json::Value) -> ActionInfo {
+    ActionInfo {
+        name: name.into(),
+        description: description.into(),
+        params_schema: schema,
+    }
+}
+
+fn slack_action_infos() -> Vec<ActionInfo> {
+    let ch = serde_json::json!({"type": "string", "description": "Slack channel ID"});
+    let ts = serde_json::json!({"type": "string", "description": "Message timestamp (ts)"});
+    let uid = serde_json::json!({"type": "string", "description": "Slack user ID"});
+
+    vec![
+        // Messages
+        slack_action(
+            "send_message",
+            "Send a message to a channel",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "channel": ch, "text": {"type": "string"},
+                    "thread_ts": {"type": "string", "description": "Thread timestamp to reply in"}
+                },
+                "required": ["channel", "text"]
+            }),
+        ),
+        slack_action(
+            "edit_message",
+            "Edit a message",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch, "ts": ts, "text": {"type": "string"}},
+                "required": ["channel", "ts", "text"]
+            }),
+        ),
+        slack_action(
+            "delete_message",
+            "Delete a message",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch, "ts": ts},
+                "required": ["channel", "ts"]
+            }),
+        ),
+        slack_action(
+            "get_messages",
+            "Get recent messages from a channel",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch, "limit": {"type": "integer", "description": "Number of messages (default 20)"}},
+                "required": ["channel"]
+            }),
+        ),
+        // Reactions
+        slack_action(
+            "react",
+            "Add a reaction to a message",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch, "ts": ts, "name": {"type": "string", "description": "Emoji name without colons"}},
+                "required": ["channel", "ts", "name"]
+            }),
+        ),
+        slack_action(
+            "delete_reaction",
+            "Remove a reaction from a message",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch, "ts": ts, "name": {"type": "string"}},
+                "required": ["channel", "ts", "name"]
+            }),
+        ),
+        slack_action(
+            "get_reactions",
+            "Get reactions on a message",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch, "ts": ts},
+                "required": ["channel", "ts"]
+            }),
+        ),
+        // Pins
+        slack_action(
+            "pin_message",
+            "Pin a message in a channel",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch, "ts": ts},
+                "required": ["channel", "ts"]
+            }),
+        ),
+        slack_action(
+            "unpin_message",
+            "Unpin a message",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch, "ts": ts},
+                "required": ["channel", "ts"]
+            }),
+        ),
+        slack_action(
+            "list_pins",
+            "List pinned messages in a channel",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch},
+                "required": ["channel"]
+            }),
+        ),
+        // Channels
+        slack_action(
+            "get_channels",
+            "List conversations (channels) in the workspace",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "types": {"type": "string", "description": "Comma-separated types: public_channel,private_channel,mpim,im"},
+                    "limit": {"type": "integer"}
+                },
+                "required": []
+            }),
+        ),
+        slack_action(
+            "channel_info",
+            "Get information about a channel",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch},
+                "required": ["channel"]
+            }),
+        ),
+        slack_action(
+            "create_channel",
+            "Create a new channel",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "is_private": {"type": "boolean"}},
+                "required": ["name"]
+            }),
+        ),
+        slack_action(
+            "archive_channel",
+            "Archive a channel",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch},
+                "required": ["channel"]
+            }),
+        ),
+        // Threads
+        slack_action(
+            "get_thread_replies",
+            "Get replies in a thread",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"channel": ch, "ts": ts},
+                "required": ["channel", "ts"]
+            }),
+        ),
+        // Users
+        slack_action(
+            "user_info",
+            "Get information about a user",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"user": uid},
+                "required": ["user"]
+            }),
+        ),
+        slack_action(
+            "list_users",
+            "List workspace members",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"limit": {"type": "integer"}},
+                "required": []
+            }),
+        ),
+    ]
+}

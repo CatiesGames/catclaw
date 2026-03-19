@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-Rust gateway for Claude Code CLI — multi-agent, multi-channel (Discord/Telegram/TUI), session management with tool approval system.
+Rust gateway for Claude Code CLI — multi-agent, multi-channel (Discord/Telegram/Slack/TUI), session management with tool approval system.
 
 ## Architecture
 
 ```
-Channel Adapters (Discord/Telegram) → MsgContext → MessageRouter → SessionManager → ClaudeHandle (claude -p subprocess)
+Channel Adapters (Discord/Telegram/Slack) → MsgContext → MessageRouter → SessionManager → ClaudeHandle (claude -p subprocess)
                                                       ↑
                                         WS Server ← TUI/WebUI (GatewayClient)
                                         MCP Server ← Claude CLI (tool calls)
@@ -19,7 +19,8 @@ Channel Adapters (Discord/Telegram) → MsgContext → MessageRouter → Session
 - **Shared state**: `Config` uses `Arc<RwLock<Config>>`, `AgentRegistry` uses `Arc<RwLock<AgentRegistry>>`, `AdapterFilter` uses `Vec<Arc<RwLock<AdapterFilter>>>`. All hot-reloadable.
 - **Approval system**: PreToolUse hook → WS `approval.request` → broadcast to TUI + forward to origin channel → user approves/denies → hook receives result.
 - **Session metadata**: JSON in `metadata` column stores `model`, `channel_id`, `sender_id`. Use `SessionRow` helper methods.
-- **Channel adapters**: `ChannelAdapter` trait with `send_approval()` default method. Discord uses embed+buttons, Telegram uses inline keyboard.
+- **Channel adapters**: `ChannelAdapter` trait with `send_approval()` default method. Discord uses embed+buttons, Telegram uses inline keyboard, Slack uses Block Kit buttons.
+- **Streaming**: `ChannelCapabilities.streaming` flag. Slack supports native AI streaming (`chat.startStream`/`appendStream`/`stopStream`). Adapters implement optional `send_stream_start()`/`send_stream_append()`/`send_stream_stop()` methods.
 
 ## Critical Rules
 
@@ -113,6 +114,7 @@ Each tool exists in exactly one list: `allowed` (directly usable), `denied` (una
 | `src/session/claude.rs` | `ClaudeHandle` — subprocess spawn, stdin/stdout streaming |
 | `src/channel/mod.rs` | `ChannelAdapter` trait, `MsgContext`, `OutboundMessage`, `send_approval()` |
 | `src/channel/discord.rs` | Discord adapter: serenity handler, slash commands (`/stop`, `/new`), approval embed+buttons, `interaction_create` |
+| `src/channel/slack.rs` | Slack adapter: Socket Mode WS, approval Block Kit buttons, native AI streaming |
 | `src/channel/telegram.rs` | Telegram adapter: teloxide dispatcher, approval inline keyboard, `callback_query` |
 | `src/agent/mod.rs` | `Agent`, `AgentRegistry`, `ToolPermissions`, claude args builder, system prompt |
 | `src/agent/loader.rs` | Agent workspace creation, skill management, TOML loading |

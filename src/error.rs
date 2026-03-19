@@ -39,6 +39,9 @@ pub enum CatClawError {
     #[error("telegram error: {0}")]
     Telegram(String),
 
+    #[error("slack error: {0}")]
+    Slack(String),
+
     #[error("update error: {0}")]
     Update(String),
 

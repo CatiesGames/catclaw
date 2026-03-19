@@ -222,6 +222,23 @@ impl EventHandler for Handler {
             Interaction::Command(cmd) => {
                 let name = cmd.data.name.as_str();
                 if name == "stop" || name == "new" {
+                    // Check guild filter and sender policy (same checks as message handler)
+                    {
+                        let filter = self.filter.read().unwrap();
+                        if let Some(guild_id) = cmd.guild_id {
+                            if !filter.guilds.is_empty()
+                                && !filter.guilds.contains(&guild_id.get())
+                            {
+                                return;
+                            }
+                        }
+                        let is_dm = cmd.guild_id.is_none();
+                        let sender_id = cmd.user.id.get().to_string();
+                        if !filter.is_sender_allowed(is_dm, &sender_id) {
+                            return;
+                        }
+                    }
+
                     // Ephemeral ack (only visible to the invoking user)
                     let ack = CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new()
@@ -414,12 +431,16 @@ impl ChannelAdapter for DiscordAdapter {
             .as_ref()
             .ok_or_else(|| CatClawError::Discord("not connected".to_string()))?;
 
-        let channel_id = msg
-            .channel_id
+        // If thread_id is set, send to the thread channel instead.
+        // In Discord, threads have their own channel ID — thread_id IS the channel to post in.
+        let target_id = msg
+            .thread_id
+            .as_deref()
+            .unwrap_or(&msg.channel_id)
             .parse::<u64>()
             .map_err(|_| CatClawError::Discord("invalid channel id".to_string()))?;
 
-        let channel = ChannelId::new(channel_id);
+        let channel = ChannelId::new(target_id);
         let builder = CreateMessage::new().content(&msg.text);
 
         channel
@@ -542,6 +563,7 @@ impl ChannelAdapter for DiscordAdapter {
             message_editing: true,
             max_message_length: 2000,
             attachments: true,
+            streaming: false,
         }
     }
 

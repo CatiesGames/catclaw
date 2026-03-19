@@ -539,6 +539,7 @@ const EMBEDDED_SKILLS: &[(&str, &str)] = &[
     ("sessions-history", SKILL_SESSIONS_HISTORY),
     ("discord", SKILL_DISCORD),
     ("telegram", SKILL_TELEGRAM),
+    ("slack", SKILL_SLACK),
     ("catclaw", SKILL_CATCLAW),
     ("injection-guard", SKILL_INJECTION_GUARD),
 ];
@@ -561,6 +562,7 @@ pub const BUILTIN_SKILL_NAMES: &[&str] = &[
     "skill-creator",
     "discord",
     "telegram",
+    "slack",
     "catclaw",
     "injection-guard",
 ];
@@ -1077,6 +1079,121 @@ For detailed Bot API behavior, message types, and advanced features:
 - Forum Topics: https://core.telegram.org/bots/api#forum
 "#;
 
+const SKILL_SLACK: &str = r#"---
+name: slack
+description: Slack messaging patterns and formatting. Use when composing messages for Slack channels, replying in threads, or helping users with Slack-related tasks.
+---
+
+# Slack Messaging
+
+This skill provides guidance for composing well-formatted Slack messages via the CatClaw gateway.
+
+## When to Use
+
+Apply this skill whenever you are responding in a Slack channel or thread, or when the user asks about Slack formatting or behavior.
+
+## Slack Formatting (mrkdwn)
+
+Slack uses its own markup language called **mrkdwn** (not standard Markdown):
+
+| Format | Syntax | Notes |
+|--------|--------|-------|
+| Bold | `*text*` | Single asterisks |
+| Italic | `_text_` | Single underscores |
+| Strikethrough | `~text~` | Single tildes |
+| Code (inline) | `` `code` `` | Backticks |
+| Code block | ` ```code``` ` | Triple backticks (no language hint) |
+| Quote | `> text` | Blockquote |
+| Link | `<url|text>` | Angle-bracket links with pipe |
+| User mention | `<@U12345>` | Mention by user ID |
+| Channel mention | `<#C12345>` | Link to a channel |
+| Emoji | `:emoji_name:` | Shortcodes like `:thumbsup:` |
+
+### Important Differences from Discord/Markdown
+
+- **No headers** (`#`, `##`, etc.) — use `*bold*` text on its own line instead
+- **No underline** — not available in mrkdwn
+- **No tables** — use code blocks for tabular data
+- **No image embeds** — images must be uploaded as files or linked
+- **Links** use `<url|text>` format, NOT `[text](url)`
+- **Bold** is `*text*` (single asterisks), NOT `**text**`
+
+## Message Limits
+
+- **Message text:** 40,000 characters max
+- **Block Kit:** 50 blocks per message
+- **Messages will be automatically split** by CatClaw if they exceed the limit
+
+## Channel Types
+
+- **Public channel:** Visible to all workspace members. Channel IDs start with `C`.
+- **Private channel:** Invite-only. Channel IDs start with `C` (same prefix).
+- **DM (Direct Message):** One-on-one. Channel IDs start with `D`.
+- **Group DM (MPIM):** Multi-person DM. Channel IDs start with `G`.
+
+## Threading
+
+Slack threads are based on `thread_ts` (the timestamp of the parent message):
+- Each thread in CatClaw maps to its own session context
+- Replies in a thread keep the conversation focused
+- Use threads for extended discussions to keep the main channel clean
+
+## Tone
+
+- Slack is business-casual — professional but not overly formal
+- Emoji reactions are common and expected (`:thumbsup:`, `:eyes:`, etc.)
+- Keep messages scannable — use bullet points and bold for emphasis
+- Slack users often prefer quick, direct responses
+
+## Streaming
+
+CatClaw supports Slack's native AI streaming API:
+- Responses stream in real-time as they are generated
+- The bot shows a "thinking" indicator while processing
+- This is handled automatically by the gateway — write responses naturally
+
+## Platform Operations
+
+You have access to Slack tools provided by CatClaw via MCP. Use them directly as tool calls:
+
+**Messages:**
+- `slack_send_message` — Send message (params: channel, text, thread_ts?)
+- `slack_edit_message` — Edit message (params: channel, ts, text)
+- `slack_delete_message` — Delete message (params: channel, ts)
+- `slack_get_messages` — Read recent messages (params: channel, limit?)
+
+**Reactions:**
+- `slack_react` — Add reaction (params: channel, ts, name)
+- `slack_delete_reaction` — Remove reaction (params: channel, ts, name)
+- `slack_get_reactions` — Get reactions (params: channel, ts)
+
+**Pins:**
+- `slack_pin_message` / `slack_unpin_message` — Pin/unpin (params: channel, ts)
+- `slack_list_pins` — List pinned messages (params: channel)
+
+**Channels:**
+- `slack_get_channels` — List channels (params: types?, limit?)
+- `slack_channel_info` — Channel details (params: channel)
+- `slack_create_channel` — Create channel (params: name, is_private?)
+- `slack_archive_channel` — Archive channel (params: channel)
+
+**Threads:**
+- `slack_get_thread_replies` — Get thread replies (params: channel, ts)
+
+**Users:**
+- `slack_user_info` — User details (params: user)
+- `slack_list_users` — List workspace members (params: limit?)
+
+The channel ID is available in your conversation context.
+
+## Official Documentation
+
+For detailed API behavior, Block Kit, and advanced features:
+- Slack API: https://api.slack.com/
+- Block Kit: https://api.slack.com/block-kit
+- mrkdwn reference: https://api.slack.com/reference/surfaces/formatting
+"#;
+
 const SKILL_CATCLAW: &str = r#"---
 name: catclaw
 description: CatClaw system administration. Use when the user asks to configure CatClaw, manage agents, bindings, tasks, skills, channels, sessions, or perform gateway operations.
@@ -1408,6 +1525,7 @@ These are platform slash commands registered by CatClaw — they appear in the D
 catclaw channel list           # List configured channel adapters
 catclaw channel add discord --token-env DISCORD_TOKEN --guilds "123,456" --activation mention
 catclaw channel add telegram --token-env TELEGRAM_TOKEN
+catclaw channel add slack --token-env SLACK_BOT_TOKEN --app-token-env SLACK_APP_TOKEN
 ```
 
 `--activation`: `mention` (respond only when @mentioned) or `all` (respond to everything)
