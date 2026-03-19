@@ -1555,7 +1555,9 @@ catclaw update --notify slack:C0A9FFY7QAZ                    # Notify a channel 
 catclaw update --notify slack:C0A9FFY7QAZ --notify-message "I'm back!"  # Custom message
 ```
 
-`--notify <type>:<channel_id>` sends a message to the specified channel after the gateway restarts. Use this when self-updating so users know the update completed. Format: `slack:<id>`, `discord:<id>`, `telegram:<id>`.
+**IMPORTANT: ALWAYS use `--notify` when self-updating.** The update kills your current process and restarts the gateway — you cannot reply afterwards. Use the channel from the current `[Context: ...]` header so the user knows the update completed.
+
+`--notify <type>:<channel_id>` sends a message to the specified channel after the gateway restarts. Format: `slack:<id>`, `discord:<id>`, `telegram:<id>`.
 
 After updating, if a system service is installed, it will be automatically restarted.
 
