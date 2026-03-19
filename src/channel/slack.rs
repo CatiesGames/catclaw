@@ -265,32 +265,10 @@ impl ChannelAdapter for SlackAdapter {
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
 
-                        // Handle assistant_thread_started: auto-respond in assistant threads
                         if event_type == "assistant_thread_started" {
-                            // Set initial status to indicate we're ready
-                            let channel = event
-                                .get("assistant_thread")
-                                .and_then(|at| at.get("channel_id"))
-                                .and_then(|v| v.as_str())
-                                .or_else(|| event.get("channel").and_then(|v| v.as_str()))
-                                .unwrap_or("");
-                            let thread_ts = event
-                                .get("assistant_thread")
-                                .and_then(|at| at.get("thread_ts"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            if !channel.is_empty() && !thread_ts.is_empty() {
-                                let _ = slack_api(
-                                    &http,
-                                    &bot_token,
-                                    "assistant.threads.setStatus",
-                                    &serde_json::json!({
-                                        "channel_id": channel,
-                                        "thread_ts": thread_ts,
-                                        "status": "is thinking..."
-                                    }),
-                                ).await;
-                            }
+                            // Don't set thinking status here — the user hasn't sent
+                            // a message yet. Status will be set when we receive their
+                            // first message (below, before msg_tx.send).
                             continue;
                         }
 
@@ -444,6 +422,22 @@ impl ChannelAdapter for SlackAdapter {
                             }
                             name
                         };
+
+                        // Set "thinking" status before routing (we have thread_ts here).
+                        // This provides the visual indicator in Slack assistant threads.
+                        if let Some(ref tts) = &thread_ts {
+                            let _ = slack_api(
+                                &http,
+                                &bot_token,
+                                "assistant.threads.setStatus",
+                                &serde_json::json!({
+                                    "channel_id": &channel_id,
+                                    "thread_ts": tts,
+                                    "status": "is thinking..."
+                                }),
+                            )
+                            .await;
+                        }
 
                         let ctx = MsgContext {
                             channel_type: ChannelType::Slack,
@@ -1059,7 +1053,10 @@ async fn resolve_user_name_cached(
             })
             .unwrap_or("Unknown")
             .to_string(),
-        Err(_) => "Unknown".to_string(),
+        Err(e) => {
+            warn!(error = %e, user_id = user_id, "failed to resolve slack user name");
+            user_id.to_string()
+        }
     };
     cache.insert(user_id.to_string(), name.clone());
     name
