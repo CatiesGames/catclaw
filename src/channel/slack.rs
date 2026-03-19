@@ -314,8 +314,11 @@ impl ChannelAdapter for SlackAdapter {
                             .get("thread_ts")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
+                        // team may be missing on some event subtypes (e.g. file_share);
+                        // fall back to payload.team_id which is always present.
                         let team_id = event
                             .get("team")
+                            .or_else(|| payload.get("team_id"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();

@@ -218,6 +218,10 @@ impl MessageRouter {
             .await?;
 
         // 7. Send response back through adapter (chunked if needed)
+        // NO_REPLY is a convention: agent decided no response is needed
+        if response.trim() == "NO_REPLY" {
+            return Ok(());
+        }
         let max_len = adapter.capabilities().max_message_length.saturating_sub(100);
         let chunks = split_at_boundaries(&response, max_len);
 
