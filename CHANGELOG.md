@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.2](https://github.com/CatiesGames/catclaw/compare/v0.13.1...v0.13.2) (2026-03-19)
+
+
+### Bug Fixes
+
+* catclaw skill 強調 self-update 必須用 --notify ([c2a1401](https://github.com/CatiesGames/catclaw/commit/c2a14016a207c8b45931302fd22ad1be8aca83d6))
+
 ## [0.13.1](https://github.com/CatiesGames/catclaw/compare/v0.13.0...v0.13.1) (2026-03-19)
 
 
