@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.3](https://github.com/CatiesGames/catclaw/compare/v0.10.2...v0.10.3) (2026-03-19)
+
+
+### Bug Fixes
+
+* TUI chat 中文字串換行切割 panic ([b2c74f2](https://github.com/CatiesGames/catclaw/commit/b2c74f2ce19ca19ea1d7d21b85ebd3c1f5473f8c))
+* 攔截 NO_REPLY 回覆 + Slack file_share 缺少 team_id ([bc08607](https://github.com/CatiesGames/catclaw/commit/bc086072279c0f96c8575deb6686a25ddf0b20bb))
+
 ## [0.10.2](https://github.com/CatiesGames/catclaw/compare/v0.10.1...v0.10.2) (2026-03-19)
 
 
