@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.3](https://github.com/CatiesGames/catclaw/compare/v0.8.2...v0.8.3) (2026-03-19)
+
+
+### Bug Fixes
+
+* Slack thinking status 時機修正 + user_not_found fallback ([f9f562e](https://github.com/CatiesGames/catclaw/commit/f9f562e4ca4ce0bfcd04aa27eb430e38e6e4b0dc))
+
 ## [0.8.2](https://github.com/CatiesGames/catclaw/compare/v0.8.1...v0.8.2) (2026-03-19)
 
 
