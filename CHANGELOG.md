@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/CatiesGames/catclaw/compare/v0.9.1...v0.9.2) (2026-03-19)
+
+
+### Bug Fixes
+
+* Slack DM 不帶 thread_ts 防止開新 thread ([bd1e07e](https://github.com/CatiesGames/catclaw/commit/bd1e07e7e6258bd7d17b78bbc646a0bb53b5358f))
+
 ## [0.9.1](https://github.com/CatiesGames/catclaw/compare/v0.9.0...v0.9.1) (2026-03-19)
 
 
