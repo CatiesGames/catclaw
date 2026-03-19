@@ -308,6 +308,8 @@ impl ChannelAdapter for SlackAdapter {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        // Use thread_ts if the message is in a thread, otherwise None
+                        // (reply goes to channel root, same as normal conversation)
                         let thread_ts = event
                             .get("thread_ts")
                             .and_then(|v| v.as_str())
@@ -654,9 +656,7 @@ impl ChannelAdapter for SlackAdapter {
             "text": msg.text,
         });
         if let Some(ref ts) = msg.thread_id {
-            if !is_dm_channel(&msg.channel_id) {
-                body["thread_ts"] = serde_json::Value::String(ts.clone());
-            }
+            body["thread_ts"] = serde_json::Value::String(ts.clone());
         }
         self.api("chat.postMessage", &body).await?;
         Ok(())
@@ -716,9 +716,7 @@ impl ChannelAdapter for SlackAdapter {
             "blocks": blocks,
         });
         if let Some(tts) = thread_id {
-            if !is_dm_channel(channel_id) {
-                body["thread_ts"] = serde_json::Value::String(tts.to_string());
-            }
+            body["thread_ts"] = serde_json::Value::String(tts.to_string());
         }
         self.api("chat.postMessage", &body).await?;
 
@@ -819,11 +817,8 @@ impl ChannelAdapter for SlackAdapter {
                 let channel = p_str(&params, "channel")?;
                 let text = p_str(&params, "text")?;
                 let mut body = serde_json::json!({"channel": channel, "text": text});
-                // Skip thread_ts for DM channels to avoid creating unwanted threads
                 if let Some(ts) = params.get("thread_ts").and_then(|v| v.as_str()) {
-                    if !is_dm_channel(channel) {
-                        body["thread_ts"] = serde_json::Value::String(ts.to_string());
-                    }
+                    body["thread_ts"] = serde_json::Value::String(ts.to_string());
                 }
                 let resp = self.api("chat.postMessage", &body).await?;
                 let ts = resp.get("ts").and_then(|v| v.as_str()).unwrap_or("");
@@ -1133,13 +1128,6 @@ async fn resolve_user_name_cached(
 }
 
 // ── Parameter helpers ─────────────────────────────────────────────────
-
-/// Check if a Slack channel ID is a DM (starts with 'D').
-/// DM channels in assistant mode manage threads automatically — posting with
-/// thread_ts creates unwanted separate threads that archive the current conversation.
-fn is_dm_channel(channel_id: &str) -> bool {
-    channel_id.starts_with('D')
-}
 
 fn p_str<'a>(params: &'a serde_json::Value, field: &str) -> Result<&'a str> {
     params
