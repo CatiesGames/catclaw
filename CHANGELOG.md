@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.2](https://github.com/CatiesGames/catclaw/compare/v0.11.1...v0.11.2) (2026-03-19)
+
+
+### Bug Fixes
+
+* Slack Socket Mode 訊息去重，防止 gateway restart 導致重複處理 ([4c6bae8](https://github.com/CatiesGames/catclaw/commit/4c6bae89bf7c42312a78dfc9ca46d3da6e35b924))
+
 ## [0.11.1](https://github.com/CatiesGames/catclaw/compare/v0.11.0...v0.11.1) (2026-03-19)
 
 
