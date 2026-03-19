@@ -1053,12 +1053,40 @@ impl ChannelAdapter for SlackAdapter {
                     .to_string();
 
                 // Step 1: get upload URL
-                let step1 = self
-                    .api(
-                        "files.getUploadURLExternal",
-                        &serde_json::json!({"filename": filename, "length": length}),
-                    )
-                    .await?;
+                // files.getUploadURLExternal requires form-encoded (not JSON)
+                let step1_resp = self
+                    .http
+                    .post("https://slack.com/api/files.getUploadURLExternal")
+                    .header("Authorization", format!("Bearer {}", self.bot_token))
+                    .form(&[
+                        ("filename", filename.as_str()),
+                        ("length", &length.to_string()),
+                    ])
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        CatClawError::Slack(format!("files.getUploadURLExternal: {}", e))
+                    })?;
+                let step1: serde_json::Value = step1_resp.json().await.map_err(|e| {
+                    CatClawError::Slack(format!(
+                        "files.getUploadURLExternal: parse response: {}",
+                        e
+                    ))
+                })?;
+                if !step1
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    let err = step1
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown_error");
+                    return Err(CatClawError::Slack(format!(
+                        "files.getUploadURLExternal: {}",
+                        err
+                    )));
+                }
                 let upload_url = step1
                     .get("upload_url")
                     .and_then(|v| v.as_str())
