@@ -30,8 +30,6 @@ pub struct SlackAdapter {
     user_cache: DashMap<String, String>,
     /// Channel name cache: channel_id → channel_name
     channel_cache: DashMap<String, String>,
-    /// Most recent thread_ts per channel — used by send_approval to post in the right thread.
-    thread_cache: DashMap<String, String>,
 }
 
 impl SlackAdapter {
@@ -51,7 +49,6 @@ impl SlackAdapter {
             approval_rx: Mutex::new(Some(approval_rx)),
             user_cache: DashMap::new(),
             channel_cache: DashMap::new(),
-            thread_cache: DashMap::new(),
         }
     }
 
@@ -150,7 +147,6 @@ impl ChannelAdapter for SlackAdapter {
         let app_token = self.app_token.clone();
         let user_cache = self.user_cache.clone();
         let channel_cache = self.channel_cache.clone();
-        let thread_cache = self.thread_cache.clone();
 
         let mut backoff_secs = 1u64;
 
@@ -427,11 +423,6 @@ impl ChannelAdapter for SlackAdapter {
                             name
                         };
 
-                        // Track the most recent thread_ts per channel (used by send_approval)
-                        if let Some(ref tts) = &thread_ts {
-                            thread_cache.insert(channel_id.clone(), tts.clone());
-                        }
-
                         // Set "thinking" status before routing (we have thread_ts here).
                         // This provides the visual indicator in Slack assistant threads.
                         if let Some(ref tts) = &thread_ts {
@@ -486,6 +477,24 @@ impl ChannelAdapter for SlackAdapter {
                             Some(a) => a,
                             None => continue,
                         };
+
+                        // Extract message info for updating the card after click
+                        let msg_channel = payload
+                            .get("channel")
+                            .and_then(|c| c.get("id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let msg_ts = payload
+                            .get("message")
+                            .and_then(|m| m.get("ts"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let clicker = payload
+                            .get("user")
+                            .and_then(|u| u.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("someone");
+
                         for action in actions {
                             let action_id = action
                                 .get("action_id")
@@ -500,6 +509,32 @@ impl ChannelAdapter for SlackAdapter {
                                     continue;
                                 };
                             let _ = approval_tx.send((request_id, approved));
+
+                            // Update the approval card: replace buttons with result
+                            if !msg_channel.is_empty() && !msg_ts.is_empty() {
+                                let status = if approved { "Approved" } else { "Denied" };
+                                let emoji = if approved { ":white_check_mark:" } else { ":x:" };
+                                let _ = slack_api(
+                                    &http,
+                                    &bot_token,
+                                    "chat.update",
+                                    &serde_json::json!({
+                                        "channel": msg_channel,
+                                        "ts": msg_ts,
+                                        "blocks": [
+                                            {
+                                                "type": "section",
+                                                "text": {
+                                                    "type": "mrkdwn",
+                                                    "text": format!("{} {} by {}", emoji, status, clicker)
+                                                }
+                                            }
+                                        ],
+                                        "text": format!("{} by {}", status, clicker),
+                                    }),
+                                )
+                                .await;
+                            }
                         }
                     }
 
@@ -629,6 +664,7 @@ impl ChannelAdapter for SlackAdapter {
         &self,
         channel_id: &str,
         _peer_id: &str,
+        thread_id: Option<&str>,
         request_id: &str,
         tool_name: &str,
         tool_input: &serde_json::Value,
@@ -677,9 +713,8 @@ impl ChannelAdapter for SlackAdapter {
             "text": format!("Approval Required: {}", tool_name),
             "blocks": blocks,
         });
-        // Post in the active thread if we know it (from the most recent message)
-        if let Some(tts) = self.thread_cache.get(channel_id) {
-            body["thread_ts"] = serde_json::Value::String(tts.clone());
+        if let Some(tts) = thread_id {
+            body["thread_ts"] = serde_json::Value::String(tts.to_string());
         }
         self.api("chat.postMessage", &body).await?;
 

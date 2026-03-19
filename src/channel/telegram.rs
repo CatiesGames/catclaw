@@ -379,6 +379,7 @@ impl ChannelAdapter for TelegramAdapter {
         &self,
         channel_id: &str,
         _peer_id: &str,
+        _thread_id: Option<&str>,
         request_id: &str,
         tool_name: &str,
         tool_input: &serde_json::Value,

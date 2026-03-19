@@ -20,6 +20,8 @@ pub struct SenderInfo {
     pub sender_name: Option<String>,
     /// Platform-native channel ID (for approval forwarding back to origin channel)
     pub channel_id: Option<String>,
+    /// Thread ID (Slack thread_ts, Discord thread channel ID) for approval thread targeting
+    pub thread_id: Option<String>,
 }
 
 /// Manages session lifecycle: create, resume, fork, archive
@@ -126,6 +128,9 @@ impl SessionManager {
                     }
                     if let Some(ref sid) = sender.sender_id {
                         meta.insert("sender_id".to_string(), serde_json::Value::String(sid.clone()));
+                    }
+                    if let Some(ref tid) = sender.thread_id {
+                        meta.insert("thread_id".to_string(), serde_json::Value::String(tid.clone()));
                     }
                     if meta.is_empty() { None } else { Some(serde_json::Value::Object(meta).to_string()) }
                 };
@@ -360,6 +365,9 @@ impl SessionManager {
                     }
                     if let Some(ref sid) = sender.sender_id {
                         meta.insert("sender_id".to_string(), serde_json::Value::String(sid.clone()));
+                    }
+                    if let Some(ref tid) = sender.thread_id {
+                        meta.insert("thread_id".to_string(), serde_json::Value::String(tid.clone()));
                     }
                     if meta.is_empty() { None } else { Some(serde_json::Value::Object(meta).to_string()) }
                 };

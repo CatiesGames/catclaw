@@ -210,6 +210,7 @@ impl MessageRouter {
             sender_id: Some(ctx.sender_id.clone()),
             sender_name: Some(ctx.sender_name.clone()),
             channel_id: Some(ctx.channel_id.clone()),
+            thread_id: ctx.thread_id.clone(),
         };
         let response = self
             .session_manager

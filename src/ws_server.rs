@@ -231,7 +231,8 @@ async fn handle_approval_request(req: &WsRequest, gw: &Arc<GatewayHandle>) -> Ws
                         session_row.platform_channel_id(),
                         session_row.platform_sender_id(),
                     ) {
-                        if let Err(e) = adapter.send_approval(&channel_id, &sender_id, &rid, &tname, &tinput).await {
+                        let thread_id = session_row.platform_thread_id();
+                        if let Err(e) = adapter.send_approval(&channel_id, &sender_id, thread_id.as_deref(), &rid, &tname, &tinput).await {
                             warn!(error = %e, origin = %origin, "failed to forward approval to channel");
                         }
                     }
@@ -404,6 +405,7 @@ async fn handle_sessions_send(
                 sender_id: Some("tui-user".to_string()),
                 sender_name: Some("You".to_string()),
                 channel_id: None,
+                thread_id: None,
             };
             match sm
                 .send_streaming(&session_key, &agent, &message, Priority::Direct, &sender, model_override.as_deref())
@@ -463,6 +465,7 @@ async fn handle_sessions_send(
                 sender_id: Some("tui-user".to_string()),
                 sender_name: Some("You".to_string()),
                 channel_id: None,
+                thread_id: None,
             };
             let event = match sm
                 .send_and_wait(&session_key, &agent, &message, Priority::Direct, &sender, model_override.as_deref())

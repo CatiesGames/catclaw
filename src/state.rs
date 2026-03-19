@@ -66,6 +66,13 @@ impl SessionRow {
         parsed.get("channel_id")?.as_str().map(String::from)
     }
 
+    /// Read the platform thread ID from metadata JSON (Slack thread_ts, etc.).
+    pub fn platform_thread_id(&self) -> Option<String> {
+        let meta = self.metadata.as_deref()?;
+        let parsed: Value = serde_json::from_str(meta).ok()?;
+        parsed.get("thread_id")?.as_str().map(String::from)
+    }
+
     /// Read the platform sender ID from metadata JSON.
     pub fn platform_sender_id(&self) -> Option<String> {
         let meta = self.metadata.as_deref()?;

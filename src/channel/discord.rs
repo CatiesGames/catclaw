@@ -455,6 +455,7 @@ impl ChannelAdapter for DiscordAdapter {
         &self,
         channel_id: &str,
         _peer_id: &str,
+        thread_id: Option<&str>,
         request_id: &str,
         tool_name: &str,
         tool_input: &serde_json::Value,
@@ -464,7 +465,9 @@ impl ChannelAdapter for DiscordAdapter {
             .as_ref()
             .ok_or_else(|| CatClawError::Discord("not connected".to_string()))?;
 
-        let ch_id = channel_id
+        // In Discord, thread_id IS the channel to post in
+        let target = thread_id.unwrap_or(channel_id);
+        let ch_id = target
             .parse::<u64>()
             .map_err(|_| CatClawError::Discord("invalid channel id".to_string()))?;
 

@@ -152,6 +152,7 @@ pub trait ChannelAdapter: Send + Sync {
         &self,
         channel_id: &str,
         peer_id: &str,
+        thread_id: Option<&str>,
         request_id: &str,
         tool_name: &str,
         tool_input: &serde_json::Value,
@@ -167,7 +168,7 @@ pub trait ChannelAdapter: Send + Sync {
             channel_id: channel_id.to_string(),
             peer_id: peer_id.to_string(),
             text,
-            thread_id: None,
+            thread_id: thread_id.map(String::from),
             reply_to_message_id: None,
         })
         .await

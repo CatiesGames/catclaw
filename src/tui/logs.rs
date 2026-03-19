@@ -168,6 +168,7 @@ impl LogsPanel {
         self.records
             .iter()
             .enumerate()
+            .rev()
             .filter(|(_, r)| self.level_filter.matches(&r.level))
             .filter(|(_, r)| {
                 if let Some(ref query) = self.search_query {
@@ -257,7 +258,6 @@ impl Component for LogsPanel {
                     };
                     self.mode = Mode::Normal;
                     self.scroll = 0;
-                    self.scroll_to_bottom();
                     Action::None
                 }
                 KeyCode::Esc => {
@@ -301,9 +301,9 @@ impl Component for LogsPanel {
                     Action::None
                 }
                 KeyCode::Char('c') => {
-                    // Clear search
+                    // Clear search — jump to newest (top)
                     self.search_query = None;
-                    self.scroll_to_bottom();
+                    self.scroll = 0;
                     Action::None
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
@@ -325,7 +325,7 @@ impl Component for LogsPanel {
                 }
                 KeyCode::Char('r') => {
                     self.refresh();
-                    self.scroll_to_bottom();
+                    self.scroll = 0;
                     Action::None
                 }
                 _ => Action::None,
