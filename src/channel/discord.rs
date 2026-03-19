@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use serenity::all::{
     ButtonStyle, ChannelId, ChannelType as SerenityChannelType, Command, Context, CreateActionRow,
-    CreateButton, CreateChannel, CreateCommand, CreateEmbed, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, CreateThread, EditChannel, EditMessage,
-    EventHandler, GatewayIntents, GuildId, Interaction, Message, MessageId, PermissionOverwrite,
-    PermissionOverwriteType, Permissions, ReactionType, RoleId, Ready, UserId,
+    CreateAttachment, CreateButton, CreateChannel, CreateCommand, CreateEmbed,
+    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateThread,
+    EditChannel, EditMessage, EventHandler, GatewayIntents, GuildId, Interaction, Message,
+    MessageId, PermissionOverwrite, PermissionOverwriteType, Permissions, ReactionType, RoleId,
+    Ready, UserId,
 };
 use serenity::builder::GetMessages;
 use serenity::Client;
@@ -1011,6 +1012,46 @@ impl ChannelAdapter for DiscordAdapter {
                 Ok(serde_json::json!(result))
             }
 
+            // ── File Upload ────────────────────────────────────────────
+            "upload_file" => {
+                let cid = parse_channel_id(&params)?;
+                let file_path = require_str(&params, "file_path")?;
+
+                let path = std::path::Path::new(file_path);
+                if !path.is_absolute() {
+                    return Err(CatClawError::Discord("file_path must be absolute".into()));
+                }
+                let data = tokio::fs::read(path).await.map_err(|e| {
+                    CatClawError::Discord(format!("failed to read '{}': {}", file_path, e))
+                })?;
+
+                let filename = params
+                    .get("filename")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("file")
+                    })
+                    .to_string();
+
+                let attachment = CreateAttachment::bytes(data, &filename);
+                let mut msg_builder = CreateMessage::new().add_file(attachment);
+                if let Some(text) = params.get("text").and_then(|v| v.as_str()) {
+                    msg_builder = msg_builder.content(text);
+                }
+
+                let sent = cid
+                    .send_message(http, msg_builder)
+                    .await
+                    .map_err(|e| CatClawError::Discord(format!("upload_file: {}", e)))?;
+
+                Ok(serde_json::json!({
+                    "message_id": sent.id.get().to_string(),
+                    "ok": true,
+                }))
+            }
+
             _ => Err(CatClawError::Channel(format!(
                 "discord action '{}' not supported",
                 action
@@ -1230,6 +1271,17 @@ fn discord_action_infos() -> Vec<ActionInfo> {
         // Stickers
         action("list_stickers", "List custom stickers in a guild", serde_json::json!({
             "type": "object", "properties": {"guild_id": gid}, "required": ["guild_id"]
+        })),
+        // File Upload
+        action("upload_file", "Upload a local file to a Discord channel", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "channel_id": ch,
+                "file_path": {"type": "string", "description": "Absolute path to the local file"},
+                "filename": {"type": "string", "description": "Display filename (defaults to basename of file_path)"},
+                "text": {"type": "string", "description": "Message text to send with the file"}
+            },
+            "required": ["channel_id", "file_path"]
         })),
     ]
 }

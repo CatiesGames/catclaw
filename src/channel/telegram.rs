@@ -761,6 +761,41 @@ impl ChannelAdapter for TelegramAdapter {
                 }))
             }
 
+            // ── File Upload ────────────────────────────────────────────
+            "upload_file" => {
+                let cid = p_chat(&params)?;
+                let file_path = p_str(&params, "file_path")?;
+
+                let path = std::path::Path::new(file_path);
+                if !path.is_absolute() {
+                    return Err(CatClawError::Telegram("file_path must be absolute".into()));
+                }
+
+                let filename = params
+                    .get("filename")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("file")
+                            .to_string()
+                    });
+
+                let input_file =
+                    teloxide::types::InputFile::file(path.to_path_buf()).file_name(filename);
+                let mut req = bot.send_document(cid, input_file);
+
+                if let Some(caption) = params.get("caption").and_then(|v| v.as_str()) {
+                    req = req.caption(caption);
+                }
+
+                let msg = req
+                    .await
+                    .map_err(|e| CatClawError::Telegram(format!("upload_file: {}", e)))?;
+                Ok(serde_json::json!({"message_id": msg.id.0, "ok": true}))
+            }
+
             _ => Err(CatClawError::Channel(format!(
                 "telegram action '{}' not supported",
                 action
@@ -925,6 +960,17 @@ fn telegram_action_infos() -> Vec<ActionInfo> {
             "type": "object",
             "properties": {"chat_id": cid, "name": {"type": "string"}, "member_limit": {"type": "integer"}},
             "required": ["chat_id"]
+        })),
+        // File Upload
+        tg_action("upload_file", "Upload a local file to a Telegram chat", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "chat_id": cid,
+                "file_path": {"type": "string", "description": "Absolute path to the local file"},
+                "filename": {"type": "string", "description": "Display filename (defaults to basename of file_path)"},
+                "caption": {"type": "string", "description": "Caption text to send with the file"}
+            },
+            "required": ["chat_id", "file_path"]
         })),
     ]
 }

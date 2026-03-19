@@ -1028,6 +1028,85 @@ impl ChannelAdapter for SlackAdapter {
                     .unwrap_or(serde_json::json!([])))
             }
 
+            // ── File Upload ────────────────────────────────────────────
+            "upload_file" => {
+                let channel = p_str(&params, "channel")?;
+                let file_path = p_str(&params, "file_path")?;
+
+                let path = std::path::Path::new(file_path);
+                if !path.is_absolute() {
+                    return Err(CatClawError::Slack("file_path must be absolute".into()));
+                }
+                let data = tokio::fs::read(path).await.map_err(|e| {
+                    CatClawError::Slack(format!("failed to read '{}': {}", file_path, e))
+                })?;
+                let length = data.len();
+
+                let filename = params
+                    .get("filename")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("file")
+                    })
+                    .to_string();
+
+                // Step 1: get upload URL
+                let step1 = self
+                    .api(
+                        "files.getUploadURLExternal",
+                        &serde_json::json!({"filename": filename, "length": length}),
+                    )
+                    .await?;
+                let upload_url = step1
+                    .get("upload_url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        CatClawError::Slack("files.getUploadURLExternal: no upload_url".into())
+                    })?;
+                let file_id = step1
+                    .get("file_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        CatClawError::Slack("files.getUploadURLExternal: no file_id".into())
+                    })?
+                    .to_string();
+
+                // Step 2: upload binary data
+                let upload_resp = self
+                    .http
+                    .post(upload_url)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(data)
+                    .send()
+                    .await
+                    .map_err(|e| CatClawError::Slack(format!("upload binary: {}", e)))?;
+                if !upload_resp.status().is_success() {
+                    return Err(CatClawError::Slack(format!(
+                        "upload binary: HTTP {}",
+                        upload_resp.status()
+                    )));
+                }
+
+                // Step 3: complete upload and share to channel
+                let title = filename.clone();
+                let mut complete_body = serde_json::json!({
+                    "files": [{"id": file_id, "title": title}],
+                    "channel_id": channel,
+                });
+                if let Some(msg) = params.get("message").and_then(|v| v.as_str()) {
+                    complete_body["initial_comment"] = serde_json::Value::String(msg.to_string());
+                }
+                if let Some(ts) = params.get("thread_ts").and_then(|v| v.as_str()) {
+                    complete_body["thread_ts"] = serde_json::Value::String(ts.to_string());
+                }
+                self.api("files.completeUploadExternal", &complete_body)
+                    .await?;
+
+                Ok(serde_json::json!({"ok": true, "file_id": file_id}))
+            }
+
             _ => Err(CatClawError::Channel(format!(
                 "slack action '{}' not supported",
                 action
@@ -1319,6 +1398,22 @@ fn slack_action_infos() -> Vec<ActionInfo> {
                 "type": "object",
                 "properties": {"limit": {"type": "integer"}},
                 "required": []
+            }),
+        ),
+        // File Upload
+        slack_action(
+            "upload_file",
+            "Upload a local file to a Slack channel",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "channel": ch,
+                    "file_path": {"type": "string", "description": "Absolute path to the local file"},
+                    "filename": {"type": "string", "description": "Display filename (defaults to basename of file_path)"},
+                    "message": {"type": "string", "description": "Initial comment to attach"},
+                    "thread_ts": {"type": "string", "description": "Thread timestamp to upload into"}
+                },
+                "required": ["channel", "file_path"]
             }),
         ),
     ]
