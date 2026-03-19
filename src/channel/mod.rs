@@ -307,7 +307,7 @@ pub fn split_at_boundaries(text: &str, max_len: usize) -> Vec<&str> {
         }
 
         // Find a good split point: prefer double newline, then single newline, then space
-        let search_end = max_len.min(remaining.len());
+        let search_end = floor_char_boundary(remaining, max_len);
         let split_at = remaining[..search_end]
             .rfind("\n\n")
             .map(|i| i + 2)
@@ -320,4 +320,17 @@ pub fn split_at_boundaries(text: &str, max_len: usize) -> Vec<&str> {
     }
 
     chunks
+}
+
+/// Find the largest byte index `<= n` that is a valid UTF-8 char boundary.
+/// Prevents panics when slicing multi-byte characters (CJK, emoji, etc.).
+fn floor_char_boundary(s: &str, n: usize) -> usize {
+    if n >= s.len() {
+        return s.len();
+    }
+    let mut i = n;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }

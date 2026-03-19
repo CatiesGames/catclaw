@@ -536,14 +536,33 @@ fn handle_sessions_transcript(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRes
         None => return WsResponse::err(req.id, -1, format!("agent not found: {}", agent_id)),
     };
 
-    let path = agent
-        .workspace
-        .join("transcripts")
-        .join(format!("{}.jsonl", session_id));
-
-    if !path.exists() {
-        return WsResponse::ok(req.id, json!([]));
-    }
+    // Find transcript file: try plain {session_id}.jsonl first, then *_{session_id}.jsonl
+    let transcripts_dir = agent.workspace.join("transcripts");
+    let plain = transcripts_dir.join(format!("{}.jsonl", session_id));
+    let path = if plain.exists() {
+        plain
+    } else {
+        // Search for labeled transcript: {label}_{session_id}.jsonl
+        let suffix = format!("_{}.jsonl", session_id);
+        match std::fs::read_dir(&transcripts_dir) {
+            Ok(entries) => {
+                let mut found = None;
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.ends_with(&suffix) {
+                            found = Some(entry.path());
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some(p) => p,
+                    None => return WsResponse::ok(req.id, json!([])),
+                }
+            }
+            Err(_) => return WsResponse::ok(req.id, json!([])),
+        }
+    };
 
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,

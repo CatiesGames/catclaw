@@ -30,6 +30,8 @@ pub struct SlackAdapter {
     user_cache: DashMap<String, String>,
     /// Channel name cache: channel_id → channel_name
     channel_cache: DashMap<String, String>,
+    /// Most recent thread_ts per channel — used by send_approval to post in the right thread.
+    thread_cache: DashMap<String, String>,
 }
 
 impl SlackAdapter {
@@ -49,6 +51,7 @@ impl SlackAdapter {
             approval_rx: Mutex::new(Some(approval_rx)),
             user_cache: DashMap::new(),
             channel_cache: DashMap::new(),
+            thread_cache: DashMap::new(),
         }
     }
 
@@ -147,6 +150,7 @@ impl ChannelAdapter for SlackAdapter {
         let app_token = self.app_token.clone();
         let user_cache = self.user_cache.clone();
         let channel_cache = self.channel_cache.clone();
+        let thread_cache = self.thread_cache.clone();
 
         let mut backoff_secs = 1u64;
 
@@ -423,6 +427,11 @@ impl ChannelAdapter for SlackAdapter {
                             name
                         };
 
+                        // Track the most recent thread_ts per channel (used by send_approval)
+                        if let Some(ref tts) = &thread_ts {
+                            thread_cache.insert(channel_id.clone(), tts.clone());
+                        }
+
                         // Set "thinking" status before routing (we have thread_ts here).
                         // This provides the visual indicator in Slack assistant threads.
                         if let Some(ref tts) = &thread_ts {
@@ -525,6 +534,12 @@ impl ChannelAdapter for SlackAdapter {
                             _ => continue,
                         };
 
+                        let thread_ts = payload
+                            .get("thread_ts")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string());
+
                         let is_dm = channel_id.starts_with('D');
 
                         // Check sender policy (slash commands bypass activation but
@@ -553,7 +568,7 @@ impl ChannelAdapter for SlackAdapter {
                             text: slash_text.to_string(),
                             attachments: vec![],
                             reply_to: None,
-                            thread_id: None,
+                            thread_id: thread_ts,
                             is_direct_message: is_dm,
                             raw_event: serde_json::json!({
                                 "team": &team_id,
@@ -657,24 +672,25 @@ impl ChannelAdapter for SlackAdapter {
             }
         ]);
 
-        self.api(
-            "chat.postMessage",
-            &serde_json::json!({
-                "channel": channel_id,
-                "text": format!("Approval Required: {}", tool_name),
-                "blocks": blocks,
-            }),
-        )
-        .await?;
+        let mut body = serde_json::json!({
+            "channel": channel_id,
+            "text": format!("Approval Required: {}", tool_name),
+            "blocks": blocks,
+        });
+        // Post in the active thread if we know it (from the most recent message)
+        if let Some(tts) = self.thread_cache.get(channel_id) {
+            body["thread_ts"] = serde_json::Value::String(tts.clone());
+        }
+        self.api("chat.postMessage", &body).await?;
 
         Ok(())
     }
 
     async fn start_typing(&self, _channel_id: &str, _peer_id: &str) -> Result<TypingGuard> {
-        // Slack's typing indicator (assistant.threads.setStatus) requires a thread_ts
-        // which the ChannelAdapter trait doesn't provide. The thinking status is instead
-        // set by the assistant_thread_started event handler when a new assistant thread
-        // begins, and cleared automatically when the bot replies.
+        // Slack's typing indicator (assistant.threads.setStatus) requires thread_ts
+        // which the ChannelAdapter trait doesn't provide. Thinking status is set in
+        // the event handler (before msg_tx.send) where thread_ts is available, and
+        // cleared automatically when the bot replies.
         Ok(TypingGuard::noop())
     }
 
@@ -702,7 +718,7 @@ impl ChannelAdapter for SlackAdapter {
         ChannelCapabilities {
             threading: true,
             // Slack's assistant.threads.setStatus requires thread_ts which the trait
-            // doesn't provide. Thinking status is set via assistant_thread_started instead.
+            // doesn't provide. Thinking status is set in the event handler instead.
             typing_indicator: false,
             message_editing: true,
             max_message_length: 40000,
@@ -714,12 +730,15 @@ impl ChannelAdapter for SlackAdapter {
     // ── Streaming API ─────────────────────────────────────────────────
 
     async fn send_stream_start(&self, channel_id: &str, thread_ts: &str) -> Result<String> {
-        let mut body = serde_json::json!({
-            "channel": channel_id,
-        });
-        if !thread_ts.is_empty() {
-            body["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
+        if thread_ts.is_empty() {
+            return Err(CatClawError::Slack(
+                "chat.startStream requires thread_ts".into(),
+            ));
         }
+        let body = serde_json::json!({
+            "channel": channel_id,
+            "thread_ts": thread_ts,
+        });
         let resp = self.api("chat.startStream", &body).await?;
         resp.get("ts")
             .and_then(|v| v.as_str())
@@ -1034,7 +1053,7 @@ async fn resolve_user_name_cached(
     if let Some(name) = cache.get(user_id) {
         return name.clone();
     }
-    let name = match slack_api(
+    match slack_api(
         http,
         token,
         "users.info",
@@ -1042,24 +1061,33 @@ async fn resolve_user_name_cached(
     )
     .await
     {
-        Ok(resp) => resp
-            .get("user")
-            .and_then(|u| {
-                u.get("profile")
-                    .and_then(|p| p.get("display_name").and_then(|n| n.as_str()))
-                    .filter(|n| !n.is_empty())
-                    .or_else(|| u.get("real_name").and_then(|n| n.as_str()))
-                    .or_else(|| u.get("name").and_then(|n| n.as_str()))
-            })
-            .unwrap_or("Unknown")
-            .to_string(),
+        Ok(resp) => {
+            let resolved = resp
+                .get("user")
+                .and_then(|u| {
+                    u.get("profile")
+                        .and_then(|p| p.get("display_name").and_then(|n| n.as_str()))
+                        .filter(|n| !n.is_empty())
+                        .or_else(|| u.get("real_name").and_then(|n| n.as_str()))
+                        .or_else(|| u.get("name").and_then(|n| n.as_str()))
+                })
+                .unwrap_or("")
+                .to_string();
+            if !resolved.is_empty() {
+                // Only cache successful lookups with actual names
+                cache.insert(user_id.to_string(), resolved.clone());
+                resolved
+            } else {
+                // Profile has no name fields — don't cache, use user ID
+                user_id.to_string()
+            }
+        }
         Err(e) => {
+            // Don't cache errors — allow retry on next message
             warn!(error = %e, user_id = user_id, "failed to resolve slack user name");
             user_id.to_string()
         }
-    };
-    cache.insert(user_id.to_string(), name.clone());
-    name
+    }
 }
 
 // ── Parameter helpers ─────────────────────────────────────────────────
