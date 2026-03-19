@@ -653,8 +653,13 @@ impl ChannelAdapter for SlackAdapter {
             "channel": msg.channel_id,
             "text": msg.text,
         });
+        // Only thread replies in group channels (C prefix).
+        // DM channels (D prefix) in assistant mode manage threads automatically —
+        // posting with thread_ts creates unwanted separate threads.
         if let Some(ref ts) = msg.thread_id {
-            body["thread_ts"] = serde_json::Value::String(ts.clone());
+            if !msg.channel_id.starts_with('D') {
+                body["thread_ts"] = serde_json::Value::String(ts.clone());
+            }
         }
         self.api("chat.postMessage", &body).await?;
         Ok(())
@@ -713,8 +718,13 @@ impl ChannelAdapter for SlackAdapter {
             "text": format!("Approval Required: {}", tool_name),
             "blocks": blocks,
         });
+        // Only thread replies in group channels (C prefix).
+        // DM channels (D prefix) don't need thread_ts — posting with thread_ts
+        // in a DM creates unwanted separate threads in Slack's assistant UI.
         if let Some(tts) = thread_id {
-            body["thread_ts"] = serde_json::Value::String(tts.to_string());
+            if !channel_id.starts_with('D') {
+                body["thread_ts"] = serde_json::Value::String(tts.to_string());
+            }
         }
         self.api("chat.postMessage", &body).await?;
 
