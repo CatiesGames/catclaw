@@ -134,10 +134,19 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
         for word in line.split_whitespace() {
             if current.is_empty() {
                 if word.len() > max_width {
+                    // Break long words at char boundaries instead of byte offsets
                     let mut rem = word;
-                    while rem.len() > max_width {
-                        result.push(rem[..max_width].to_string());
-                        rem = &rem[max_width..];
+                    loop {
+                        let split = rem
+                            .char_indices()
+                            .map(|(i, _)| i)
+                            .find(|&i| i >= max_width)
+                            .unwrap_or(rem.len());
+                        if split >= rem.len() {
+                            break;
+                        }
+                        result.push(rem[..split].to_string());
+                        rem = &rem[split..];
                     }
                     current = rem.to_string();
                 } else {
