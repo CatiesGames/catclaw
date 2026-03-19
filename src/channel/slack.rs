@@ -1140,19 +1140,51 @@ impl ChannelAdapter for SlackAdapter {
                 }
 
                 // Step 3: complete upload and share to channel
+                // Use form-encoded (not JSON) for DM channel compatibility
                 let title = filename.clone();
-                let mut complete_body = serde_json::json!({
-                    "files": [{"id": file_id, "title": title}],
-                    "channel_id": channel,
-                });
+                let files_json =
+                    serde_json::json!([{"id": file_id, "title": title}]).to_string();
+                let mut form: Vec<(&str, String)> = vec![
+                    ("files", files_json),
+                    ("channel_id", channel.to_string()),
+                ];
                 if let Some(msg) = params.get("message").and_then(|v| v.as_str()) {
-                    complete_body["initial_comment"] = serde_json::Value::String(msg.to_string());
+                    form.push(("initial_comment", msg.to_string()));
                 }
                 if let Some(ts) = params.get("thread_ts").and_then(|v| v.as_str()) {
-                    complete_body["thread_ts"] = serde_json::Value::String(ts.to_string());
+                    form.push(("thread_ts", ts.to_string()));
                 }
-                self.api("files.completeUploadExternal", &complete_body)
-                    .await?;
+                let complete_resp = self
+                    .http
+                    .post("https://slack.com/api/files.completeUploadExternal")
+                    .header("Authorization", format!("Bearer {}", self.bot_token))
+                    .form(&form)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        CatClawError::Slack(format!("files.completeUploadExternal: {}", e))
+                    })?;
+                let complete_json: serde_json::Value =
+                    complete_resp.json().await.map_err(|e| {
+                        CatClawError::Slack(format!(
+                            "files.completeUploadExternal: parse response: {}",
+                            e
+                        ))
+                    })?;
+                if !complete_json
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    let err = complete_json
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown_error");
+                    return Err(CatClawError::Slack(format!(
+                        "files.completeUploadExternal: {}",
+                        err
+                    )));
+                }
 
                 Ok(serde_json::json!({"ok": true, "file_id": file_id}))
             }
