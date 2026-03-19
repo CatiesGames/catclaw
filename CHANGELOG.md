@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/CatiesGames/catclaw/compare/v0.12.0...v0.12.1) (2026-03-19)
+
+
+### Bug Fixes
+
+* Slack API 統一改 form-encoded，修復 users.info user_not_found ([6c17b2c](https://github.com/CatiesGames/catclaw/commit/6c17b2cee95e77a64f14525f50dcd78555035100))
+
 ## [0.12.0](https://github.com/CatiesGames/catclaw/compare/v0.11.2...v0.12.0) (2026-03-19)
 
 
