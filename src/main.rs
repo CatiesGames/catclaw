@@ -1514,18 +1514,15 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
 
             // Show condensed manifest for copy-paste
             cli_ui::section_empty();
-            cli_ui::section_line(&format!(
-                "{}YAML Manifest (copy & paste into Slack):{}",
+            println!(
+                "  {}JSON Manifest (copy & paste into Slack):{}",
                 cli_ui::YELLOW, cli_ui::RESET
-            ));
-            cli_ui::section_empty();
+            );
+            println!();
             for line in SLACK_APP_MANIFEST.lines() {
-                cli_ui::section_line(&format!(
-                    "{}{}{}",
-                    cli_ui::OVERLAY, line, cli_ui::RESET
-                ));
+                println!("  {}{}{}", cli_ui::OVERLAY, line, cli_ui::RESET);
             }
-            cli_ui::section_empty();
+            println!();
             cli_ui::section_divider();
             cli_ui::section_empty();
 
@@ -1760,66 +1757,76 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
 }
 
 /// Write or update an env var in the .env lines
-/// Slack App Manifest (YAML) — used by `catclaw onboard` to simplify Slack app creation.
-/// Users paste this into https://api.slack.com/apps → Create New App → From a manifest.
-const SLACK_APP_MANIFEST: &str = r#"_metadata:
-  major_version: 1
-display_information:
-  name: CatClaw
-  description: Personal AI assistant powered by Claude Code
-features:
-  assistant_view:
-    assistant_description: AI assistant powered by CatClaw gateway
-    suggested_prompts:
-      - title: Help
-        message: What can you help me with?
-  app_home:
-    messages_tab_enabled: true
-    messages_tab_read_only_enabled: false
-  bot_user:
-    display_name: CatClaw
-    always_online: true
-  slash_commands:
-    - command: /stop
-      description: Stop the current session
-    - command: /new
-      description: Start a new session (archives current)
-oauth_config:
-  scopes:
-    bot:
-      - assistant:write
-      - app_mentions:read
-      - chat:write
-      - channels:history
-      - channels:read
-      - files:read
-      - groups:history
-      - groups:read
-      - im:history
-      - im:read
-      - mpim:history
-      - mpim:read
-      - reactions:read
-      - reactions:write
-      - pins:read
-      - pins:write
-      - users:read
-      - commands
-settings:
-  event_subscriptions:
-    bot_events:
-      - message.channels
-      - message.groups
-      - message.im
-      - message.mpim
-      - app_mention
-      - assistant_thread_started
-      - assistant_thread_context_changed
-  interactivity:
-    is_enabled: true
-  org_deploy_enabled: false
-  socket_mode_enabled: true
-"#;
+/// Slack App Manifest (JSON) — used by `catclaw onboard` to simplify Slack app creation.
+/// Users paste this into https://api.slack.com/apps → Create New App → From a manifest → JSON tab.
+const SLACK_APP_MANIFEST: &str = r#"{
+  "display_information": {
+    "name": "CatClaw",
+    "description": "Personal AI assistant powered by Claude Code"
+  },
+  "features": {
+    "assistant_view": {
+      "assistant_description": "AI assistant powered by CatClaw gateway",
+      "suggested_prompts": [
+        { "title": "Help", "message": "What can you help me with?" }
+      ]
+    },
+    "app_home": {
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "CatClaw",
+      "always_online": true
+    },
+    "slash_commands": [
+      { "command": "/stop", "description": "Stop the current session" },
+      { "command": "/new", "description": "Start a new session (archives current)" }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "assistant:write",
+        "app_mentions:read",
+        "chat:write",
+        "channels:history",
+        "channels:read",
+        "files:read",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "mpim:history",
+        "mpim:read",
+        "reactions:read",
+        "reactions:write",
+        "pins:read",
+        "pins:write",
+        "users:read",
+        "commands"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim",
+        "app_mention",
+        "assistant_thread_started",
+        "assistant_thread_context_changed"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true
+  }
+}"#;
 
 fn write_env_var(lines: &mut Vec<String>, key: &str, value: &str) {
     let prefix = format!("{}=", key);
