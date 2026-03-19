@@ -64,6 +64,8 @@ pub struct Attachment {
     pub content_type: Option<String>,
     /// File size in bytes (if available from the platform).
     pub size: Option<u64>,
+    /// Authorization header value for platforms that require auth to download (e.g. Slack).
+    pub auth_header: Option<String>,
 }
 
 #[derive(Debug, Clone)]

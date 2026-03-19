@@ -141,6 +141,7 @@ impl EventHandler for Handler {
                 url: a.url.clone(),
                 content_type: a.content_type.clone(),
                 size: Some(a.size as u64),
+                auth_header: None,
             })
             .collect();
 

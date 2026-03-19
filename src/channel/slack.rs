@@ -384,6 +384,7 @@ impl ChannelAdapter for SlackAdapter {
                                         url,
                                         content_type,
                                         size,
+                                        auth_header: Some(format!("Bearer {}", bot_token)),
                                     });
                                 }
                             }

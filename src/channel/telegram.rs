@@ -124,6 +124,7 @@ impl ChannelAdapter for TelegramAdapter {
                                 url,
                                 content_type: doc.mime_type.as_ref().map(|m| m.to_string()),
                                 size: Some(doc.file.size as u64),
+                                auth_header: None,
                             });
                         }
                     }
@@ -142,6 +143,7 @@ impl ChannelAdapter for TelegramAdapter {
                                     url,
                                     content_type: Some("image/jpeg".into()),
                                     size: Some(photo.file.size as u64),
+                                    auth_header: None,
                                 });
                             }
                         }
@@ -159,6 +161,7 @@ impl ChannelAdapter for TelegramAdapter {
                                 url,
                                 content_type: audio.mime_type.as_ref().map(|m| m.to_string()),
                                 size: Some(audio.file.size as u64),
+                                auth_header: None,
                             });
                         }
                     }
@@ -175,6 +178,7 @@ impl ChannelAdapter for TelegramAdapter {
                                 url,
                                 content_type: video.mime_type.as_ref().map(|m| m.to_string()),
                                 size: Some(video.file.size as u64),
+                                auth_header: None,
                             });
                         }
                     }
@@ -191,6 +195,7 @@ impl ChannelAdapter for TelegramAdapter {
                                 url,
                                 content_type: voice.mime_type.as_ref().map(|m| m.to_string()),
                                 size: Some(voice.file.size as u64),
+                                auth_header: None,
                             });
                         }
                     }

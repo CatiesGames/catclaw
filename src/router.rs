@@ -342,8 +342,12 @@ async fn download_attachment(
     let local_name = format!("{}_{}_{}",date, short_id, safe_name);
     let local_path = att_dir.join(&local_name);
 
-    // Download
-    match client.get(&att.url).send().await {
+    // Download (with optional auth header for platforms like Slack)
+    let mut req = client.get(&att.url);
+    if let Some(ref auth) = att.auth_header {
+        req = req.header(reqwest::header::AUTHORIZATION, auth);
+    }
+    match req.send().await {
         Ok(resp) if resp.status().is_success() => {
             match resp.bytes().await {
                 Ok(bytes) => {

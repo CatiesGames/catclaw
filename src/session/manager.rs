@@ -1,5 +1,5 @@
 use chrono::Utc;
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -31,9 +31,8 @@ pub struct SessionManager {
     /// Active session handles: session_key → kill sender.
     /// Sending on the channel triggers process termination.
     active_handles: Arc<DashMap<String, tokio::sync::oneshot::Sender<()>>>,
-    /// Sessions currently being set up (between acquire permit and registering active_handle).
-    /// Prevents two concurrent requests for the same session key from both starting a process.
-    in_flight: Arc<DashSet<String>>,
+    /// Per-session mutex: queues concurrent messages for the same session instead of rejecting them.
+    session_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Port of the built-in MCP server (injected into claude CLI args).
     mcp_port: Option<u16>,
     /// Path to catclaw config file (for hook subprocess --config arg).
@@ -50,10 +49,18 @@ impl SessionManager {
             state_db,
             queue: SessionQueue::new(max_concurrent),
             active_handles: Arc::new(DashMap::new()),
-            in_flight: Arc::new(DashSet::new()),
+            session_locks: Arc::new(DashMap::new()),
             mcp_port: None,
             config_path: None,
         }
+    }
+
+    /// Get or create a per-session mutex for serializing messages to the same session.
+    fn session_lock(&self, session_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.session_locks
+            .entry(session_key.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     pub fn with_mcp_port(mut self, port: u16) -> Self {
@@ -85,20 +92,14 @@ impl SessionManager {
         sender: &SenderInfo,
         initial_model: Option<&str>,
     ) -> Result<String> {
-        // Acquire concurrency permit
-        let _permit = self.queue.acquire(priority).await;
-
         let session_key = key.to_key_string();
 
-        // Guard: prevent two concurrent sends for the same session key
-        if !self.in_flight.insert(session_key.clone()) {
-            return Err(crate::error::CatClawError::Session(
-                "session is already being processed, please wait".to_string()
-            ));
-        }
-        struct InFlightGuard(Arc<DashSet<String>>, String);
-        impl Drop for InFlightGuard { fn drop(&mut self) { self.0.remove(&self.1); } }
-        let _in_flight_guard = InFlightGuard(self.in_flight.clone(), session_key.clone());
+        // Per-session mutex: queue concurrent messages instead of rejecting them
+        let lock = self.session_lock(&session_key);
+        let _session_guard = lock.lock().await;
+
+        // Acquire global concurrency permit (after session lock so waiters don't consume slots)
+        let _permit = self.queue.acquire(priority).await;
 
         // Check for existing session
         let existing = self.state_db.get_session(&session_key)?;
@@ -325,17 +326,14 @@ impl SessionManager {
         sender: &SenderInfo,
         initial_model: Option<&str>,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<SessionEvent>> {
-        // Acquire concurrency permit
-        let _permit = self.queue.acquire(priority).await;
-
         let session_key = key.to_key_string();
 
-        // Guard: prevent two concurrent sends for the same session key
-        if !self.in_flight.insert(session_key.clone()) {
-            return Err(crate::error::CatClawError::Session(
-                "session is already being processed, please wait".to_string()
-            ));
-        }
+        // Per-session mutex: queue concurrent messages instead of rejecting them
+        let lock = self.session_lock(&session_key);
+        let session_guard = lock.lock_owned().await;
+
+        // Acquire global concurrency permit (after session lock so waiters don't consume slots)
+        let _permit = self.queue.acquire(priority).await;
 
         // Check for existing session
         let existing = self.state_db.get_session(&session_key)?;
@@ -428,7 +426,6 @@ impl SessionManager {
         // Spawn background task to read events and forward them
         let state_db = self.state_db.clone();
         let active_handles = self.active_handles.clone();
-        let in_flight = self.in_flight.clone();
         let agent_workspace = agent.workspace.clone();
         let sender_id = sender.sender_id.clone();
         let sender_name = sender.sender_name.clone();
@@ -440,10 +437,7 @@ impl SessionManager {
         // Move permit into the spawned task so concurrency is held until completion
         tokio::spawn(async move {
             let _permit = _permit; // keep permit alive
-            // Remove from in_flight when this task completes (via Drop)
-            struct InFlightGuard(Arc<DashSet<String>>, String);
-            impl Drop for InFlightGuard { fn drop(&mut self) { self.0.remove(&self.1); } }
-            let _in_flight_guard = InFlightGuard(in_flight, session_key_owned.clone());
+            let _session_guard = session_guard; // keep session lock until task completes
 
             let mut kill_rx = kill_rx;
 
@@ -666,6 +660,7 @@ impl SessionManager {
     pub async fn archive(&self, session_key: &str) -> Result<()> {
         self.state_db
             .update_session_state(session_key, "archived")?;
+        self.session_locks.remove(session_key);
         info!(session_key = %session_key, "archived session");
         Ok(())
     }
