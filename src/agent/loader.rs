@@ -167,7 +167,7 @@ impl AgentLoader {
         // Default tools.toml
         fs::write(
             workspace.join("tools.toml"),
-            r#"allowed = ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "Agent", "WebFetch", "WebSearch", "Skill"]
+            r#"allowed = ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "Agent", "WebFetch", "WebSearch", "Skill", "ToolSearch"]
 denied = []
 "#,
         )?;
