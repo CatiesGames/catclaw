@@ -182,6 +182,7 @@ impl EventHandler for Handler {
             }),
             channel_name,
             guild_id: guild_id_str,
+            message_id: Some(msg.id.get().to_string()),
         };
 
         if let Err(e) = self.msg_tx.send(ctx).await {
@@ -321,6 +322,7 @@ impl EventHandler for Handler {
                         }),
                         channel_name,
                         guild_id: guild_id_str,
+                        message_id: None, // slash commands don't have a message to react to
                     };
 
                     if let Err(e) = self.msg_tx.send(msg_ctx).await {
@@ -1061,6 +1063,22 @@ impl ChannelAdapter for DiscordAdapter {
 
     fn supported_actions(&self) -> Vec<ActionInfo> {
         discord_action_infos()
+    }
+
+    async fn create_reaction_handle(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> Option<super::reaction::ReactionHandle> {
+        let http = self.http.read().await;
+        let http = http.as_ref()?;
+        let cid = channel_id.parse::<u64>().ok()?;
+        let mid = message_id.parse::<u64>().ok()?;
+        Some(super::reaction::spawn(
+            http.clone(),
+            ChannelId::new(cid),
+            MessageId::new(mid),
+        ))
     }
 }
 

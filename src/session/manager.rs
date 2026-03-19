@@ -83,6 +83,7 @@ impl SessionManager {
     ///
     /// `initial_model`: model override for new sessions (from TUI pending session).
     /// For existing sessions, the model is read from DB metadata instead.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_and_wait(
         &self,
         key: &SessionKey,
@@ -91,6 +92,7 @@ impl SessionManager {
         priority: Priority,
         sender: &SenderInfo,
         initial_model: Option<&str>,
+        event_observer: Option<tokio::sync::mpsc::UnboundedSender<super::claude::ClaudeEvent>>,
     ) -> Result<String> {
         let session_key = key.to_key_string();
 
@@ -165,7 +167,7 @@ impl SessionManager {
                             agent.claude_args_with_mcp(&new_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref());
                         let mut handle =
                             ClaudeHandle::spawn_with_prompt(args, &combined).await?;
-                        let response = handle.wait_for_result().await?;
+                        let response = handle.wait_for_result(event_observer.clone()).await?;
 
                         // Determine final session ID
                         let final_id = handle
@@ -228,7 +230,7 @@ impl SessionManager {
 
         // Wait for result, but also listen for kill signal
         let response = tokio::select! {
-            result = handle.wait_for_result() => {
+            result = handle.wait_for_result(event_observer) => {
                 match result {
                     Ok(r) => Ok(r),
                     Err(e) if is_resume => {
@@ -442,6 +444,7 @@ impl SessionManager {
             let mut kill_rx = kill_rx;
 
             let mut result_text = String::new();
+            let mut got_result_event = false;
             let mut final_session_id = session_id_owned.clone();
             let mut stopped = false;
             let mut tool_uses: Vec<super::transcript::ToolUseEntry> = Vec::new();
@@ -505,7 +508,12 @@ impl SessionManager {
                                 if !session_id.is_empty() {
                                     final_session_id = session_id.clone();
                                 }
-                                result_text = result.clone();
+                                got_result_event = true;
+                                // Only overwrite if non-empty; empty result means
+                                // Claude already sent response via tool use / streaming
+                                if !result.is_empty() {
+                                    result_text = result.clone();
+                                }
                                 break;
                             }
                             ClaudeEvent::Assistant { content } => {
@@ -572,15 +580,16 @@ impl SessionManager {
             active_handles.remove(&session_key_owned);
 
             // Send final complete event
-            if result_text.is_empty() {
+            if result_text.is_empty() && !got_result_event {
+                // No result event at all — process died unexpectedly
                 if is_resume {
-                    // Resume failed with empty result — likely a stale session
+                    // Resume failed — likely a stale session
                     // (claude CLI session was deleted but our DB still has it).
                     // Archive it so the next message creates a fresh session.
                     warn!(
                         session_key = %session_key_owned,
                         session_id = %session_id_owned,
-                        "resume returned empty result, archiving stale session"
+                        "resume returned no result event, archiving stale session"
                     );
                     let _ = state_db.update_session_state(&session_key_owned, "archived");
                     let _ = event_tx.send(SessionEvent::Error {

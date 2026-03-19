@@ -212,14 +212,84 @@ impl MessageRouter {
             channel_id: Some(ctx.channel_id.clone()),
             thread_id: ctx.thread_id.clone(),
         };
+
+        // Set up Discord reaction status indicator if message_id is available
+        let reaction_handle = if let Some(ref mid) = ctx.message_id {
+            adapter.create_reaction_handle(&ctx.channel_id, mid).await
+        } else {
+            None
+        };
+
+        // Set queued state immediately
+        if let Some(ref rh) = reaction_handle {
+            rh.set_state(crate::channel::reaction::ReactionState::Queued);
+        }
+
+        // Create event observer for reaction status updates
+        let event_observer = reaction_handle.as_ref().map(|rh| {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::session::claude::ClaudeEvent>();
+            let rh_clone = rh.clone();
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    use crate::session::claude::ClaudeEvent;
+                    use crate::channel::reaction::{ReactionState, resolve_tool_state};
+                    match &event {
+                        ClaudeEvent::SystemInit { .. } => {
+                            rh_clone.set_state(ReactionState::Thinking);
+                        }
+                        ClaudeEvent::TextDelta { .. } => {
+                            rh_clone.set_state(ReactionState::Thinking);
+                        }
+                        ClaudeEvent::ToolUseStart { name, .. } => {
+                            rh_clone.set_state(resolve_tool_state(name));
+                        }
+                        ClaudeEvent::StreamEvent { event } => {
+                            // Check for thinking_delta
+                            if let Some(delta) = event.get("delta") {
+                                if delta.get("thinking").is_some() {
+                                    rh_clone.set_state(ReactionState::Thinking);
+                                }
+                            }
+                            // Check for context_management compaction
+                            if let Some(cm) = event.get("context_management") {
+                                if cm.get("applied_edits").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false) {
+                                    rh_clone.set_state(ReactionState::Compacting);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            tx
+        });
+
         let response = self
             .session_manager
-            .send_and_wait(&session_key, &agent, &message, priority, &sender, None)
-            .await?;
+            .send_and_wait(&session_key, &agent, &message, priority, &sender, None, event_observer)
+            .await;
+
+        // Signal done or error to reaction controller
+        match &response {
+            Ok(_) => {
+                if let Some(ref rh) = reaction_handle {
+                    rh.done();
+                }
+            }
+            Err(_) => {
+                if let Some(ref rh) = reaction_handle {
+                    rh.error();
+                }
+            }
+        }
+
+        let response = response?;
 
         // 7. Send response back through adapter (chunked if needed)
-        // NO_REPLY is a convention: agent decided no response is needed
-        if response.trim() == "NO_REPLY" {
+        // NO_REPLY is a convention: agent decided no response is needed.
+        // Empty response means Claude already sent its reply via tool use
+        // (e.g. MCP discord_send_message, discord_upload_file) — nothing to send.
+        if response.trim() == "NO_REPLY" || response.trim().is_empty() {
             return Ok(());
         }
         let max_len = adapter.capabilities().max_message_length.saturating_sub(100);

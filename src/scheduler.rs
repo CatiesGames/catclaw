@@ -182,6 +182,7 @@ async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &Sessio
             Priority::Heartbeat,
             &sender,
             None,
+            None,
         )
         .await
     {
@@ -225,7 +226,7 @@ async fn execute_prompt(
     let sender = SenderInfo::default();
 
     match session_manager
-        .send_and_wait(&key, agent, prompt, Priority::Cron, &sender, None)
+        .send_and_wait(&key, agent, prompt, Priority::Cron, &sender, None, None)
         .await
     {
         Ok(response) => {

@@ -1,4 +1,5 @@
 pub mod discord;
+pub mod reaction;
 pub mod slack;
 pub mod telegram;
 
@@ -54,6 +55,8 @@ pub struct MsgContext {
     pub channel_name: Option<String>,
     /// Guild/server ID (Discord guild, etc.). Used for MCP tool context.
     pub guild_id: Option<String>,
+    /// Platform message ID of the user's original message. Used for reaction status.
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +219,16 @@ pub trait ChannelAdapter: Send + Sync {
     /// List actions this adapter supports (MCP server uses this to generate tool schemas).
     fn supported_actions(&self) -> Vec<ActionInfo> {
         vec![]
+    }
+
+    /// Create a reaction status controller for the given message.
+    /// Only Discord implements this; other adapters return None.
+    async fn create_reaction_handle(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+    ) -> Option<reaction::ReactionHandle> {
+        None
     }
 }
 

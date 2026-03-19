@@ -476,10 +476,22 @@ impl ClaudeHandle {
 
     /// Wait for the result event, returning the result text.
     /// Also captures session_id from system init events.
-    pub async fn wait_for_result(&mut self) -> Result<String> {
+    ///
+    /// If `event_observer` is provided, all events are tee'd to it for
+    /// external consumers (e.g. Discord reaction status indicator).
+    pub async fn wait_for_result(
+        &mut self,
+        event_observer: Option<tokio::sync::mpsc::UnboundedSender<ClaudeEvent>>,
+    ) -> Result<String> {
         let mut result_text = String::new();
+        let mut got_result_event = false;
 
         while let Some(event) = self.recv_event().await {
+            // Tee events to observer (best-effort, ignore send errors)
+            if let Some(ref tx) = event_observer {
+                let _ = tx.send(event.clone());
+            }
+
             match event {
                 ClaudeEvent::SystemInit { session_id } => {
                     debug!(session_id = %session_id, "got session init");
@@ -491,7 +503,13 @@ impl ClaudeHandle {
                     if !session_id.is_empty() {
                         self.session_id = Some(session_id);
                     }
-                    result_text = result;
+                    got_result_event = true;
+                    // Only overwrite if result is non-empty; an empty result
+                    // means Claude already streamed its response via text deltas
+                    // or tool use (e.g. uploading a file). The session is still valid.
+                    if !result.is_empty() {
+                        result_text = result;
+                    }
                     break;
                 }
                 ClaudeEvent::Assistant { content } => {
@@ -511,8 +529,8 @@ impl ClaudeHandle {
             }
         }
 
-        if result_text.is_empty() {
-            info!("claude process ended without result");
+        if !got_result_event {
+            info!("claude process ended without result event");
             return Err(CatClawError::Claude(
                 "claude process ended without result".to_string(),
             ));

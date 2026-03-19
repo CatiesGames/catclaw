@@ -468,7 +468,7 @@ async fn handle_sessions_send(
                 thread_id: None,
             };
             let event = match sm
-                .send_and_wait(&session_key, &agent, &message, Priority::Direct, &sender, model_override.as_deref())
+                .send_and_wait(&session_key, &agent, &message, Priority::Direct, &sender, model_override.as_deref(), None)
                 .await
             {
                 Ok(response) => {
