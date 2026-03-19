@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.1](https://github.com/CatiesGames/catclaw/compare/v0.9.0...v0.9.1) (2026-03-19)
+
+
+### Bug Fixes
+
+* approval 發到正確 thread + 點擊後更新卡片 + 多項修復 ([9638e44](https://github.com/CatiesGames/catclaw/commit/9638e4436d3185b6f74580c292b74201d405d24c))
+* multi-server session key 碰撞 + TUI Slack MCP tools 缺失 ([9fb6137](https://github.com/CatiesGames/catclaw/commit/9fb6137bbcacbb6d4e8dce90b803ce920e6f3c5e))
+
 ## [0.9.0](https://github.com/CatiesGames/catclaw/compare/v0.8.3...v0.9.0) (2026-03-19)
 
 
