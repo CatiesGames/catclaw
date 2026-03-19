@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.12.0](https://github.com/CatiesGames/catclaw/compare/v0.11.2...v0.12.0) (2026-03-19)
+
+
+### Features
+
+* update --notify + timezone 修正 + system session transcript ([77e5bdb](https://github.com/CatiesGames/catclaw/commit/77e5bdb14a021a8cdd3362233d3401e9827623be))
+
+
+### Bug Fixes
+
+* Slack upload_file DM channel_not_found — completeUploadExternal 改 form-encoded ([df44082](https://github.com/CatiesGames/catclaw/commit/df440825ff21c15a1365544da6a51cf3795a0b42))
+* systemd service Restart=always + 自動啟用 loginctl linger ([391c07f](https://github.com/CatiesGames/catclaw/commit/391c07fa8a4637b0c4d00f6ba0f47293a88ed94f))
+
 ## [0.11.2](https://github.com/CatiesGames/catclaw/compare/v0.11.1...v0.11.2) (2026-03-19)
 
 
