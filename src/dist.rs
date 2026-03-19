@@ -609,6 +609,55 @@ pub fn restart_service() -> Result<(), CatClawError> {
     }
 }
 
+// ── Pending notification (survives gateway restart) ──────────────────
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct PendingNotify {
+    pub channel_type: String,
+    pub channel_id: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+fn pending_notify_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".catclaw").join("pending_notify.json")
+}
+
+/// Write a pending notification to be sent after gateway restart.
+pub fn write_pending_notify(
+    channel_type: &str,
+    channel_id: &str,
+    message: &str,
+) -> Result<(), CatClawError> {
+    let notify = PendingNotify {
+        channel_type: channel_type.to_string(),
+        channel_id: channel_id.to_string(),
+        message: message.to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let json = serde_json::to_string_pretty(&notify)
+        .map_err(|e| CatClawError::Config(format!("serialize pending_notify: {}", e)))?;
+    std::fs::write(pending_notify_path(), json)?;
+    Ok(())
+}
+
+/// Read and delete the pending notification file. Returns None if no file exists.
+pub fn read_and_clear_pending_notify() -> Option<PendingNotify> {
+    let path = pending_notify_path();
+    let data = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let notify: PendingNotify = serde_json::from_str(&data).ok()?;
+    // Skip if older than 1 hour (stale from a failed restart)
+    if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&notify.created_at) {
+        if chrono::Utc::now().signed_duration_since(created).num_seconds() > 3600 {
+            tracing::warn!("stale pending notification (>1h), discarding");
+            return None;
+        }
+    }
+    Some(notify)
+}
+
 /// Interactive uninstall command.
 pub async fn cmd_uninstall(config_path: &Path) {
     use crate::{cli_ui, config::Config, pidfile};

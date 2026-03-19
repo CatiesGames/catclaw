@@ -173,8 +173,8 @@ impl SessionManager {
                             .as_deref()
                             .unwrap_or(&new_id);
 
-                        // Log transcript (skip for system sessions like heartbeat/cron)
-                        if key.origin != "system" {
+                        // Log transcript
+                        {
                             let label = super::transcript::label_from_session_key(&session_key);
                             let transcript =
                                 TranscriptLog::open_with_label(&agent.workspace, final_id, Some(&label)).await?;
@@ -264,8 +264,8 @@ impl SessionManager {
             .as_deref()
             .unwrap_or(&session_id);
 
-        // Log transcript (skip for system sessions like heartbeat/cron)
-        if key.origin != "system" {
+        // Log transcript
+        {
             let label = if !is_resume {
                 Some(super::transcript::label_from_session_key(&session_key))
             } else {
@@ -432,7 +432,7 @@ impl SessionManager {
         let message_owned = message.to_string();
         let session_key_owned = session_key.clone();
         let session_id_owned = session_id.clone();
-        let is_system = key.origin == "system";
+
 
         // Move permit into the spawned task so concurrency is held until completion
         tokio::spawn(async move {
@@ -446,8 +446,8 @@ impl SessionManager {
             let mut stopped = false;
             let mut tool_uses: Vec<super::transcript::ToolUseEntry> = Vec::new();
 
-            // Open transcript log and write user message (skip for system sessions)
-            let transcript = if !is_system {
+            // Open transcript log and write user message
+            let transcript = {
                 let label = if !is_resume {
                     Some(super::transcript::label_from_session_key(&session_key_owned))
                 } else {
@@ -462,8 +462,6 @@ impl SessionManager {
                     t.log_user(&message_owned, sender_id.as_deref(), sender_name.as_deref()).await;
                 }
                 t
-            } else {
-                None
             };
 
             info!(session_key = %session_key_owned, is_running = handle.is_running(), "streaming: entering event loop");

@@ -136,6 +136,12 @@ enum Commands {
         /// Only check for updates, don't install
         #[arg(long)]
         check: bool,
+        /// Send a notification after restart (format: <type>:<channel_id>, e.g. slack:C0A9FFY7QAZ)
+        #[arg(long, value_name = "CHANNEL_SPEC")]
+        notify: Option<String>,
+        /// Custom notification message (default: auto-generated)
+        #[arg(long, value_name = "MESSAGE")]
+        notify_message: Option<String>,
     },
 
     /// Uninstall CatClaw (stop gateway, remove service, delete binary)
@@ -420,7 +426,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        Some(Commands::Update { check }) => {
+        Some(Commands::Update { check, notify, notify_message }) => {
             if check {
                 match dist::check_update().await {
                     Ok(Some(version)) => {
@@ -439,6 +445,24 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 match dist::perform_update().await {
                     Ok(Some(version)) => {
                         cli_ui::status_msg("✅", &format!("Updated to v{}", version));
+
+                        // Write pending notification before restart
+                        if let Some(ref spec) = notify {
+                            if let Some((ch_type, ch_id)) = spec.split_once(':') {
+                                let msg = notify_message.as_deref().unwrap_or("").to_string();
+                                let msg = if msg.is_empty() {
+                                    format!("CatClaw updated to v{} ✅", version)
+                                } else {
+                                    msg
+                                };
+                                if let Err(e) = dist::write_pending_notify(ch_type, ch_id, &msg) {
+                                    cli_ui::status_msg("⚠️", &format!("Failed to queue notification: {}", e));
+                                }
+                            } else {
+                                cli_ui::status_msg("⚠️", "Invalid --notify format, expected <type>:<channel_id>");
+                            }
+                        }
+
                         // Restart service if installed
                         if dist::is_service_installed() {
                             cli_ui::status_msg("🔄", "Restarting service...");

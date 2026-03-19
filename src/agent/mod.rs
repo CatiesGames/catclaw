@@ -31,6 +31,8 @@ pub struct Agent {
     pub model: Option<String>,
     pub fallback_model: Option<String>,
     pub approval: ApprovalConfig,
+    /// IANA timezone from config (e.g. "Asia/Taipei"), used for daily notes and date display.
+    pub timezone: Option<String>,
 }
 
 /// System-level directives that are hardcoded and cannot be overridden by user MD files.
@@ -150,10 +152,11 @@ impl Agent {
             }
         }
 
-        // Recent daily notes (today + yesterday)
-        let today = chrono::Utc::now();
+        // Recent daily notes (today + yesterday, in configured timezone)
+        let now_tz = resolve_now_in_timezone(self.timezone.as_deref());
+        let today = now_tz.date();
         let yesterday = today - chrono::Duration::days(1);
-        for date in [yesterday, today] {
+        for date in &[yesterday, today] {
             let filename = format!("{}.md", date.format("%Y-%m-%d"));
             let path = self.workspace.join("memory").join(&filename);
             if let Ok(text) = std::fs::read_to_string(&path) {
@@ -167,16 +170,23 @@ impl Agent {
             }
         }
 
-        // 4. Workspace path info
+        // 4. Workspace path info + current date
         let abs_workspace = std::fs::canonicalize(&self.workspace)
             .unwrap_or_else(|_| self.workspace.clone());
+        let tz_label = self
+            .timezone
+            .as_deref()
+            .unwrap_or("UTC");
         prompt.push_str(&format!(
             "\n# Workspace\n\
+             Current date/time: {} ({})\n\
              Your workspace directory is: {}\n\
              - Memory files: {}/memory/\n\
              - Transcripts: {}/transcripts/\n\
              - Write daily notes to: {}/memory/YYYY-MM-DD.md\n\
              - Long-term memory: {}/MEMORY.md\n",
+            now_tz.format("%Y-%m-%d %H:%M:%S"),
+            tz_label,
             abs_workspace.display(),
             abs_workspace.display(),
             abs_workspace.display(),
@@ -356,6 +366,17 @@ impl Agent {
 /// Build a compact skill index for the system prompt.
 /// Lists only enabled skills with their name and one-line description.
 /// Skills are NOT inlined — agent must invoke `/skill-name` to load the full content.
+/// Resolve "now" in the configured timezone. Falls back to UTC if not set or invalid.
+fn resolve_now_in_timezone(tz_name: Option<&str>) -> chrono::NaiveDateTime {
+    let utc_now = chrono::Utc::now();
+    if let Some(name) = tz_name {
+        if let Ok(tz) = name.parse::<chrono_tz::Tz>() {
+            return utc_now.with_timezone(&tz).naive_local();
+        }
+    }
+    utc_now.naive_utc()
+}
+
 fn build_skill_index(agent_workspace: &std::path::Path, workspace_root: &std::path::Path) -> String {
     let skills = AgentLoader::list_skills(agent_workspace, workspace_root);
     let mut lines: Vec<String> = skills.iter()
@@ -423,12 +444,13 @@ impl AgentRegistry {
         workspace_root: &std::path::Path,
         default_model: Option<&str>,
         default_fallback_model: Option<&str>,
+        timezone: Option<&str>,
     ) -> Result<Self> {
         let mut agents = HashMap::new();
         let mut default_id = None;
 
         for config in configs {
-            let agent = AgentLoader::load(config, workspace_root, default_model, default_fallback_model)?;
+            let agent = AgentLoader::load(config, workspace_root, default_model, default_fallback_model, timezone)?;
             if config.default {
                 default_id = Some(config.id.clone());
             }

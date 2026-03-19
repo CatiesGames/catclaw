@@ -68,6 +68,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         &config.general.workspace,
         config.general.default_model.as_deref(),
         config.general.default_fallback_model.as_deref(),
+        config.general.timezone.as_deref(),
     )?));
 
     let default_agent_id = config
@@ -260,6 +261,32 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     });
 
     info!("gateway ready");
+
+    // Check for pending update notification (written by `catclaw update --notify`)
+    if let Some(notify) = crate::dist::read_and_clear_pending_notify() {
+        let notify_adapters = adapter_map.clone();
+        tokio::spawn(async move {
+            // Wait for adapters to fully connect (WS handshake, auth, etc.)
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if let Some(adapter) = notify_adapters.get(&notify.channel_type) {
+                let msg = crate::channel::OutboundMessage {
+                    channel_type: crate::channel::ChannelType::Tui,
+                    channel_id: notify.channel_id.clone(),
+                    peer_id: notify.channel_id,
+                    text: notify.message,
+                    thread_id: None,
+                    reply_to_message_id: None,
+                };
+                if let Err(e) = adapter.send(msg).await {
+                    error!(error = %e, "failed to send pending update notification");
+                } else {
+                    info!("sent pending update notification");
+                }
+            } else {
+                warn!(channel_type = %notify.channel_type, "no adapter found for pending notification");
+            }
+        });
+    }
 
     // Approval expiry cleanup task
     {

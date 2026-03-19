@@ -107,6 +107,7 @@ impl AgentLoader {
         workspace_root: &Path,
         default_model: Option<&str>,
         default_fallback_model: Option<&str>,
+        timezone: Option<&str>,
     ) -> Result<Agent> {
         let workspace = &config.workspace;
         let tools = Self::load_tools(workspace);
@@ -129,6 +130,7 @@ impl AgentLoader {
             model,
             fallback_model,
             approval,
+            timezone: timezone.map(String::from),
         })
     }
 
@@ -1549,7 +1551,11 @@ catclaw channel add slack --token-env SLACK_BOT_TOKEN --app-token-env SLACK_APP_
 ```bash
 catclaw update --check         # Check if a new version is available
 catclaw update                 # Download and install the latest version
+catclaw update --notify slack:C0A9FFY7QAZ                    # Notify a channel after restart
+catclaw update --notify slack:C0A9FFY7QAZ --notify-message "I'm back!"  # Custom message
 ```
+
+`--notify <type>:<channel_id>` sends a message to the specified channel after the gateway restarts. Use this when self-updating so users know the update completed. Format: `slack:<id>`, `discord:<id>`, `telegram:<id>`.
 
 After updating, if a system service is installed, it will be automatically restarted.
 
