@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/CatiesGames/catclaw/compare/v0.12.1...v0.13.0) (2026-03-19)
+
+
+### Features
+
+* Discord reaction 狀態指示器 + 修復空 result 導致 session 斷裂 ([67ecc4c](https://github.com/CatiesGames/catclaw/commit/67ecc4c86e0cd4a3b98c9451207d89af3c2acd19))
+
 ## [0.12.1](https://github.com/CatiesGames/catclaw/compare/v0.12.0...v0.12.1) (2026-03-19)
 
 
