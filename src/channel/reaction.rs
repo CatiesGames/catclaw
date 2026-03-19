@@ -102,7 +102,6 @@ impl ReactionHandle {
 const DEBOUNCE_MS: u64 = 700;
 const STALL_SOFT_SECS: u64 = 10;
 const STALL_HARD_SECS: u64 = 30;
-const TERMINAL_HOLD_MS: u64 = 1500;
 
 /// Spawn a reaction controller for a Discord message.
 /// Returns a handle to control the state machine.
@@ -128,14 +127,10 @@ async fn reaction_loop(
     let mut debounce_deadline: Option<Instant> = None;
     let mut last_state_change = Instant::now();
     let mut stall_level = 0u8; // 0=none, 1=soft, 2=hard
-    // Terminal hold: after done/error, wait before removing
-    let mut terminal_remove_at: Option<Instant> = None;
 
     loop {
         // Calculate next wakeup time
-        let timeout = if terminal_remove_at.is_some() {
-            Duration::from_millis(100) // poll for terminal hold expiry
-        } else if let Some(deadline) = debounce_deadline {
+        let timeout = if let Some(deadline) = debounce_deadline {
             deadline.saturating_duration_since(Instant::now())
         } else {
             Duration::from_secs(1) // stall check interval
@@ -145,21 +140,14 @@ async fn reaction_loop(
             cmd = rx.recv() => {
                 match cmd {
                     Some(ReactionCmd::SetState(state)) => {
-                        // Ignore new commands during terminal hold
-                        if terminal_remove_at.is_some() {
-                            continue;
-                        }
-
                         last_state_change = Instant::now();
                         stall_level = 0;
 
                         if state.is_terminal() {
-                            // Terminal states apply immediately, no debounce
-                            pending_state = None;
-                            debounce_deadline = None;
-                            apply_reaction(&http, channel_id, message_id, &mut current_emoji, state.emoji()).await;
-                            // Schedule removal (non-blocking)
-                            terminal_remove_at = Some(Instant::now() + Duration::from_millis(TERMINAL_HOLD_MS));
+                            // Terminal: just remove the current reaction and exit.
+                            // The bot's reply itself signals "done".
+                            remove_reaction(&http, channel_id, message_id, &mut current_emoji).await;
+                            break;
                         } else {
                             // Debounce: set/reset deadline
                             pending_state = Some(state);
@@ -173,15 +161,6 @@ async fn reaction_loop(
                 }
             }
             _ = tokio::time::sleep(timeout) => {
-                // Check terminal hold expiry first
-                if let Some(remove_at) = terminal_remove_at {
-                    if Instant::now() >= remove_at {
-                        remove_reaction(&http, channel_id, message_id, &mut current_emoji).await;
-                        break; // Done, exit loop
-                    }
-                    continue;
-                }
-
                 // Debounce expired — apply pending state
                 if let Some(state) = pending_state.take() {
                     debounce_deadline = None;
@@ -202,7 +181,8 @@ async fn reaction_loop(
     }
 }
 
-/// Apply a reaction: remove the old one (if any), then add the new one.
+/// Apply a reaction: add the new one first, then remove the old one.
+/// This order prevents the "empty gap" flicker that occurs when removing first.
 async fn apply_reaction(
     http: &Http,
     channel_id: ChannelId,
@@ -214,15 +194,9 @@ async fn apply_reaction(
         return; // Already showing this emoji
     }
 
-    // Remove old reaction
-    if let Some(old) = current.take() {
-        let reaction = ReactionType::Unicode(old.to_string());
-        if let Err(e) = http.delete_reaction_me(channel_id, message_id, &reaction).await {
-            debug!(error = %e, emoji = old, "failed to remove old reaction");
-        }
-    }
+    let old = *current;
 
-    // Add new reaction — only track as current if successful
+    // Add new reaction first — only track as current if successful
     let reaction = ReactionType::Unicode(new_emoji.to_string());
     match http.create_reaction(channel_id, message_id, &reaction).await {
         Ok(_) => {
@@ -230,6 +204,15 @@ async fn apply_reaction(
         }
         Err(e) => {
             warn!(error = %e, emoji = new_emoji, "failed to add reaction");
+            return; // Don't remove old if new failed
+        }
+    }
+
+    // Then remove old reaction
+    if let Some(old_emoji) = old {
+        let reaction = ReactionType::Unicode(old_emoji.to_string());
+        if let Err(e) = http.delete_reaction_me(channel_id, message_id, &reaction).await {
+            debug!(error = %e, emoji = old_emoji, "failed to remove old reaction");
         }
     }
 }
