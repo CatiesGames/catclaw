@@ -150,6 +150,11 @@ impl ChannelAdapter for SlackAdapter {
 
         let mut backoff_secs = 1u64;
 
+        // Dedup set for Socket Mode retries: Slack may redeliver events when
+        // the ack doesn't arrive in time (e.g. during gateway restart).
+        // We track recently seen client_msg_id values and skip duplicates.
+        let seen_msgs: Arc<DashMap<String, std::time::Instant>> = Arc::new(DashMap::new());
+
         loop {
             // 1. Get WSS URL
             let wss_url = match slack_api(&http, &app_token, "apps.connections.open", &serde_json::json!({})).await {
@@ -296,6 +301,23 @@ impl ChannelAdapter for SlackAdapter {
                             .unwrap_or("");
                         if event_user.is_empty() || event_user == bot_uid {
                             continue;
+                        }
+
+                        // Dedup: skip Socket Mode retries of the same message.
+                        // Use client_msg_id (preferred) or fall back to event_ts.
+                        let dedup_key = event
+                            .get("client_msg_id")
+                            .or_else(|| event.get("event_ts"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !dedup_key.is_empty() {
+                            if seen_msgs.contains_key(&dedup_key) {
+                                continue;
+                            }
+                            seen_msgs.insert(dedup_key, std::time::Instant::now());
+                            // Prune entries older than 60 seconds
+                            seen_msgs.retain(|_, t| t.elapsed().as_secs() < 60);
                         }
 
                         let channel_id = event
