@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.2](https://github.com/CatiesGames/catclaw/compare/v0.10.1...v0.10.2) (2026-03-19)
+
+
+### Bug Fixes
+
+* per-session 訊息佇列 + 修復 Slack 附件下載認證 ([a09ef04](https://github.com/CatiesGames/catclaw/commit/a09ef04bf7cc093099cdb6288eef872efec2c51b))
+
 ## [0.10.1](https://github.com/CatiesGames/catclaw/compare/v0.10.0...v0.10.1) (2026-03-19)
 
 
