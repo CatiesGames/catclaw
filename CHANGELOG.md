@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3](https://github.com/CatiesGames/catclaw/compare/v0.9.2...v0.9.3) (2026-03-19)
+
+
+### Bug Fixes
+
+* agent 不用 MCP 回覆對話 + DM thread_ts 統一過濾 ([bc7db00](https://github.com/CatiesGames/catclaw/commit/bc7db0098968e1e42bf67f08f82e336c67d520ac))
+
 ## [0.9.2](https://github.com/CatiesGames/catclaw/compare/v0.9.1...v0.9.2) (2026-03-19)
 
 
