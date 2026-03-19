@@ -1,6 +1,6 @@
 [package]
 name = "catclaw"
-version = "0.9.3"
+version = "0.10.0"
 edition = "2021"
 description = "Personal AI assistant gateway powered by Claude Code CLI"
 
