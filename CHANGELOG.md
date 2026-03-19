@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/CatiesGames/catclaw/compare/v0.10.0...v0.10.1) (2026-03-19)
+
+
+### Bug Fixes
+
+* Slack thread_ts 邏輯修正 — DM 必須帶、channel root 不帶 ([1a149a1](https://github.com/CatiesGames/catclaw/commit/1a149a11c4c64a0de145f70bebfc5434c319174f))
+
 ## [0.10.0](https://github.com/CatiesGames/catclaw/compare/v0.9.3...v0.10.0) (2026-03-19)
 
 
