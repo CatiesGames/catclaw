@@ -425,7 +425,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart="{exe}" --config "{config}" gateway start
-Restart=on-failure
+Restart=always
 RestartSec=5
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
 
@@ -454,6 +454,14 @@ WantedBy=default.target
     run(&["--user", "daemon-reload"])?;
     run(&["--user", "enable", "catclaw"])?;
     run(&["--user", "start", "catclaw"])?;
+
+    // Enable linger so user services survive SSH logout
+    let user = std::env::var("USER").unwrap_or_default();
+    if !user.is_empty() {
+        let _ = std::process::Command::new("loginctl")
+            .args(["enable-linger", &user])
+            .status();
+    }
 
     Ok(())
 }
