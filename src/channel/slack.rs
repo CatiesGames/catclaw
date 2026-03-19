@@ -1075,40 +1075,12 @@ impl ChannelAdapter for SlackAdapter {
                     .to_string();
 
                 // Step 1: get upload URL
-                // files.getUploadURLExternal requires form-encoded (not JSON)
-                let step1_resp = self
-                    .http
-                    .post("https://slack.com/api/files.getUploadURLExternal")
-                    .header("Authorization", format!("Bearer {}", self.bot_token))
-                    .form(&[
-                        ("filename", filename.as_str()),
-                        ("length", &length.to_string()),
-                    ])
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        CatClawError::Slack(format!("files.getUploadURLExternal: {}", e))
-                    })?;
-                let step1: serde_json::Value = step1_resp.json().await.map_err(|e| {
-                    CatClawError::Slack(format!(
-                        "files.getUploadURLExternal: parse response: {}",
-                        e
-                    ))
-                })?;
-                if !step1
-                    .get("ok")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    let err = step1
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown_error");
-                    return Err(CatClawError::Slack(format!(
-                        "files.getUploadURLExternal: {}",
-                        err
-                    )));
-                }
+                let step1 = self
+                    .api(
+                        "files.getUploadURLExternal",
+                        &serde_json::json!({"filename": filename, "length": length}),
+                    )
+                    .await?;
                 let upload_url = step1
                     .get("upload_url")
                     .and_then(|v| v.as_str())
@@ -1140,51 +1112,19 @@ impl ChannelAdapter for SlackAdapter {
                 }
 
                 // Step 3: complete upload and share to channel
-                // Use form-encoded (not JSON) for DM channel compatibility
                 let title = filename.clone();
-                let files_json =
-                    serde_json::json!([{"id": file_id, "title": title}]).to_string();
-                let mut form: Vec<(&str, String)> = vec![
-                    ("files", files_json),
-                    ("channel_id", channel.to_string()),
-                ];
+                let mut complete_body = serde_json::json!({
+                    "files": [{"id": file_id, "title": title}],
+                    "channel_id": channel,
+                });
                 if let Some(msg) = params.get("message").and_then(|v| v.as_str()) {
-                    form.push(("initial_comment", msg.to_string()));
+                    complete_body["initial_comment"] = serde_json::Value::String(msg.to_string());
                 }
                 if let Some(ts) = params.get("thread_ts").and_then(|v| v.as_str()) {
-                    form.push(("thread_ts", ts.to_string()));
+                    complete_body["thread_ts"] = serde_json::Value::String(ts.to_string());
                 }
-                let complete_resp = self
-                    .http
-                    .post("https://slack.com/api/files.completeUploadExternal")
-                    .header("Authorization", format!("Bearer {}", self.bot_token))
-                    .form(&form)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        CatClawError::Slack(format!("files.completeUploadExternal: {}", e))
-                    })?;
-                let complete_json: serde_json::Value =
-                    complete_resp.json().await.map_err(|e| {
-                        CatClawError::Slack(format!(
-                            "files.completeUploadExternal: parse response: {}",
-                            e
-                        ))
-                    })?;
-                if !complete_json
-                    .get("ok")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    let err = complete_json
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown_error");
-                    return Err(CatClawError::Slack(format!(
-                        "files.completeUploadExternal: {}",
-                        err
-                    )));
-                }
+                self.api("files.completeUploadExternal", &complete_body)
+                    .await?;
 
                 Ok(serde_json::json!({"ok": true, "file_id": file_id}))
             }
@@ -1204,6 +1144,12 @@ impl ChannelAdapter for SlackAdapter {
 // ── Free functions ────────────────────────────────────────────────────
 
 /// Generic Slack Web API caller.
+///
+/// Uses form-encoded POST (not JSON) because Slack's bot token APIs
+/// intermittently reject JSON bodies with errors like `user_not_found`
+/// or `invalid_arguments` for valid requests. Form-encoded is universally
+/// reliable. Complex values (arrays/objects) are JSON-stringified as
+/// form field values per Slack's documentation.
 async fn slack_api(
     client: &reqwest::Client,
     token: &str,
@@ -1211,11 +1157,27 @@ async fn slack_api(
     body: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let url = format!("https://slack.com/api/{}", method);
+
+    // Convert JSON object to form fields; stringify complex values
+    let mut form: Vec<(String, String)> = Vec::new();
+    if let Some(obj) = body.as_object() {
+        for (key, value) in obj {
+            let v = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Null => continue,
+                // Arrays and objects → JSON string
+                _ => value.to_string(),
+            };
+            form.push((key.clone(), v));
+        }
+    }
+
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", token))
-        .header("Content-Type", "application/json; charset=utf-8")
-        .json(body)
+        .form(&form)
         .send()
         .await
         .map_err(|e| CatClawError::Slack(format!("{}: {}", method, e)))?;
@@ -1276,16 +1238,13 @@ async fn resolve_user_name_cached(
                 .unwrap_or("")
                 .to_string();
             if !resolved.is_empty() {
-                // Only cache successful lookups with actual names
                 cache.insert(user_id.to_string(), resolved.clone());
                 resolved
             } else {
-                // Profile has no name fields — don't cache, use user ID
                 user_id.to_string()
             }
         }
         Err(e) => {
-            // Don't cache errors — allow retry on next message
             warn!(error = %e, user_id = user_id, "failed to resolve slack user name");
             user_id.to_string()
         }
