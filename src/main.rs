@@ -1773,6 +1773,9 @@ features:
     suggested_prompts:
       - title: Help
         message: What can you help me with?
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: CatClaw
     always_online: true
@@ -1785,9 +1788,12 @@ oauth_config:
   scopes:
     bot:
       - assistant:write
+      - app_mentions:read
       - chat:write
       - channels:history
       - channels:read
+      - emoji:read
+      - files:read
       - groups:history
       - groups:read
       - im:history
@@ -1810,6 +1816,13 @@ settings:
       - app_mention
       - assistant_thread_started
       - assistant_thread_context_changed
+      - reaction_added
+      - reaction_removed
+      - member_joined_channel
+      - member_left_channel
+      - channel_rename
+      - pin_added
+      - pin_removed
   interactivity:
     is_enabled: true
   org_deploy_enabled: false
