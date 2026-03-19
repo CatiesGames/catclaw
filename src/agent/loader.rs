@@ -880,6 +880,10 @@ Discord uses a variant of Markdown:
 - Emoji reactions are common on Discord — reference them when relevant
 - Keep messages concise; walls of text are harder to read in Discord's UI
 
+## Important: How to Reply
+
+**Do NOT use MCP tools to reply to the current conversation.** Just output your response text — the gateway sends it automatically. MCP tools below are for proactive operations only (e.g. "post in #general", "react to a message").
+
 ## Platform Operations
 
 You have access to Discord tools provided by CatClaw via MCP. Use them directly as tool calls:
@@ -1025,6 +1029,10 @@ Telegram bots can send messages with interactive buttons. CatClaw may support:
 
 These are configured at the gateway level, not in message text.
 
+## Important: How to Reply
+
+**Do NOT use MCP tools to reply to the current conversation.** Just output your response text — the gateway sends it automatically. MCP tools below are for proactive operations only (e.g. "post in a chat", "react to a message").
+
 ## Platform Operations
 
 You have access to Telegram tools provided by CatClaw via MCP. Use them directly as tool calls:
@@ -1151,6 +1159,10 @@ CatClaw supports Slack's native AI streaming API:
 - Responses stream in real-time as they are generated
 - The bot shows a "thinking" indicator while processing
 - This is handled automatically by the gateway — write responses naturally
+
+## Important: How to Reply
+
+**Do NOT use MCP tools to reply to the current conversation.** Just output your response text — the gateway sends it automatically. MCP tools below are for proactive operations only (e.g. "post in #general", "react to a message").
 
 ## Platform Operations
 

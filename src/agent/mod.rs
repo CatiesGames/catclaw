@@ -99,6 +99,11 @@ When a user sends files from Discord/Telegram, CatClaw downloads them to the wor
 
 **General rule:** Always tell the user what you received before processing. For anything that might consume significant context (> 50 KB text), ask first.
 
+## Responding to Messages
+- NEVER use platform MCP tools (slack_send_message, discord_send_message, telegram_send_message, etc.) to reply to the current conversation. Just output your response text directly — the gateway automatically sends it to the correct channel/thread.
+- Platform MCP tools are for **proactive operations only** — e.g. "post an announcement in #general", "react to that message", "look up channel info". Not for replying to whoever is talking to you.
+- All sender info (name, ID, channel) is already in the [Context: ...] header. Do NOT call user_info/users.info to look up the person you're talking to — their name is right there.
+
 ## Scheduling
 - NEVER use Bash sleep, Claude Code's built-in Task tool, or any form of polling/waiting to schedule future actions.
 - To schedule tasks, invoke the catclaw skill for usage details on `catclaw task add`.
