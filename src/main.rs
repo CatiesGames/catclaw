@@ -1490,36 +1490,41 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
             println!();
             cli_ui::section_header("💬", "Slack App Setup");
             cli_ui::section_empty();
+
             cli_ui::section_line(&format!(
-                "{}1.{} Go to {}https://api.slack.com/apps{} → {}Create New App{} → From Scratch",
-                cli_ui::MAUVE, cli_ui::RESET, cli_ui::SAPPHIRE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+                "{}1.{} Go to {}https://api.slack.com/apps{} → {}Create New App{} → {}From a manifest{}",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::SAPPHIRE, cli_ui::RESET,
+                cli_ui::TEXT, cli_ui::RESET, cli_ui::TEAL, cli_ui::RESET
             ));
             cli_ui::section_line(&format!(
-                "{}2.{} {}Socket Mode{} → Enable → Create App-Level Token (scope: {}connections:write{})",
+                "{}2.{} Select your workspace → Paste the YAML manifest below → Create",
+                cli_ui::MAUVE, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}3.{} {}Settings → Socket Mode{} → Generate an {}App-Level Token{} (name it anything)",
                 cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET, cli_ui::TEAL, cli_ui::RESET
             ));
             cli_ui::section_line(&format!(
-                "{}3.{} {}OAuth & Permissions{} → Add Bot Token Scopes:",
-                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+                "{}4.{} {}Install to Workspace{} → copy {}Bot Token{} (xoxb-...) and {}App Token{} (xapp-...)",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET,
+                cli_ui::TEAL, cli_ui::RESET, cli_ui::TEAL, cli_ui::RESET
             ));
-            cli_ui::section_hint("  chat:write, channels:history, channels:read, groups:history,");
-            cli_ui::section_hint("  groups:read, im:history, im:read, mpim:history, mpim:read,");
-            cli_ui::section_hint("  reactions:read, reactions:write, pins:read, pins:write,");
-            cli_ui::section_hint("  users:read, commands, assistant:write");
+            cli_ui::section_empty();
+            cli_ui::section_divider();
+
+            // Show condensed manifest for copy-paste
+            cli_ui::section_empty();
             cli_ui::section_line(&format!(
-                "{}4.{} {}Event Subscriptions{} → Enable → Subscribe to bot events:",
-                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+                "{}YAML Manifest (copy & paste into Slack):{}",
+                cli_ui::YELLOW, cli_ui::RESET
             ));
-            cli_ui::section_hint("  message.channels, message.groups, message.im, message.mpim,");
-            cli_ui::section_hint("  app_mention, assistant_thread_started, assistant_thread_context_changed");
-            cli_ui::section_line(&format!(
-                "{}5.{} {}Agents & AI Apps{} → Enable (for streaming + thinking indicator)",
-                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
-            ));
-            cli_ui::section_line(&format!(
-                "{}6.{} Install app to workspace → copy {}Bot Token{} (xoxb-...) and {}App Token{} (xapp-...)",
-                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
-            ));
+            cli_ui::section_empty();
+            for line in SLACK_APP_MANIFEST.lines() {
+                cli_ui::section_line(&format!(
+                    "{}{}{}",
+                    cli_ui::OVERLAY, line, cli_ui::RESET
+                ));
+            }
             cli_ui::section_empty();
             cli_ui::section_divider();
             cli_ui::section_empty();
@@ -1755,6 +1760,62 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
 }
 
 /// Write or update an env var in the .env lines
+/// Slack App Manifest (YAML) — used by `catclaw onboard` to simplify Slack app creation.
+/// Users paste this into https://api.slack.com/apps → Create New App → From a manifest.
+const SLACK_APP_MANIFEST: &str = r#"_metadata:
+  major_version: 1
+display_information:
+  name: CatClaw
+  description: Personal AI assistant powered by Claude Code
+features:
+  assistant_view:
+    assistant_description: AI assistant powered by CatClaw gateway
+    suggested_prompts:
+      - title: Help
+        message: What can you help me with?
+  bot_user:
+    display_name: CatClaw
+    always_online: true
+  slash_commands:
+    - command: /stop
+      description: Stop the current session
+    - command: /new
+      description: Start a new session (archives current)
+oauth_config:
+  scopes:
+    bot:
+      - assistant:write
+      - chat:write
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - mpim:history
+      - mpim:read
+      - reactions:read
+      - reactions:write
+      - pins:read
+      - pins:write
+      - users:read
+      - commands
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
+      - app_mention
+      - assistant_thread_started
+      - assistant_thread_context_changed
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+"#;
+
 fn write_env_var(lines: &mut Vec<String>, key: &str, value: &str) {
     let prefix = format!("{}=", key);
     if let Some(pos) = lines.iter().position(|l| l.starts_with(&prefix)) {
