@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/CatiesGames/catclaw/compare/v0.13.0...v0.13.1) (2026-03-19)
+
+
+### Bug Fixes
+
+* Discord reaction 更絲滑 — 先加後移 + terminal 直接移除 ([4ffac2f](https://github.com/CatiesGames/catclaw/commit/4ffac2fdc65d5b79a876308de38e024c49494908))
+
 ## [0.13.0](https://github.com/CatiesGames/catclaw/compare/v0.12.1...v0.13.0) (2026-03-19)
 
 
