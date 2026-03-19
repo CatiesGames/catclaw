@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/CatiesGames/catclaw/compare/v0.10.3...v0.11.0) (2026-03-19)
+
+
+### Features
+
+* 三平台 upload_file MCP action（Slack/Discord/Telegram） ([01ad6a6](https://github.com/CatiesGames/catclaw/commit/01ad6a6e946580d7f4615e000de11e835c07caa2))
+
 ## [0.10.3](https://github.com/CatiesGames/catclaw/compare/v0.10.2...v0.10.3) (2026-03-19)
 
 
