@@ -394,6 +394,14 @@ impl AgentsPanel {
                     "set_chat_permissions",
                     "create_invite_link",
                 ],
+                "slack" => &[
+                    "send_message", "edit_message", "delete_message", "get_messages",
+                    "react", "delete_reaction", "get_reactions",
+                    "pin_message", "unpin_message", "list_pins",
+                    "get_channels", "channel_info", "create_channel", "archive_channel",
+                    "get_thread_replies",
+                    "user_info", "list_users",
+                ],
                 _ => &[],
             };
             for action in actions {

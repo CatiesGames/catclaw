@@ -86,7 +86,14 @@ impl MessageRouter {
         };
 
         // 3. Build session key with human-readable context_id
+        // Include guild_id prefix for non-DM channels to prevent collisions
+        // when the bot is in multiple servers/workspaces with same-named channels.
         let origin = ctx.channel_type.as_str();
+        let guild_prefix = if !ctx.is_direct_message {
+            ctx.guild_id.as_deref().unwrap_or("")
+        } else {
+            ""
+        };
         let context_id = if ctx.is_direct_message {
             format!("dm.{}", ctx.sender_name)
         } else if let Some(ref thread_id) = ctx.thread_id {
@@ -94,11 +101,21 @@ impl MessageRouter {
                 .channel_name
                 .as_deref()
                 .unwrap_or(&ctx.channel_id);
-            format!("{}.thread.{}", channel_name, thread_id)
+            if guild_prefix.is_empty() {
+                format!("{}.thread.{}", channel_name, thread_id)
+            } else {
+                format!("{}.{}.thread.{}", guild_prefix, channel_name, thread_id)
+            }
         } else {
-            ctx.channel_name
+            let channel_name = ctx
+                .channel_name
                 .clone()
-                .unwrap_or_else(|| ctx.channel_id.clone())
+                .unwrap_or_else(|| ctx.channel_id.clone());
+            if guild_prefix.is_empty() {
+                channel_name
+            } else {
+                format!("{}.{}", guild_prefix, channel_name)
+            }
         };
 
         let session_key = SessionKey::new(&agent.id, origin, &context_id);
