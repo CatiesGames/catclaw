@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/CatiesGames/catclaw/compare/v0.14.0...v0.14.1) (2026-03-20)
+
+
+### Bug Fixes
+
+* built-in skills 每次啟動覆寫為最新版 ([65beea5](https://github.com/CatiesGames/catclaw/commit/65beea57106ed0296add8f5a9cde3bf10997ad55))
+
 ## [0.14.0](https://github.com/CatiesGames/catclaw/compare/v0.13.3...v0.14.0) (2026-03-20)
 
 
