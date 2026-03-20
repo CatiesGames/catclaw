@@ -165,9 +165,26 @@ impl SessionManager {
                         );
                         let args =
                             agent.claude_args_with_mcp(&new_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref());
+
+                        // Register kill channel so /stop works during BOOT.md execution
+                        let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
+                        self.active_handles.insert(session_key.clone(), kill_tx);
+
                         let mut handle =
                             ClaudeHandle::spawn_with_prompt(args, &combined).await?;
-                        let response = handle.wait_for_result(event_observer.clone()).await?;
+
+                        let response = tokio::select! {
+                            result = handle.wait_for_result(event_observer.clone()) => result?,
+                            _ = &mut kill_rx => {
+                                warn!(session_key = %session_key, "boot session stopped by user");
+                                handle.kill().await.ok();
+                                self.active_handles.remove(&session_key);
+                                self.state_db.update_session_state(&session_key, "idle")?;
+                                return Err(CatClawError::Session("session stopped by user".to_string()));
+                            }
+                        };
+
+                        self.active_handles.remove(&session_key);
 
                         // Determine final session ID
                         let final_id = handle
