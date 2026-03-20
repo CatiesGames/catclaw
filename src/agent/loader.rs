@@ -186,7 +186,7 @@ denied = []
     }
 
     /// Install embedded built-in skills to the shared pool at `{workspace_root}/skills/`.
-    /// Idempotent — skips skills that already exist.
+    /// Always overwrites with the latest version compiled into the binary.
     pub fn install_builtin_skills(workspace_root: &Path) -> Result<()> {
         let skills_dir = workspace_root.join("skills");
         fs::create_dir_all(&skills_dir)?;
@@ -194,19 +194,15 @@ denied = []
             let skill_dir = skills_dir.join(name);
             fs::create_dir_all(&skill_dir)?;
             let skill_md = skill_dir.join("SKILL.md");
-            if !skill_md.exists() {
-                fs::write(&skill_md, content)?;
-            }
+            fs::write(&skill_md, content)?;
         }
         // Install extra files for skills that have them
         for (skill_name, rel_path, content) in EMBEDDED_SKILL_FILES {
             let file_path = skills_dir.join(skill_name).join(rel_path);
-            if !file_path.exists() {
-                if let Some(parent) = file_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&file_path, content)?;
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent)?;
             }
+            fs::write(&file_path, content)?;
         }
         Ok(())
     }

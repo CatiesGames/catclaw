@@ -163,8 +163,7 @@ For per-agent settings (not global):
 Skills are `const` string literals in `src/agent/loader.rs`, compiled into the binary. They are installed to the user's workspace at:
 - `catclaw agent new` — all built-in skills are auto-installed when creating a new agent
 - `catclaw onboard` — installed during initialization
-
-**After updating skill content**: `cargo build --release` produces a new binary, but already-installed workspace files are not auto-updated. Manually overwrite or delete `workspace/skills/{name}/SKILL.md` so the next `agent new` recreates it.
+- **Gateway startup** — built-in skills are always overwritten with the version compiled into the binary. User modifications to built-in skill files will not survive a restart. Custom (non-built-in) skills are never touched.
 
 ## WS Protocol Methods
 
