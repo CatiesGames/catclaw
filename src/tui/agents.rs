@@ -187,6 +187,11 @@ pub struct AgentsPanel {
     skill_rx: mpsc::UnboundedReceiver<Result<String, String>>,
     /// WS client for hot-reloading agent config in gateway
     client: Arc<GatewayClient>,
+    /// Discovered MCP tools per server (fetched from gateway on Tools mode entry)
+    mcp_discovered_tools: std::collections::HashMap<String, Vec<String>>,
+    /// Receiver for async MCP tools discovery results
+    mcp_tools_rx: mpsc::UnboundedReceiver<std::collections::HashMap<String, Vec<String>>>,
+    mcp_tools_tx: mpsc::UnboundedSender<std::collections::HashMap<String, Vec<String>>>,
 }
 
 impl AgentsPanel {
@@ -194,6 +199,30 @@ impl AgentsPanel {
         let agents = Self::load_agents(config);
         let (create_tx, create_rx) = mpsc::unbounded_channel();
         let (skill_tx, skill_rx) = mpsc::unbounded_channel();
+        let (mcp_tools_tx, mcp_tools_rx) = mpsc::unbounded_channel();
+
+        // Pre-fetch MCP discovered tools so first Tools mode entry has data
+        {
+            let client = client.clone();
+            let tx = mcp_tools_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(resp) = client.request("mcp.tools", serde_json::json!({})).await {
+                    if let Some(obj) = resp.as_object() {
+                        let mut map = std::collections::HashMap::new();
+                        for (server, tools) in obj {
+                            if let Some(arr) = tools.as_array() {
+                                let names: Vec<String> = arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect();
+                                map.insert(server.clone(), names);
+                            }
+                        }
+                        let _ = tx.send(map);
+                    }
+                }
+            });
+        }
+
         AgentsPanel {
             agents,
             selected: 0,
@@ -222,6 +251,9 @@ impl AgentsPanel {
             skill_tx,
             skill_rx,
             client,
+            mcp_discovered_tools: std::collections::HashMap::new(),
+            mcp_tools_rx,
+            mcp_tools_tx,
         }
     }
 
@@ -287,6 +319,33 @@ impl AgentsPanel {
     }
 
     fn enter_tools_mode(&mut self) {
+        // Drain any pending MCP tools discovery results
+        while let Ok(tools) = self.mcp_tools_rx.try_recv() {
+            self.mcp_discovered_tools = tools;
+        }
+
+        // Trigger a fresh fetch for next time
+        {
+            let client = self.client.clone();
+            let tx = self.mcp_tools_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(resp) = client.request("mcp.tools", serde_json::json!({})).await {
+                    if let Some(obj) = resp.as_object() {
+                        let mut map = std::collections::HashMap::new();
+                        for (server, tools) in obj {
+                            if let Some(arr) = tools.as_array() {
+                                let names: Vec<String> = arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect();
+                                map.insert(server.clone(), names);
+                            }
+                        }
+                        let _ = tx.send(map);
+                    }
+                }
+            });
+        }
+
         if let Some(agent) = self.agents.get(self.selected) {
             self.whitelist_mode = !agent.allowed.is_empty();
 
@@ -331,23 +390,44 @@ impl AgentsPanel {
                 });
             }
 
-            // 3. User MCP tools (from shared workspace + agent workspace .mcp.json)
+            // 3. User MCP tools (from shared workspace .mcp.json)
+            // If we have discovered individual tools, show them; otherwise fallback to wildcard
             let user_mcp_servers = Self::list_user_mcp_servers(&self.workspace);
             for server_name in &user_mcp_servers {
-                let wildcard = format!("mcp__{}__*", server_name);
-                let display = format!("{}  (all tools)", server_name);
-                entries.push(ToolEntry {
-                    name: wildcard.clone(),
-                    display,
-                    section: ToolSection::McpUser,
-                    allowed: true,
-                    denied: agent.denied.iter().any(|d| {
-                        d == &wildcard || d == &format!("mcp__{}__*", server_name)
-                    }),
-                    require_approval: approval_list.iter().any(|p| {
-                        crate::config::ApprovalConfig::matches_pattern(p, &wildcard)
-                    }),
-                });
+                if let Some(discovered) = self.mcp_discovered_tools.get(server_name) {
+                    // Show individual discovered tools
+                    for tool_name_raw in discovered {
+                        let full_name = format!("mcp__{}__{}", server_name, tool_name_raw);
+                        entries.push(ToolEntry {
+                            name: full_name.clone(),
+                            display: tool_name_raw.clone(),
+                            section: ToolSection::McpUser,
+                            allowed: true,
+                            denied: agent.denied.iter().any(|d| {
+                                crate::config::ApprovalConfig::matches_pattern(d, &full_name)
+                            }),
+                            require_approval: approval_list.iter().any(|p| {
+                                crate::config::ApprovalConfig::matches_pattern(p, &full_name)
+                            }),
+                        });
+                    }
+                } else {
+                    // Fallback: show wildcard
+                    let wildcard = format!("mcp__{}__*", server_name);
+                    let display = format!("{}  (all tools)", server_name);
+                    entries.push(ToolEntry {
+                        name: wildcard.clone(),
+                        display,
+                        section: ToolSection::McpUser,
+                        allowed: true,
+                        denied: agent.denied.iter().any(|d| {
+                            d == &wildcard || d == &format!("mcp__{}__*", server_name)
+                        }),
+                        require_approval: approval_list.iter().any(|p| {
+                            crate::config::ApprovalConfig::matches_pattern(p, &wildcard)
+                        }),
+                    });
+                }
             }
 
             self.tool_entries = entries;

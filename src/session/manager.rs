@@ -1,10 +1,12 @@
 use chrono::Utc;
 use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::agent::Agent;
+use crate::config::Config;
 use crate::error::{CatClawError, Result};
 use crate::state::{SessionRow, StateDb};
 
@@ -37,6 +39,8 @@ pub struct SessionManager {
     mcp_port: Option<u16>,
     /// Path to catclaw config file (for hook subprocess --config arg).
     config_path: Option<std::path::PathBuf>,
+    /// Shared config for reading mcp_env at session spawn time.
+    config: Option<Arc<std::sync::RwLock<Config>>>,
 }
 
 #[allow(dead_code)]
@@ -52,6 +56,7 @@ impl SessionManager {
             session_locks: Arc::new(DashMap::new()),
             mcp_port: None,
             config_path: None,
+            config: None,
         }
     }
 
@@ -73,9 +78,21 @@ impl SessionManager {
         self
     }
 
+    pub fn with_config(mut self, config: Arc<std::sync::RwLock<Config>>) -> Self {
+        self.config = Some(config);
+        self
+    }
+
     /// Access the underlying state database.
     pub fn state_db(&self) -> &StateDb {
         &self.state_db
+    }
+
+    /// Read the current mcp_env from config (or empty if no config).
+    fn mcp_env(&self) -> HashMap<String, HashMap<String, String>> {
+        self.config.as_ref()
+            .map(|c| c.read().unwrap().mcp_env.clone())
+            .unwrap_or_default()
     }
 
     /// Send a message to a session, creating or resuming as needed.
@@ -95,6 +112,7 @@ impl SessionManager {
         event_observer: Option<tokio::sync::mpsc::UnboundedSender<super::claude::ClaudeEvent>>,
     ) -> Result<String> {
         let session_key = key.to_key_string();
+        let mcp_env = self.mcp_env();
 
         // Per-session mutex: queue concurrent messages instead of rejecting them
         let lock = self.session_lock(&session_key);
@@ -164,7 +182,7 @@ impl SessionManager {
                             message
                         );
                         let args =
-                            agent.claude_args_with_mcp(&new_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref());
+                            agent.claude_args_with_mcp(&new_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env);
 
                         // Register kill channel so /stop works during BOOT.md execution
                         let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
@@ -231,9 +249,9 @@ impl SessionManager {
 
         // Build args
         let args = if is_resume {
-            agent.claude_resume_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref())
+            agent.claude_resume_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env)
         } else {
-            agent.claude_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref())
+            agent.claude_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env)
         };
 
         // Update state to active + register kill channel
@@ -346,6 +364,7 @@ impl SessionManager {
         initial_model: Option<&str>,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<SessionEvent>> {
         let session_key = key.to_key_string();
+        let mcp_env = self.mcp_env();
 
         // Per-session mutex: queue concurrent messages instead of rejecting them
         let lock = self.session_lock(&session_key);
@@ -425,9 +444,9 @@ impl SessionManager {
 
         // Build args
         let args = if is_resume {
-            agent.claude_resume_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref())
+            agent.claude_resume_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env)
         } else {
-            agent.claude_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref())
+            agent.claude_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env)
         };
 
         // Update state to active + register kill channel

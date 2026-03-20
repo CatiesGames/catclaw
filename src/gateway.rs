@@ -19,6 +19,7 @@ use crate::router::MessageRouter;
 use crate::scheduler;
 use crate::session::manager::SessionManager;
 use crate::state::StateDb;
+use crate::mcp_discovery;
 use crate::ws_server;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -39,6 +40,9 @@ pub struct GatewayHandle {
     pub pending_approvals: Arc<DashMap<String, PendingApproval>>,
     /// Broadcast bus for pushing events to all connected WS clients.
     pub event_bus: Arc<tokio::sync::broadcast::Sender<String>>,
+    /// Discovered MCP tools per server (populated at startup).
+    /// In-memory only; re-discovered on each gateway restart.
+    pub mcp_tools: Arc<std::sync::RwLock<HashMap<String, Vec<String>>>>,
 }
 
 /// Start gateway services (DB, agents, session manager, channel adapters, scheduler)
@@ -77,10 +81,12 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         .to_string();
 
     // 4. Create session manager (MCP shares the same port as WS)
+    let gw_config = Arc::new(std::sync::RwLock::new(config.clone()));
     let session_manager = Arc::new(
         SessionManager::new(state_db.clone(), config.general.max_concurrent_sessions)
             .with_mcp_port(config.general.port)
-            .with_config_path(config_path.clone()),
+            .with_config_path(config_path.clone())
+            .with_config(gw_config.clone()),
     );
 
     // 5. Load bindings from config
@@ -308,16 +314,34 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         });
     }
 
+    // Discover MCP tools from user .mcp.json servers (non-blocking, best-effort)
+    let mcp_tools: Arc<std::sync::RwLock<HashMap<String, Vec<String>>>> =
+        Arc::new(std::sync::RwLock::new(HashMap::new()));
+    {
+        let mcp_json_path = config.general.workspace.join(".mcp.json");
+        let mcp_env = config.mcp_env.clone();
+        let tools_ref = mcp_tools.clone();
+        tokio::spawn(async move {
+            let results = mcp_discovery::discover_all(&mcp_json_path, &mcp_env).await;
+            let mut map = tools_ref.write().unwrap();
+            for entry in results {
+                info!(server = %entry.server_name, tools = entry.tools.len(), "MCP tools discovered");
+                map.insert(entry.server_name, entry.tools);
+            }
+        });
+    }
+
     let handle = GatewayHandle {
         state_db,
         session_manager,
         agent_registry,
         adapters: adapter_map,
         config_path,
-        config: Arc::new(std::sync::RwLock::new(config.clone())),
+        config: gw_config,
         adapter_filters,
         pending_approvals,
         event_bus,
+        mcp_tools,
     };
 
     // 10. Start gateway server (WS + MCP on single port)

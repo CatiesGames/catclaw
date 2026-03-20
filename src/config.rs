@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{CatClawError, Result};
@@ -30,6 +31,16 @@ pub struct Config {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// Per-MCP-server environment variables (secrets).
+    /// Keys are server names from .mcp.json, values are key=value env vars.
+    /// Example in TOML:
+    /// ```toml
+    /// [mcp_env.dotdot]
+    /// DOTDOT_API_KEY = "sk-xxx"
+    /// ```
+    #[serde(default)]
+    pub mcp_env: HashMap<String, HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -635,6 +646,7 @@ impl Config {
                 interval_mins: default_heartbeat_interval(),
             }),
             logging: LoggingConfig::default(),
+            mcp_env: HashMap::new(),
         }
     }
 }

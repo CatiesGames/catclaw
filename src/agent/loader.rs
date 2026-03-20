@@ -1473,6 +1473,32 @@ All agents see these servers by default. Each agent controls access via the TUI 
 - Use `Read` and `Write` tools to create/edit `.mcp.json` directly.
 - Shared MCP servers are available to all agents by default. To disable for a specific agent, use `catclaw agent tools <name> --deny "mcp__{server}__*"` or set to 🚫 in TUI Tools.
 
+### MCP Environment Variables
+
+MCP servers often need API keys or secrets. Rather than putting them in `.mcp.json` in plaintext, store them in `catclaw.toml` via `mcp_env` — they are automatically injected into each server's `env` block when spawning a session.
+
+```bash
+catclaw config mcp-env list              # List all (values are masked)
+catclaw config mcp-env get <server>      # Show env vars for a server
+catclaw config mcp-env set <server> <key> <value>  # Set an env var
+catclaw config mcp-env remove <server> <key>       # Remove an env var
+```
+
+**How it works:** When CatClaw spawns a Claude session, it reads `.mcp.json` for server definitions and merges env vars from `mcp_env.<server>` into each server's `env` field. The combined config is passed via `--mcp-config`.
+
+**Example workflow:**
+```bash
+# 1. Define the server in .mcp.json (no secrets here)
+#    "dotdot": { "command": "npx", "args": ["-y", "dotdot-mcp"] }
+
+# 2. Store the secret separately
+catclaw config mcp-env set dotdot DOTDOT_API_KEY sk-abc123
+
+# 3. Done — next session will have DOTDOT_API_KEY in dotdot's env
+```
+
+Changes take effect on the next session spawn — no gateway restart needed. Values are masked in all output (CLI, TUI, WS responses).
+
 ---
 
 ## Scheduled Tasks

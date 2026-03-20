@@ -16,6 +16,15 @@ use crate::ws_client::GatewayClient;
 enum ConfigMode {
     Normal,
     Editing,
+    /// Multi-step input for adding a new MCP env var: server → key → value
+    AddingMcpEnv { step: McpEnvStep },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum McpEnvStep {
+    Server,
+    Key { server: String },
+    Value { server: String, key: String },
 }
 
 struct ConfigEntry {
@@ -254,7 +263,31 @@ impl ConfigPanel {
             });
         }
 
+        // MCP Env
+        for (server, vars) in &config.mcp_env {
+            for (k, v) in vars {
+                let masked = Self::mask_value(v);
+                entries.push(ConfigEntry {
+                    key: format!("mcp_env.{}.{}", server, k),
+                    value: masked,
+                    section: format!("MCP Env: {}", server),
+                    editable: true,
+                });
+            }
+        }
+
         entries
+    }
+
+    fn mask_value(s: &str) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() <= 6 {
+            "***".to_string()
+        } else {
+            let prefix: String = chars[..3].iter().collect();
+            let suffix: String = chars[chars.len()-3..].iter().collect();
+            format!("{}...{}", prefix, suffix)
+        }
     }
 
     fn reload_config(&mut self) {
@@ -339,11 +372,35 @@ impl ConfigPanel {
             return;
         }
 
-        // Send via WS → gateway applies + saves + hot-reloads adapter filters
+        // Route MCP env keys to mcp_env.set, everything else to config.set
         let client = self.client.clone();
         let tx = self.event_tx.clone();
         let key_clone = key.clone();
         let value_clone = value.clone();
+
+        if let Some(rest) = key.strip_prefix("mcp_env.") {
+            // Parse "mcp_env.{server}.{env_key}"
+            if let Some((server, env_key)) = rest.split_once('.') {
+                let server = server.to_string();
+                let env_key = env_key.to_string();
+                tokio::spawn(async move {
+                    match client.request("mcp_env.set", json!({"server": server, "key": env_key, "value": value_clone})).await {
+                        Ok(_) => {
+                            let _ = tx.send(ConfigEvent::SetResult {
+                                key: key_clone,
+                                value: "(updated)".to_string(),
+                                needs_restart: false,
+                            });
+                        }
+                        Err(e) => { let _ = tx.send(ConfigEvent::SetError(e)); }
+                    }
+                });
+            }
+            self.status_msg = Some(format!("Setting {} ...", key));
+            self.mode = ConfigMode::Normal;
+            return;
+        }
+
         tokio::spawn(async move {
             match client.request("config.set", json!({"key": key_clone, "value": value_clone})).await {
                 Ok(resp) => {
@@ -406,7 +463,13 @@ impl Component for ConfigPanel {
                 KeyCode::Enter => {
                     if let Some(entry) = self.entries.get(self.selected) {
                         if entry.editable {
-                            self.edit_buffer = entry.value.clone();
+                            // MCP env entries display masked values — start with empty buffer
+                            // to force the user to type the new value (not edit the mask)
+                            if entry.key.starts_with("mcp_env.") {
+                                self.edit_buffer.clear();
+                            } else {
+                                self.edit_buffer = entry.value.clone();
+                            }
                             self.completions = Self::completions_for_key(&entry.key);
                             self.completion_idx = 0;
                             self.mode = ConfigMode::Editing;
@@ -419,6 +482,43 @@ impl Component for ConfigPanel {
                 }
                 KeyCode::Char('r') => {
                     self.reload_config();
+                    Action::None
+                }
+                KeyCode::Char('a') => {
+                    // Start adding a new MCP env var
+                    self.edit_buffer.clear();
+                    self.mode = ConfigMode::AddingMcpEnv {
+                        step: McpEnvStep::Server,
+                    };
+                    self.status_msg = None;
+                    Action::None
+                }
+                KeyCode::Char('d') => {
+                    // Delete selected MCP env entry
+                    if let Some(entry) = self.entries.get(self.selected) {
+                        if let Some(rest) = entry.key.strip_prefix("mcp_env.") {
+                            if let Some((server, env_key)) = rest.split_once('.') {
+                                let client = self.client.clone();
+                                let tx = self.event_tx.clone();
+                                let server = server.to_string();
+                                let env_key = env_key.to_string();
+                                let key_full = entry.key.clone();
+                                tokio::spawn(async move {
+                                    match client.request("mcp_env.remove", json!({"server": server, "key": env_key})).await {
+                                        Ok(_) => {
+                                            let _ = tx.send(ConfigEvent::SetResult {
+                                                key: key_full,
+                                                value: "(removed)".to_string(),
+                                                needs_restart: false,
+                                            });
+                                        }
+                                        Err(e) => { let _ = tx.send(ConfigEvent::SetError(e)); }
+                                    }
+                                });
+                                self.status_msg = Some("Removing...".to_string());
+                            }
+                        }
+                    }
                     Action::None
                 }
                 _ => Action::None,
@@ -464,6 +564,73 @@ impl Component for ConfigPanel {
                 }
                 _ => Action::None,
             },
+
+            ConfigMode::AddingMcpEnv { step } => {
+                let step = step.clone();
+                match event.code {
+                    KeyCode::Enter => {
+                        let input = self.edit_buffer.trim().to_string();
+                        if input.is_empty() {
+                            self.status_msg = Some("Cannot be empty".to_string());
+                            self.mode = ConfigMode::Normal;
+                        } else {
+                            match step {
+                                McpEnvStep::Server => {
+                                    self.edit_buffer.clear();
+                                    self.mode = ConfigMode::AddingMcpEnv {
+                                        step: McpEnvStep::Key { server: input },
+                                    };
+                                }
+                                McpEnvStep::Key { server } => {
+                                    self.edit_buffer.clear();
+                                    self.mode = ConfigMode::AddingMcpEnv {
+                                        step: McpEnvStep::Value { server, key: input },
+                                    };
+                                }
+                                McpEnvStep::Value { server, key } => {
+                                    // Submit via WS
+                                    let client = self.client.clone();
+                                    let tx = self.event_tx.clone();
+                                    let value = input;
+                                    let key_display = format!("mcp_env.{}.{}", server, key);
+                                    let s = server.clone();
+                                    let k = key.clone();
+                                    let v = value.clone();
+                                    tokio::spawn(async move {
+                                        match client.request("mcp_env.set", json!({"server": s, "key": k, "value": v})).await {
+                                            Ok(_) => {
+                                                let _ = tx.send(ConfigEvent::SetResult {
+                                                    key: key_display,
+                                                    value: "(set)".to_string(),
+                                                    needs_restart: false,
+                                                });
+                                            }
+                                            Err(e) => { let _ = tx.send(ConfigEvent::SetError(e)); }
+                                        }
+                                    });
+                                    self.status_msg = Some(format!("Setting {}.{} ...", server, key));
+                                    self.mode = ConfigMode::Normal;
+                                }
+                            }
+                        }
+                        Action::None
+                    }
+                    KeyCode::Esc => {
+                        self.mode = ConfigMode::Normal;
+                        self.status_msg = Some("Cancelled".to_string());
+                        Action::None
+                    }
+                    KeyCode::Backspace => {
+                        self.edit_buffer.pop();
+                        Action::None
+                    }
+                    KeyCode::Char(c) => {
+                        self.edit_buffer.push(c);
+                        Action::None
+                    }
+                    _ => Action::None,
+                }
+            }
         };
 
         // Drain async events; if a pending action was set, return it instead
@@ -475,7 +642,7 @@ impl Component for ConfigPanel {
     }
 
     fn captures_input(&self) -> bool {
-        self.mode == ConfigMode::Editing
+        matches!(self.mode, ConfigMode::Editing | ConfigMode::AddingMcpEnv { .. })
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -615,6 +782,26 @@ impl Component for ConfigPanel {
                 ]))
                 .style(Style::default().bg(Theme::SURFACE0))
             }
+            ConfigMode::AddingMcpEnv { step } => {
+                let label = match step {
+                    McpEnvStep::Server => "Server name",
+                    McpEnvStep::Key { .. } => "Env var name",
+                    McpEnvStep::Value { .. } => "Env var value",
+                };
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {}: ", label),
+                        Style::default()
+                            .fg(Theme::MAUVE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{}▌", self.edit_buffer),
+                        Style::default().fg(Theme::TEXT),
+                    ),
+                ]))
+                .style(Style::default().bg(Theme::SURFACE0))
+            }
             ConfigMode::Normal => {
                 if let Some(msg) = &self.status_msg {
                     Paragraph::new(format!(" {}", msg))
@@ -633,7 +820,8 @@ impl Component for ConfigPanel {
             } else {
                 " Enter Save  Esc Cancel"
             },
-            ConfigMode::Normal => " j/k Navigate  Enter Edit  r Reload",
+            ConfigMode::AddingMcpEnv { .. } => " Enter Next  Esc Cancel",
+            ConfigMode::Normal => " j/k Navigate  Enter Edit  a Add MCP Env  d Delete MCP Env  r Reload",
         };
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Theme::OVERLAY0).bg(Theme::MANTLE));

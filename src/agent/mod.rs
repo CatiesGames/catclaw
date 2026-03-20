@@ -220,6 +220,7 @@ impl Agent {
     /// Resolution order: model_override > self.model (agent config) > not passed.
     /// `mcp_port`: if set, injects --mcp-config pointing to the built-in MCP server.
     /// `hook_session_key`: if set and agent has approval rules, injects --settings with PreToolUse hook.
+    /// `mcp_env`: per-server env vars to inject into user MCP server definitions.
     pub fn claude_args_with_mcp(
         &self,
         session_id: &str,
@@ -227,6 +228,7 @@ impl Agent {
         mcp_port: Option<u16>,
         hook_session_key: Option<&str>,
         config_path: Option<&std::path::Path>,
+        mcp_env: &HashMap<String, HashMap<String, String>>,
     ) -> Vec<String> {
         let system_prompt = self.build_system_prompt();
 
@@ -297,18 +299,51 @@ impl Agent {
             args.push(self.tools.denied.join(","));
         }
 
-        // Built-in MCP server (adapter tools: discord_*, telegram_*, etc.)
-        if let Some(port) = mcp_port {
-            let mcp_config = serde_json::json!({
-                "mcpServers": {
-                    "catclaw": {
-                        "type": "http",
-                        "url": format!("http://127.0.0.1:{}/mcp", port)
+        // Merge all MCP servers: user .mcp.json + catclaw built-in
+        {
+            let mut mcp_servers = serde_json::Map::new();
+
+            // 1. Read user .mcp.json from workspace root
+            let user_mcp_path = self.workspace_root.join(".mcp.json");
+            if let Ok(content) = std::fs::read_to_string(&user_mcp_path) {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(servers) = parsed.get("mcpServers").and_then(|v| v.as_object()) {
+                        for (name, def) in servers {
+                            if name == "catclaw" { continue; } // skip, we add our own
+                            let mut server_def = def.clone();
+                            // Merge env vars from mcp_env config
+                            if let Some(env_map) = mcp_env.get(name) {
+                                if !env_map.is_empty() {
+                                    if let Some(obj) = server_def.as_object_mut() {
+                                        let existing_env = obj.entry("env").or_insert_with(|| serde_json::json!({}));
+                                        if let Some(env_obj) = existing_env.as_object_mut() {
+                                            for (k, v) in env_map {
+                                                env_obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            mcp_servers.insert(name.clone(), server_def);
+                        }
                     }
                 }
-            });
-            args.push("--mcp-config".to_string());
-            args.push(mcp_config.to_string());
+            }
+
+            // 2. Add catclaw built-in MCP server
+            if let Some(port) = mcp_port {
+                mcp_servers.insert("catclaw".to_string(), serde_json::json!({
+                    "type": "http",
+                    "url": format!("http://127.0.0.1:{}/mcp", port)
+                }));
+            }
+
+            // Only inject --mcp-config if there are servers
+            if !mcp_servers.is_empty() {
+                let mcp_config = serde_json::json!({ "mcpServers": mcp_servers });
+                args.push("--mcp-config".to_string());
+                args.push(mcp_config.to_string());
+            }
         }
 
         // Inject PreToolUse hook if agent has approval rules configured
@@ -353,8 +388,9 @@ impl Agent {
         mcp_port: Option<u16>,
         hook_session_key: Option<&str>,
         config_path: Option<&std::path::Path>,
+        mcp_env: &HashMap<String, HashMap<String, String>>,
     ) -> Vec<String> {
-        let mut args = self.claude_args_with_mcp(session_id, model_override, mcp_port, hook_session_key, config_path);
+        let mut args = self.claude_args_with_mcp(session_id, model_override, mcp_port, hook_session_key, config_path, mcp_env);
 
         // Replace --session-id with --resume
         if let Some(pos) = args.iter().position(|a| a == "--session-id") {

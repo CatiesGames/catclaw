@@ -181,6 +181,8 @@ JSON-RPC methods supported by the gateway WS server (`/ws`):
 | `tasks.list` / `.enable` / `.disable` / `.delete` | Scheduled task CRUD | — |
 | `config.get` / `.set` | Global config read/write | YES (some require restart) |
 | `approval.request` / `.respond` / `.list` | Tool approval flow | — |
+| `mcp_env.list` / `.get` / `.set` / `.remove` | MCP env var management | YES (hot-reload) |
+| `mcp.tools` | Query discovered MCP tools per server | — |
 
 When adding a new WS method, update this table and the `dispatch()` function in `src/ws_server.rs`.
 

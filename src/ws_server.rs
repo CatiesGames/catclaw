@@ -161,6 +161,11 @@ async fn dispatch(
         "approval.request" => handle_approval_request(req, gw).await,
         "approval.respond" => handle_approval_respond(req, gw).await,
         "approval.list" => handle_approval_list(req, gw),
+        "mcp_env.list" => handle_mcp_env_list(req, gw),
+        "mcp_env.get" => handle_mcp_env_get(req, gw),
+        "mcp_env.set" => handle_mcp_env_set(req, gw),
+        "mcp_env.remove" => handle_mcp_env_remove(req, gw),
+        "mcp.tools" => handle_mcp_tools(req, gw),
         _ => WsResponse::err(req.id, -32601, format!("unknown method: {}", req.method)),
     }
 }
@@ -834,4 +839,148 @@ fn handle_config_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         "key": key,
         "value": value,
     }))
+}
+
+// ── MCP Env handlers ──
+
+fn mask_value(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= 6 {
+        "***".to_string()
+    } else {
+        let prefix: String = chars[..3].iter().collect();
+        let suffix: String = chars[chars.len()-3..].iter().collect();
+        format!("{}...{}", prefix, suffix)
+    }
+}
+
+fn handle_mcp_env_list(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let config = gw.config.read().unwrap();
+    let mut result = json!({});
+    for (server, vars) in &config.mcp_env {
+        let masked: serde_json::Map<String, Value> = vars
+            .iter()
+            .map(|(k, v)| (k.clone(), json!(mask_value(v))))
+            .collect();
+        result[server] = json!(masked);
+    }
+    WsResponse::ok(req.id, result)
+}
+
+fn handle_mcp_env_get(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let server = match req.params.get("server").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return WsResponse::err(req.id, -32602, "missing param: server"),
+    };
+    let config = gw.config.read().unwrap();
+    match config.mcp_env.get(server) {
+        Some(vars) => {
+            let masked: serde_json::Map<String, Value> = vars
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(mask_value(v))))
+                .collect();
+            WsResponse::ok(req.id, json!(masked))
+        }
+        None => WsResponse::ok(req.id, json!({})),
+    }
+}
+
+fn handle_mcp_env_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let server = match req.params.get("server").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: server"),
+    };
+    let key = match req.params.get("key").and_then(|v| v.as_str()) {
+        Some(k) => k.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: key"),
+    };
+    let value = match req.params.get("value").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: value"),
+    };
+
+    // Clone → mutate → serialize → write to disk → commit to in-memory config
+    let serialized = {
+        let config = gw.config.read().unwrap();
+        let mut draft = config.mcp_env.clone();
+        draft.entry(server.clone()).or_default().insert(key.clone(), value);
+        // Build a temporary config with the new mcp_env for serialization
+        let mut full = config.clone();
+        full.mcp_env = draft;
+        match toml::to_string_pretty(&full) {
+            Ok(s) => s,
+            Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+        }
+    };
+
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+
+    // File write succeeded — now commit to in-memory config
+    {
+        let mut config = gw.config.write().unwrap();
+        // Re-parse from serialized to ensure consistency
+        if let Ok(new_config) = toml::from_str::<crate::config::Config>(&serialized) {
+            config.mcp_env = new_config.mcp_env;
+        }
+    }
+
+    info!(server = %server, key = %key, "mcp_env set");
+    WsResponse::ok(req.id, json!({"server": server, "key": key}))
+}
+
+fn handle_mcp_env_remove(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let server = match req.params.get("server").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: server"),
+    };
+    let key = match req.params.get("key").and_then(|v| v.as_str()) {
+        Some(k) => k.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: key"),
+    };
+
+    // Clone → mutate → serialize → write to disk → commit to in-memory config
+    let serialized = {
+        let config = gw.config.read().unwrap();
+        let mut draft = config.mcp_env.clone();
+        if let Some(vars) = draft.get_mut(&server) {
+            vars.remove(&key);
+            if vars.is_empty() {
+                draft.remove(&server);
+            }
+        }
+        let mut full = config.clone();
+        full.mcp_env = draft;
+        match toml::to_string_pretty(&full) {
+            Ok(s) => s,
+            Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+        }
+    };
+
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+
+    // File write succeeded — commit to in-memory config
+    {
+        let mut config = gw.config.write().unwrap();
+        if let Ok(new_config) = toml::from_str::<crate::config::Config>(&serialized) {
+            config.mcp_env = new_config.mcp_env;
+        }
+    }
+
+    info!(server = %server, key = %key, "mcp_env removed");
+    WsResponse::ok(req.id, json!({"server": server, "key": key}))
+}
+
+// ── MCP Tools handler ──
+
+fn handle_mcp_tools(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let tools = gw.mcp_tools.read().unwrap();
+    let result: serde_json::Map<String, Value> = tools
+        .iter()
+        .map(|(server, tool_list)| (server.clone(), json!(tool_list)))
+        .collect();
+    WsResponse::ok(req.id, json!(result))
 }

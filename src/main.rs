@@ -8,6 +8,7 @@ mod dist;
 mod error;
 mod gateway;
 mod logging;
+mod mcp_discovery;
 mod mcp_server;
 mod pidfile;
 mod router;
@@ -244,6 +245,38 @@ enum ConfigCommands {
     },
     /// Show current configuration
     Show,
+    /// Manage MCP server environment variables
+    McpEnv {
+        #[command(subcommand)]
+        command: McpEnvCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpEnvCommands {
+    /// List all MCP server env vars
+    List,
+    /// Show env vars for a specific server
+    Get {
+        /// MCP server name (from .mcp.json)
+        server: String,
+    },
+    /// Set an env var for a server
+    Set {
+        /// MCP server name
+        server: String,
+        /// Environment variable name
+        key: String,
+        /// Environment variable value
+        value: String,
+    },
+    /// Remove an env var from a server
+    Remove {
+        /// MCP server name
+        server: String,
+        /// Environment variable name
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -849,6 +882,77 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                             Err(e) => {
                                 eprintln!("Error: {}", e);
                                 std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+                ConfigCommands::McpEnv { command } => {
+                    let mask = |s: &str| -> String {
+                        let chars: Vec<char> = s.chars().collect();
+                        if chars.len() <= 6 {
+                            "***".to_string()
+                        } else {
+                            let prefix: String = chars[..3].iter().collect();
+                            let suffix: String = chars[chars.len()-3..].iter().collect();
+                            format!("{}...{}", prefix, suffix)
+                        }
+                    };
+
+                    match command {
+                        McpEnvCommands::List => {
+                            if config.mcp_env.is_empty() {
+                                println!("No MCP env vars configured.");
+                            } else {
+                                for (server, vars) in &config.mcp_env {
+                                    println!("[{}]", server);
+                                    for (k, v) in vars {
+                                        println!("  {} = {}", k, mask(v));
+                                    }
+                                }
+                            }
+                        }
+                        McpEnvCommands::Get { server } => {
+                            match config.mcp_env.get(&server) {
+                                Some(vars) => {
+                                    for (k, v) in vars {
+                                        println!("{} = {}", k, mask(v));
+                                    }
+                                }
+                                None => println!("No env vars for server '{}'", server),
+                            }
+                        }
+                        McpEnvCommands::Set { server, key, value } => {
+                            // Try WS first for hot-reload, fall back to file-only
+                            let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+                            if let Ok((client, _event_rx)) = crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await {
+                                match client.request("mcp_env.set", serde_json::json!({"server": &server, "key": &key, "value": &value})).await {
+                                    Ok(_) => println!("Set {}.{} (applied)", server, key),
+                                    Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+                                }
+                            } else {
+                                let mut config = config;
+                                config.mcp_env.entry(server.clone()).or_default().insert(key.clone(), value);
+                                config.save(&cli.config)?;
+                                println!("Set {}.{} (saved to file)", server, key);
+                            }
+                        }
+                        McpEnvCommands::Remove { server, key } => {
+                            let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+                            if let Ok((client, _event_rx)) = crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await {
+                                match client.request("mcp_env.remove", serde_json::json!({"server": &server, "key": &key})).await {
+                                    Ok(_) => println!("Removed {}.{}", server, key),
+                                    Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+                                }
+                            } else {
+                                let mut config = config;
+                                if let Some(vars) = config.mcp_env.get_mut(&server) {
+                                    vars.remove(&key);
+                                    if vars.is_empty() {
+                                        config.mcp_env.remove(&server);
+                                    }
+                                }
+                                config.save(&cli.config)?;
+                                println!("Removed {}.{} (saved to file)", server, key);
                             }
                         }
                     }
