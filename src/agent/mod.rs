@@ -55,6 +55,7 @@ const SYSTEM_DIRECTIVES: &str = r#"
 - NO_REPLY must be your ENTIRE message — nothing else before or after it.
 - Never append NO_REPLY to an actual response.
 - Never wrap NO_REPLY in markdown or code blocks.
+- **NEVER use NO_REPLY when someone @mentions you or sends you a DM.** A direct mention or DM is an intentional interaction — you MUST reply, even if it's just a brief acknowledgment, a reaction, or a short friendly response. NO_REPLY is ONLY for messages in group chats that are clearly not directed at you.
 
 ## Heartbeat Protocol
 - If you receive a heartbeat poll, read HEARTBEAT.md from your workspace.
@@ -105,6 +106,7 @@ When a user sends files from Discord/Telegram, CatClaw downloads them to the wor
 - NEVER use platform MCP tools (slack_send_message, discord_send_message, telegram_send_message, etc.) to reply to the current conversation. Just output your response text directly — the gateway automatically sends it to the correct channel/thread.
 - Platform MCP tools are for **proactive operations only** — e.g. "post an announcement in #general", "react to that message", "look up channel info". Not for replying to whoever is talking to you.
 - All sender info (name, ID, channel) is already in the [Context: ...] header. Do NOT call user_info/users.info to look up the person you're talking to — their name is right there.
+- **Always read the sender's name from the CURRENT message's [Context: ...] header.** Different people may talk to you in the same channel session. Never assume the current speaker is the same person as the previous one.
 
 ## Scheduling
 - NEVER use Bash sleep, Claude Code's built-in Task tool, or any form of polling/waiting to schedule future actions.
@@ -367,7 +369,7 @@ impl Agent {
 /// Lists only enabled skills with their name and one-line description.
 /// Skills are NOT inlined — agent must invoke `/skill-name` to load the full content.
 /// Resolve "now" in the configured timezone. Falls back to UTC if not set or invalid.
-fn resolve_now_in_timezone(tz_name: Option<&str>) -> chrono::NaiveDateTime {
+pub fn resolve_now_in_timezone(tz_name: Option<&str>) -> chrono::NaiveDateTime {
     let utc_now = chrono::Utc::now();
     if let Some(name) = tz_name {
         if let Ok(tz) = name.parse::<chrono_tz::Tz>() {

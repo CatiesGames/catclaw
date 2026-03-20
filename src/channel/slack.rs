@@ -467,6 +467,12 @@ impl ChannelAdapter for SlackAdapter {
                             .await;
                         }
 
+                        // Capture message timestamp for reaction status indicator
+                        let msg_ts = event
+                            .get("ts")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+
                         let ctx = MsgContext {
                             channel_type: ChannelType::Slack,
                             channel_id: channel_id.clone(),
@@ -488,7 +494,7 @@ impl ChannelAdapter for SlackAdapter {
                             } else {
                                 Some(team_id)
                             },
-                            message_id: None,
+                            message_id: msg_ts,
                         };
 
                         if let Err(e) = msg_tx.send(ctx).await {
@@ -1140,6 +1146,19 @@ impl ChannelAdapter for SlackAdapter {
 
     fn supported_actions(&self) -> Vec<ActionInfo> {
         slack_action_infos()
+    }
+
+    async fn create_reaction_handle(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> Option<super::reaction::ReactionHandle> {
+        Some(super::reaction::spawn_slack(
+            self.http.clone(),
+            self.bot_token.clone(),
+            channel_id.to_string(),
+            message_id.to_string(),
+        ))
     }
 }
 

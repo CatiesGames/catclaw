@@ -201,7 +201,8 @@ async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &Sessio
             // This prevents distillation from re-triggering every heartbeat on failure.
             if distillation_requested {
                 let last_distill_path = agent.workspace.join("memory").join(".last_distill");
-                let today = Utc::now().format("%Y-%m-%d").to_string();
+                let now_local = crate::agent::resolve_now_in_timezone(agent.timezone.as_deref());
+                let today = now_local.format("%Y-%m-%d").to_string();
                 if let Err(e) = tokio::fs::write(&last_distill_path, &today).await {
                     warn!(agent = %agent.id, error = %e, "failed to write .last_distill");
                 }
@@ -453,12 +454,21 @@ pub async fn extract_diary_for_session(agent: &Agent, session: &SessionRow) {
     // Build readable transcript and extract channel info for the diary header
     let readable = TranscriptLog::format_readable(&entries);
     let channel_label = build_channel_label(&session.session_key);
+    // Format time label in the agent's configured timezone
     let time_label = entries
         .first()
         .and_then(|e| {
             chrono::DateTime::parse_from_rfc3339(&e.timestamp)
                 .ok()
-                .map(|dt| dt.format("%H:%M").to_string())
+                .map(|dt| {
+                    let utc_dt = dt.with_timezone(&Utc);
+                    if let Some(ref tz_name) = agent.timezone {
+                        if let Ok(tz) = tz_name.parse::<chrono_tz::Tz>() {
+                            return utc_dt.with_timezone(&tz).format("%H:%M").to_string();
+                        }
+                    }
+                    utc_dt.format("%H:%M").to_string()
+                })
         })
         .unwrap_or_else(|| "??:??".to_string());
 
@@ -466,7 +476,8 @@ pub async fn extract_diary_for_session(agent: &Agent, session: &SessionRow) {
 
     match generate_diary(agent, &readable).await {
         DiaryResult::Entry(diary_text) => {
-            let today = Utc::now().format("%Y-%m-%d").to_string();
+            let now_local = crate::agent::resolve_now_in_timezone(agent.timezone.as_deref());
+            let today = now_local.format("%Y-%m-%d").to_string();
             let diary_path = agent.workspace.join("memory").join(format!("{}.md", today));
 
             let memory_dir = agent.workspace.join("memory");
@@ -608,7 +619,8 @@ async fn append_to_file(path: &Path, content: &str) -> std::io::Result<()> {
 /// - Only include diary files newer than `.last_distill` date (or all if missing)
 async fn check_distillation_due(agent: &Agent) -> Option<String> {
     let last_distill_path = agent.workspace.join("memory").join(".last_distill");
-    let today = Utc::now().date_naive();
+    let now_local = crate::agent::resolve_now_in_timezone(agent.timezone.as_deref());
+    let today = now_local.date();
 
     // Read last distillation date
     let last_date = tokio::fs::read_to_string(&last_distill_path)
