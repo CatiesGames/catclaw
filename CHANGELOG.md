@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.3](https://github.com/CatiesGames/catclaw/compare/v0.13.2...v0.13.3) (2026-03-20)
+
+
+### Bug Fixes
+
+* timezone config set 即時 hot-reload 到所有 agents ([f08c3ff](https://github.com/CatiesGames/catclaw/commit/f08c3ff15dccf9a02675e2452778bc879f34f3f8))
+
 ## [0.13.2](https://github.com/CatiesGames/catclaw/compare/v0.13.1...v0.13.2) (2026-03-19)
 
 
