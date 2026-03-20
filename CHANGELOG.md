@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/CatiesGames/catclaw/compare/v0.13.3...v0.14.0) (2026-03-20)
+
+
+### Features
+
+* Slack reaction 狀態指示 + 日記 timezone 修正 ([7a21c66](https://github.com/CatiesGames/catclaw/commit/7a21c6645a74a4f4df306e4bc184fed78d4ac2e1))
+
 ## [0.13.3](https://github.com/CatiesGames/catclaw/compare/v0.13.2...v0.13.3) (2026-03-20)
 
 
