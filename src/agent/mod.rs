@@ -509,4 +509,11 @@ impl AgentRegistry {
             agent.fallback_model = fallback_model;
         }
     }
+
+    /// Update timezone on all agents (called when `config set timezone` is hot-reloaded).
+    pub fn set_all_timezone(&mut self, tz: Option<String>) {
+        for agent in self.agents.values_mut() {
+            agent.timezone = tz.clone();
+        }
+    }
 }

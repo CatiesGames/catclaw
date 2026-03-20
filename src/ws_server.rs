@@ -821,6 +821,12 @@ fn handle_config_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
                 return WsResponse::err(req.id, -1, format!("log level reload failed: {}", e));
             }
         }
+        // Reload timezone on all agents
+        if key == "timezone" {
+            let tz = if value.is_empty() { None } else { Some(value.to_string()) };
+            let mut registry = gw.agent_registry.write().unwrap();
+            registry.set_all_timezone(tz);
+        }
     }
 
     WsResponse::ok(req.id, json!({
