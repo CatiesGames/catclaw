@@ -323,10 +323,16 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         let tools_ref = mcp_tools.clone();
         tokio::spawn(async move {
             let results = mcp_discovery::discover_all(&mcp_json_path, &mcp_env).await;
+            let count = results.len();
             let mut map = tools_ref.write().unwrap();
             for entry in results {
                 info!(server = %entry.server_name, tools = entry.tools.len(), "MCP tools discovered");
                 map.insert(entry.server_name, entry.tools);
+            }
+            if count == 0 {
+                info!("MCP discovery: no tools discovered (0 servers or all failed)");
+            } else {
+                info!(total_servers = count, "MCP discovery complete");
             }
         });
     }

@@ -629,6 +629,33 @@ impl ChannelAdapter for SlackAdapter {
                         )
                         .await;
 
+                        // Resolve channel name for consistent session key (same as regular messages)
+                        let channel_name = if is_dm {
+                            Some(format!("dm.{}", sender_name))
+                        } else if let Some(cached) = channel_cache.get(&channel_id) {
+                            Some(cached.clone())
+                        } else {
+                            let name = match slack_api(
+                                &http,
+                                &bot_token,
+                                "conversations.info",
+                                &serde_json::json!({"channel": &channel_id}),
+                            )
+                            .await
+                            {
+                                Ok(resp) => resp
+                                    .get("channel")
+                                    .and_then(|c| c.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.to_string()),
+                                Err(_) => None,
+                            };
+                            if let Some(ref n) = name {
+                                channel_cache.insert(channel_id.clone(), n.clone());
+                            }
+                            name
+                        };
+
                         let ctx = MsgContext {
                             channel_type: ChannelType::Slack,
                             channel_id: channel_id.clone(),
@@ -643,7 +670,7 @@ impl ChannelAdapter for SlackAdapter {
                             raw_event: serde_json::json!({
                                 "team": &team_id,
                             }),
-                            channel_name: None,
+                            channel_name,
                             guild_id: if team_id.is_empty() {
                                 None
                             } else {
