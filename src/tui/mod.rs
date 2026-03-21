@@ -347,6 +347,7 @@ impl App {
             MouseEventKind::ScrollUp => {
                 match self.active_tab {
                     Tab::Sessions => self.sessions_panel.scroll_up(3),
+                    Tab::Agents => self.agents_panel.scroll_up(3),
                     Tab::Logs => self.logs_panel.scroll_up(3),
                     _ => {}
                 }
@@ -354,6 +355,7 @@ impl App {
             MouseEventKind::ScrollDown => {
                 match self.active_tab {
                     Tab::Sessions => self.sessions_panel.scroll_down(3),
+                    Tab::Agents => self.agents_panel.scroll_down(3),
                     Tab::Logs => self.logs_panel.scroll_down(3),
                     _ => {}
                 }

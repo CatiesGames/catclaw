@@ -507,6 +507,44 @@ impl AgentsPanel {
         servers.into_iter().collect()
     }
 
+    /// Scroll the active list up by `n` items (for mouse wheel).
+    pub fn scroll_up(&mut self, n: usize) {
+        match self.mode {
+            Mode::Tools => {
+                self.tool_selected = self.tool_selected.saturating_sub(n);
+            }
+            Mode::Normal => {
+                self.selected = self.selected.saturating_sub(n);
+            }
+            Mode::Skills => {
+                self.skill_selected = self.skill_selected.saturating_sub(n);
+            }
+            _ => {}
+        }
+    }
+
+    /// Scroll the active list down by `n` items (for mouse wheel).
+    pub fn scroll_down(&mut self, n: usize) {
+        match self.mode {
+            Mode::Tools => {
+                if !self.tool_entries.is_empty() {
+                    self.tool_selected = (self.tool_selected + n).min(self.tool_entries.len() - 1);
+                }
+            }
+            Mode::Normal => {
+                if !self.agents.is_empty() {
+                    self.selected = (self.selected + n).min(self.agents.len() - 1);
+                }
+            }
+            Mode::Skills => {
+                if !self.skill_entries.is_empty() {
+                    self.skill_selected = (self.skill_selected + n).min(self.skill_entries.len() - 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn toggle_tool(&mut self) {
         if let Some(entry) = self.tool_entries.get_mut(self.tool_selected) {
             if entry.denied {
@@ -1063,6 +1101,27 @@ impl Component for AgentsPanel {
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     self.tool_selected = self.tool_selected.saturating_sub(1);
+                    Action::None
+                }
+                KeyCode::PageDown | KeyCode::Char('d') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if !self.tool_entries.is_empty() {
+                        self.tool_selected =
+                            (self.tool_selected + 15).min(self.tool_entries.len() - 1);
+                    }
+                    Action::None
+                }
+                KeyCode::PageUp | KeyCode::Char('u') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.tool_selected = self.tool_selected.saturating_sub(15);
+                    Action::None
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    self.tool_selected = 0;
+                    Action::None
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    if !self.tool_entries.is_empty() {
+                        self.tool_selected = self.tool_entries.len() - 1;
+                    }
                     Action::None
                 }
                 KeyCode::Char(' ') => {
@@ -1681,7 +1740,7 @@ impl AgentsPanel {
 
         // Help
         let help = Paragraph::new(
-            " Space Toggle (✅ allowed → 🔒 approval → 🚫 denied)  │  Enter Save  Esc Cancel",
+            " Space Toggle  j/k ↑↓  PgDn/PgUp  g/G Home/End  │  Enter Save  Esc Cancel",
         )
         .style(Style::default().fg(Theme::OVERLAY0).bg(Theme::MANTLE));
         frame.render_widget(help, chunks[3]);
