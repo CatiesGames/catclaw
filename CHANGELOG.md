@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.16.1](https://github.com/CatiesGames/catclaw/compare/v0.16.0...v0.16.1) (2026-03-21)
+
+
+### Bug Fixes
+
+* HTTP MCP server headers 的 ${VAR} 由 CatClaw 預先展開 ([c4bf7f5](https://github.com/CatiesGames/catclaw/commit/c4bf7f51975e679832fd29fa4a4c1530b06a6b9c))
+* User MCP Tools 指引改為通用寫法，移除 ToolSearch 誤導 ([41a8717](https://github.com/CatiesGames/catclaw/commit/41a8717e7978ac3def7a295e8a5aea25147ab9ef))
+
 ## [0.16.0](https://github.com/CatiesGames/catclaw/compare/v0.15.2...v0.16.0) (2026-03-21)
 
 
