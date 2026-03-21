@@ -298,9 +298,16 @@ async fn probe_http(
         }
     }
 
+    // Prefer plain JSON over SSE for discovery (simpler to parse).
+    // Streamable HTTP servers that support it will respect Accept header.
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static("application/json, text/event-stream"),
+    );
+
     let client = reqwest::Client::new();
 
-    // Initialize
+    // Initialize (use 2025-03-26 protocol version for Streamable HTTP)
     let init_resp = client
         .post(url)
         .headers(headers.clone())
@@ -309,7 +316,7 @@ async fn probe_http(
             "id": 1,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": "2025-03-26",
                 "capabilities": {},
                 "clientInfo": { "name": "catclaw-discovery", "version": "1.0" }
             }
@@ -325,6 +332,8 @@ async fn probe_http(
             init_resp.status()
         ));
     }
+    // Consume initialize response body (may be SSE or JSON, we don't need it)
+    let _ = init_resp.text().await;
 
     // Send initialized notification (fire and forget)
     let _ = client
@@ -350,10 +359,33 @@ async fn probe_http(
         .await
         .map_err(|e| format!("server '{}': tools/list failed: {}", name, e))?;
 
-    let body: Value = resp
-        .json()
+    let resp_text = resp
+        .text()
         .await
-        .map_err(|e| format!("server '{}': parse tools/list response: {}", name, e))?;
+        .map_err(|e| format!("server '{}': read tools/list response: {}", name, e))?;
+
+    // HTTP Streamable MCP may return SSE (text/event-stream) with "data: {...}" lines
+    // or plain JSON. Try plain JSON first, then SSE fallback.
+    let body: Value = if let Ok(v) = serde_json::from_str(&resp_text) {
+        v
+    } else {
+        // Try SSE: find last "data: " line that contains our response (id=2)
+        let mut found = None;
+        for line in resp_text.lines() {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(v) = serde_json::from_str::<Value>(data) {
+                    if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                        found = Some(v);
+                    }
+                }
+            }
+        }
+        found.ok_or_else(|| format!(
+            "server '{}': tools/list response is not JSON or SSE: {}",
+            name,
+            &resp_text[..resp_text.len().min(200)]
+        ))?
+    };
 
     let mut tools = Vec::new();
     if let Some(tool_arr) = body
