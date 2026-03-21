@@ -533,6 +533,9 @@ async fn generate_diary(agent: &Agent, transcript_text: &str) -> DiaryResult {
         .replace("{transcript}", transcript_text);
 
     // Call claude -p --max-turns 1 --output-format text
+    // --tools "" disables all built-in tools; --strict-mcp-config with an empty
+    // config ignores global MCP plugins (pencil, LSP, etc.) so the model has no
+    // callable tools and cannot exceed --max-turns 1.
     let result = Command::new("claude")
         .args([
             "-p",
@@ -542,6 +545,11 @@ async fn generate_diary(agent: &Agent, transcript_text: &str) -> DiaryResult {
             "--output-format",
             "text",
             "--dangerously-skip-permissions",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{}",
         ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
