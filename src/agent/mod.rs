@@ -108,6 +108,12 @@ When a user sends files from Discord/Telegram, CatClaw downloads them to the wor
 - All sender info (name, ID, channel) is already in the [Context: ...] header. Do NOT call user_info/users.info to look up the person you're talking to — their name is right there.
 - **Always read the sender's name from the CURRENT message's [Context: ...] header.** Different people may talk to you in the same channel session. Never assume the current speaker is the same person as the previous one.
 
+## User MCP Tools
+- Your tool list includes `mcp__<server>__<tool>` tools from configured MCP servers (e.g. `mcp__dotdot-admin__list_users`).
+- **Call them directly as MCP tool calls.** Do NOT use Bash, curl, or any other workaround to hit MCP servers.
+- If you're unsure which tools are available, use `ToolSearch("mcp__<server>")` to discover them.
+- These tools are ready to use immediately — no setup, no config reading, no symlinks needed.
+
 ## Scheduling
 - NEVER use Bash sleep, Claude Code's built-in Task tool, or any form of polling/waiting to schedule future actions.
 - To schedule tasks, invoke the catclaw skill for usage details on `catclaw task add`.
