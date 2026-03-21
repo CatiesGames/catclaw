@@ -4,8 +4,8 @@ use serenity::all::{
     CreateAttachment, CreateButton, CreateChannel, CreateCommand, CreateEmbed,
     CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateThread,
     EditChannel, EditMessage, EventHandler, GatewayIntents, GuildId, Interaction, Message,
-    MessageId, PermissionOverwrite, PermissionOverwriteType, Permissions, ReactionType, RoleId,
-    Ready, UserId,
+    MessageId, MessageType, PermissionOverwrite, PermissionOverwriteType, Permissions,
+    ReactionType, RoleId, Ready, UserId,
 };
 use serenity::builder::GetMessages;
 use serenity::Client;
@@ -87,6 +87,13 @@ impl EventHandler for Handler {
             return;
         }
 
+        // Ignore thread creation system messages — these appear in the parent channel
+        // when a user creates a thread. Without this filter, the thread title gets
+        // routed to the parent channel session as if it were a regular user message.
+        if matches!(msg.kind, MessageType::ThreadCreated | MessageType::ThreadStarterMessage) {
+            return;
+        }
+
         let channel_id_str = msg.channel_id.get().to_string();
         let is_dm = msg.guild_id.is_none();
         let sender_id = msg.author.id.get().to_string();
@@ -146,8 +153,23 @@ impl EventHandler for Handler {
             })
             .collect();
 
-        let thread_id = if msg.thread.is_some() {
-            Some(channel_id_str.clone())
+        // Detect if this message is inside a thread.
+        // In Discord, thread channels have their own channel_id.
+        // Check guild cache for thread channel type (guild.threads, not guild.channels).
+        let thread_id = if !is_dm {
+            let is_thread = msg.guild_id.and_then(|gid| {
+                _ctx.cache.guild(gid).and_then(|guild| {
+                    // guild.channels doesn't include threads; guild.threads does
+                    guild.threads.iter()
+                        .find(|t| t.id == msg.channel_id)
+                        .map(|t| matches!(t.kind, SerenityChannelType::PublicThread | SerenityChannelType::PrivateThread))
+                })
+            }).unwrap_or(false);
+            if is_thread {
+                Some(channel_id_str.clone())
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -383,9 +405,20 @@ fn resolve_channel_name(
     if is_dm {
         Some(format!("dm.{}", sender_name))
     } else if let Some(guild_id) = guild_id {
-        cache
-            .guild(guild_id)
-            .and_then(|guild| guild.channels.get(&channel_id).map(|ch| ch.name.clone()))
+        cache.guild(guild_id).and_then(|guild| {
+            // Check guild.channels first, then guild.threads (threads are separate)
+            guild
+                .channels
+                .get(&channel_id)
+                .map(|ch| ch.name.clone())
+                .or_else(|| {
+                    guild
+                        .threads
+                        .iter()
+                        .find(|t| t.id == channel_id)
+                        .map(|t| t.name.clone())
+                })
+        })
     } else {
         None
     }
