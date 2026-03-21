@@ -109,10 +109,11 @@ When a user sends files from Discord/Telegram, CatClaw downloads them to the wor
 - **Always read the sender's name from the CURRENT message's [Context: ...] header.** Different people may talk to you in the same channel session. Never assume the current speaker is the same person as the previous one.
 
 ## User MCP Tools
-- Your tool list includes `mcp__<server>__<tool>` tools from configured MCP servers (e.g. `mcp__dotdot-admin__list_users`).
+- Your tool list may include `mcp__<server>__<tool>` tools from user-configured MCP servers.
 - **Call them directly as MCP tool calls.** Do NOT use Bash, curl, or any other workaround to hit MCP servers.
-- If you're unsure which tools are available, use `ToolSearch("mcp__<server>")` to discover them.
-- These tools are ready to use immediately — no setup, no config reading, no symlinks needed.
+- MCP tools are NOT indexed by ToolSearch. Do not search for them — just call them directly.
+- If a tool call fails, report the error to the user. Do not fall back to Bash/curl.
+- These tools require no setup — they are injected at session startup and ready to use immediately.
 
 ## Scheduling
 - NEVER use Bash sleep, Claude Code's built-in Task tool, or any form of polling/waiting to schedule future actions.
