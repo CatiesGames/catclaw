@@ -318,19 +318,54 @@ impl Agent {
                         for (name, def) in servers {
                             if name == "catclaw" { continue; } // skip, we add our own
                             let mut server_def = def.clone();
-                            // Merge env vars from mcp_env config
+
+                            // Build combined env: .mcp.json "env" + mcp_env config
+                            let mut combined_env: HashMap<String, String> = HashMap::new();
+                            if let Some(env_obj) = def.get("env").and_then(|v| v.as_object()) {
+                                for (k, v) in env_obj {
+                                    if let Some(s) = v.as_str() {
+                                        combined_env.insert(k.clone(), s.to_string());
+                                    }
+                                }
+                            }
                             if let Some(env_map) = mcp_env.get(name) {
-                                if !env_map.is_empty() {
-                                    if let Some(obj) = server_def.as_object_mut() {
-                                        let existing_env = obj.entry("env").or_insert_with(|| serde_json::json!({}));
-                                        if let Some(env_obj) = existing_env.as_object_mut() {
-                                            for (k, v) in env_map {
-                                                env_obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+                                for (k, v) in env_map {
+                                    combined_env.insert(k.clone(), v.clone());
+                                }
+                            }
+
+                            if let Some(obj) = server_def.as_object_mut() {
+                                // Merge env vars into env field (for stdio servers)
+                                if !combined_env.is_empty() {
+                                    let env_val = obj.entry("env").or_insert_with(|| serde_json::json!({}));
+                                    if let Some(env_obj) = env_val.as_object_mut() {
+                                        for (k, v) in &combined_env {
+                                            env_obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+                                        }
+                                    }
+                                }
+
+                                // For HTTP servers: resolve ${VAR} in headers using combined env.
+                                // Claude Code may not expand env vars for HTTP type servers,
+                                // so we do it here to ensure auth headers have real values.
+                                if let Some(headers) = obj.get_mut("headers") {
+                                    if let Some(hdr_obj) = headers.as_object_mut() {
+                                        for (_hk, hv) in hdr_obj.iter_mut() {
+                                            if let Some(s) = hv.as_str() {
+                                                let mut resolved = s.to_string();
+                                                for (ek, ev) in &combined_env {
+                                                    let placeholder = format!("${{{}}}", ek);
+                                                    resolved = resolved.replace(&placeholder, ev);
+                                                }
+                                                if resolved != s {
+                                                    *hv = serde_json::Value::String(resolved);
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+
                             mcp_servers.insert(name.clone(), server_def);
                         }
                     }
