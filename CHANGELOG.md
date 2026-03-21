@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.15.0](https://github.com/CatiesGames/catclaw/compare/v0.14.1...v0.15.0) (2026-03-21)
+
+
+### Features
+
+* MCP env 管理 + MCP tools 自動探測 ([cbbc0f2](https://github.com/CatiesGames/catclaw/commit/cbbc0f2310c8b85287f36e5c807d5f3536b89370))
+
+
+### Bug Fixes
+
+* BOOT.md 分支補上 active_handles 註冊，/stop 不再失效 ([40aa242](https://github.com/CatiesGames/catclaw/commit/40aa242faa4b0ec09cb3dbc4e33a8c3f85db563a))
+* Discord thread 建立事件誤觸發主頻道回覆 + thread 偵測邏輯修正 ([e6385c5](https://github.com/CatiesGames/catclaw/commit/e6385c5582e9446d86365c01e8ca434d0a23b9a5))
+
 ## [0.14.1](https://github.com/CatiesGames/catclaw/compare/v0.14.0...v0.14.1) (2026-03-20)
 
 
