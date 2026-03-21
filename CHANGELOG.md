@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.2](https://github.com/CatiesGames/catclaw/compare/v0.16.1...v0.16.2) (2026-03-21)
+
+
+### Bug Fixes
+
+* Slack 斜線命令解析頻道名稱 + MCP discovery summary log ([c13419a](https://github.com/CatiesGames/catclaw/commit/c13419aabbba23031929db6c24c2e26e24918099))
+
 ## [0.16.1](https://github.com/CatiesGames/catclaw/compare/v0.16.0...v0.16.1) (2026-03-21)
 
 
