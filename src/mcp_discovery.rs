@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::{json, Value};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Result of discovering tools from a single MCP server.
 pub struct McpServerTools {
@@ -23,18 +23,30 @@ pub async fn discover_all(
     mcp_json_path: &Path,
     mcp_env: &HashMap<String, HashMap<String, String>>,
 ) -> Vec<McpServerTools> {
+    debug!(path = %mcp_json_path.display(), "MCP discovery: reading .mcp.json");
     let content = match std::fs::read_to_string(mcp_json_path) {
         Ok(c) => c,
-        Err(_) => return vec![],
+        Err(e) => {
+            debug!(path = %mcp_json_path.display(), error = %e, "MCP discovery: no .mcp.json found");
+            return vec![];
+        }
     };
     let parsed: Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return vec![],
+        Err(e) => {
+            warn!(error = %e, "MCP discovery: failed to parse .mcp.json");
+            return vec![];
+        }
     };
     let servers = match parsed.get("mcpServers").and_then(|v| v.as_object()) {
         Some(s) => s.clone(),
-        None => return vec![],
+        None => {
+            debug!("MCP discovery: no mcpServers key in .mcp.json");
+            return vec![];
+        }
     };
+    let server_count = servers.keys().filter(|k| *k != "catclaw").count();
+    info!(servers = server_count, "MCP discovery: probing servers");
 
     let mut handles = Vec::new();
 
@@ -91,7 +103,7 @@ async fn probe_server(
         .unwrap_or("stdio");
 
     match server_type {
-        "http" | "sse" => probe_http(name, def).await,
+        "http" | "sse" => probe_http(name, def, env).await,
         _ => probe_stdio(name, def, env).await,
     }
 }
@@ -234,18 +246,64 @@ async fn probe_stdio(
     Ok(tools)
 }
 
+/// Resolve `${VAR}` placeholders in a string using the combined env map.
+/// Supports `${VAR}` and `${VAR:-default}` syntax.
+fn resolve_vars(s: &str, env: &HashMap<String, String>) -> String {
+    let mut result = s.to_string();
+    // Simple ${VAR} replacement (no nested, no default for now)
+    for (key, value) in env {
+        let placeholder = format!("${{{}}}", key);
+        result = result.replace(&placeholder, value);
+    }
+    result
+}
+
 /// Probe an HTTP MCP server by POSTing JSON-RPC requests.
-async fn probe_http(name: &str, def: &Value) -> Result<Vec<String>, String> {
+async fn probe_http(
+    name: &str,
+    def: &Value,
+    extra_env: &HashMap<String, String>,
+) -> Result<Vec<String>, String> {
     let url = def
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("server '{}': missing 'url'", name))?;
+
+    // Build combined env: .mcp.json "env" + mcp_env config
+    let mut env_vars: HashMap<String, String> = HashMap::new();
+    if let Some(env_obj) = def.get("env").and_then(|v| v.as_object()) {
+        for (k, v) in env_obj {
+            if let Some(s) = v.as_str() {
+                env_vars.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    for (k, v) in extra_env {
+        env_vars.insert(k.clone(), v.clone());
+    }
+
+    // Build HTTP headers from .mcp.json "headers" with ${VAR} resolution
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(hdr_obj) = def.get("headers").and_then(|v| v.as_object()) {
+        for (k, v) in hdr_obj {
+            if let Some(s) = v.as_str() {
+                let resolved = resolve_vars(s, &env_vars);
+                if let (Ok(name), Ok(value)) = (
+                    reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                    reqwest::header::HeaderValue::from_str(&resolved),
+                ) {
+                    headers.insert(name, value);
+                }
+            }
+        }
+    }
 
     let client = reqwest::Client::new();
 
     // Initialize
     let init_resp = client
         .post(url)
+        .headers(headers.clone())
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -271,6 +329,7 @@ async fn probe_http(name: &str, def: &Value) -> Result<Vec<String>, String> {
     // Send initialized notification (fire and forget)
     let _ = client
         .post(url)
+        .headers(headers.clone())
         .json(&json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
@@ -281,6 +340,7 @@ async fn probe_http(name: &str, def: &Value) -> Result<Vec<String>, String> {
     // tools/list
     let resp = client
         .post(url)
+        .headers(headers)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 2,
