@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.3](https://github.com/CatiesGames/catclaw/compare/v0.16.2...v0.16.3) (2026-03-21)
+
+
+### Bug Fixes
+
+* diary subprocess 隔離所有工具避免 max-turns 超限 ([539ce8b](https://github.com/CatiesGames/catclaw/commit/539ce8b8ff7cfabdcc836f5719f39293e03a21e3))
+
 ## [0.16.2](https://github.com/CatiesGames/catclaw/compare/v0.16.1...v0.16.2) (2026-03-21)
 
 
