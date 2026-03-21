@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.16.0](https://github.com/CatiesGames/catclaw/compare/v0.15.2...v0.16.0) (2026-03-21)
+
+
+### Features
+
+* TUI Agents 加滾輪 + PageUp/Down/Home/End/g/G 導航 ([d8badbc](https://github.com/CatiesGames/catclaw/commit/d8badbc08b2ee84c530f61d06d2c02e0ba381004))
+
+
+### Bug Fixes
+
+* system prompt 加 User MCP Tools 指令，避免 agent 用 Bash/curl 打 MCP ([217e480](https://github.com/CatiesGames/catclaw/commit/217e4805315836203a114c55c11881b7a63c4b13))
+
 ## [0.15.2](https://github.com/CatiesGames/catclaw/compare/v0.15.1...v0.15.2) (2026-03-21)
 
 
