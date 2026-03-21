@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/CatiesGames/catclaw/compare/v0.15.0...v0.15.1) (2026-03-21)
+
+
+### Bug Fixes
+
+* HTTP MCP discovery 帶 auth headers + 變數替換 + 加日誌 ([0031425](https://github.com/CatiesGames/catclaw/commit/00314259c79480e25cb3a91c46d20d85488c85c1))
+
 ## [0.15.0](https://github.com/CatiesGames/catclaw/compare/v0.14.1...v0.15.0) (2026-03-21)
 
 
