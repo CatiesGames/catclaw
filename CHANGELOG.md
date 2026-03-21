@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.2](https://github.com/CatiesGames/catclaw/compare/v0.15.1...v0.15.2) (2026-03-21)
+
+
+### Bug Fixes
+
+* HTTP MCP discovery 支援 Streamable HTTP (SSE) + Accept header ([d65579a](https://github.com/CatiesGames/catclaw/commit/d65579a4d08b841ad99f50510632507eec5517e9))
+
 ## [0.15.1](https://github.com/CatiesGames/catclaw/compare/v0.15.0...v0.15.1) (2026-03-21)
 
 
