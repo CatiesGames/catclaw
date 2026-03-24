@@ -401,10 +401,10 @@ impl Agent {
                 let catclaw_bin = std::env::current_exe()
                     .unwrap_or_else(|_| std::path::PathBuf::from("catclaw"));
                 let hook_cmd = format!(
-                    "{} --config {} hook pre-tool --session-key {}",
+                    "{} --config '{}' hook pre-tool --session-key '{}'",
                     catclaw_bin.display(),
-                    cfg_path.display(),
-                    session_key,
+                    cfg_path.display().to_string().replace('\'', "'\\''"),
+                    session_key.replace('\'', "'\\''"),
                 );
                 let settings = serde_json::json!({
                     "hooks": {
