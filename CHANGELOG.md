@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.4](https://github.com/CatiesGames/catclaw/compare/v0.16.3...v0.16.4) (2026-03-24)
+
+
+### Bug Fixes
+
+* shell-quote session-key in hook command 避免中文字/空格解析錯誤 ([eea2ee5](https://github.com/CatiesGames/catclaw/commit/eea2ee54242202e2b44c72f1dc3e985a8fe4d170))
+
 ## [0.16.3](https://github.com/CatiesGames/catclaw/compare/v0.16.2...v0.16.3) (2026-03-21)
 
 
