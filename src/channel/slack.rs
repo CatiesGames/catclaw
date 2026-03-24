@@ -545,10 +545,35 @@ impl ChannelAdapter for SlackAdapter {
                                 };
                             let _ = approval_tx.send((request_id, approved));
 
-                            // Update the approval card: replace buttons with result
+                            // Update the approval card: keep original blocks, replace actions with result
                             if !msg_channel.is_empty() && !msg_ts.is_empty() {
                                 let status = if approved { "Approved" } else { "Denied" };
                                 let emoji = if approved { ":white_check_mark:" } else { ":x:" };
+
+                                // Preserve original header + section blocks, replace actions block
+                                let mut updated_blocks: Vec<serde_json::Value> = payload
+                                    .get("message")
+                                    .and_then(|m| m.get("blocks"))
+                                    .and_then(|b| b.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter(|b| {
+                                                b.get("type")
+                                                    .and_then(|t| t.as_str())
+                                                    != Some("actions")
+                                            })
+                                            .cloned()
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                updated_blocks.push(serde_json::json!({
+                                    "type": "context",
+                                    "elements": [{
+                                        "type": "mrkdwn",
+                                        "text": format!("{} *{}* by {}", emoji, status, clicker)
+                                    }]
+                                }));
+
                                 let _ = slack_api(
                                     &http,
                                     &bot_token,
@@ -556,15 +581,7 @@ impl ChannelAdapter for SlackAdapter {
                                     &serde_json::json!({
                                         "channel": msg_channel,
                                         "ts": msg_ts,
-                                        "blocks": [
-                                            {
-                                                "type": "section",
-                                                "text": {
-                                                    "type": "mrkdwn",
-                                                    "text": format!("{} {} by {}", emoji, status, clicker)
-                                                }
-                                            }
-                                        ],
+                                        "blocks": updated_blocks,
                                         "text": format!("{} by {}", status, clicker),
                                     }),
                                 )
