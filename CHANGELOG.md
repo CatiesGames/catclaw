@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.5](https://github.com/CatiesGames/catclaw/compare/v0.16.4...v0.16.5) (2026-03-24)
+
+
+### Bug Fixes
+
+* Slack 核准後保留原始 tool/input 內容，只替換 actions block ([365e740](https://github.com/CatiesGames/catclaw/commit/365e7404ba31359f8b06894acdba1c93252c9d5f))
+
 ## [0.16.4](https://github.com/CatiesGames/catclaw/compare/v0.16.3...v0.16.4) (2026-03-24)
 
 
