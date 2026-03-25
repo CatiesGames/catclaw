@@ -565,17 +565,18 @@ impl ConfigPanel {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 ConfigEvent::SetResult { key, value, needs_restart } => {
-                    if needs_restart {
-                        self.status_msg = Some(format!("Set {} = {} (requires restart)", key, value));
+                    let msg = if needs_restart {
+                        format!("Set {} = {} (requires restart)", key, value)
                     } else {
-                        self.status_msg = Some(format!("Set {} = {} (applied)", key, value));
-                    }
+                        format!("Set {} = {} (applied)", key, value)
+                    };
                     // Propagate log level change to LogsPanel
                     if key == "logging.level" {
                         self.pending_action = Some(Action::SetLogLevel(value.clone()));
                     }
-                    // Reload from disk to stay in sync
+                    // Reload from disk to stay in sync, then restore the success message
                     self.reload_config();
+                    self.status_msg = Some(msg);
                 }
                 ConfigEvent::SetError(e) => {
                     self.status_msg = Some(format!("Error: {}", e));

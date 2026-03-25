@@ -1986,10 +1986,15 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
     ];
 
     for (platform_key, platform_label) in social_platforms {
-        let already = match *platform_key {
-            "instagram" => config.social.instagram.is_some(),
-            _ => config.social.threads.is_some(),
+        let existing_cfg: Option<(String, String, String, String)> = match *platform_key {
+            "instagram" => config.social.instagram.as_ref().map(|c| {
+                (c.token_env.clone(), c.user_id.clone(), c.admin_channel.clone(), c.mode.clone())
+            }),
+            _ => config.social.threads.as_ref().map(|c| {
+                (c.token_env.clone(), c.user_id.clone(), c.admin_channel.clone(), c.mode.clone())
+            }),
         };
+        let already = existing_cfg.is_some();
 
         let prompt = if already {
             format!("{} ✓ (reconfigure?)", platform_label)
@@ -2004,35 +2009,86 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
 
         cli_ui::section_empty();
 
-        // token env var name
-        let token_env_default = format!("CATCLAW_{}_TOKEN", platform_key.to_uppercase());
-        cli_ui::section_line(&format!(
-            "{}Env var name for access token{} (e.g. {}):",
-            cli_ui::SUBTEXT, cli_ui::RESET, token_env_default
-        ));
-        let token_env: String = Input::new()
-            .default(token_env_default.clone())
-            .interact_text()
-            .unwrap_or(token_env_default.clone());
+        // ── Step-by-step instructions ──
+        if *platform_key == "instagram" {
+            cli_ui::section_header("📸", "Instagram Setup");
+            cli_ui::section_empty();
+            cli_ui::section_line(&format!(
+                "{}1.{} Go to {}Meta Business Suite → Settings → System Users{}",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}2.{} Create a System User → Add Assets → select your Instagram account",
+                cli_ui::MAUVE, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}3.{} Generate Token → copy the {}System User Token{}",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_empty();
+            cli_ui::section_hint("Your User ID: Meta Business Suite → Instagram account → About → Instagram ID");
+        } else {
+            cli_ui::section_header("🧵", "Threads Setup");
+            cli_ui::section_empty();
+            cli_ui::section_line(&format!(
+                "{}1.{} Go to {}Meta Developer Console → Your App → Threads API{}",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}2.{} Generate a {}long-lived access token{} (valid 60 days)",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_empty();
+            cli_ui::section_hint("Your User ID: same numeric ID as your Instagram/Threads account");
+        }
+        cli_ui::section_empty();
+        cli_ui::section_divider();
+        cli_ui::section_empty();
 
-        // token value
-        let token_value: String = dialoguer::Password::new()
-            .with_prompt(format!("  {} access token (stored in .env)", platform_label))
-            .allow_empty_password(true)
-            .interact()
-            .unwrap_or_default();
+        // Use a fixed env var name — no need to expose this to users
+        let token_env = format!("CATCLAW_{}_TOKEN", platform_key.to_uppercase());
+
+        // Token — show existing if already set, offer to keep or replace
+        let existing_token = std::env::var(&token_env).ok()
+            .or_else(|| existing_cfg.as_ref().and_then(|(env, ..)| std::env::var(env).ok()));
+        let token_value: String = if let Some(ref t) = existing_token {
+            cli_ui::section_ok(&format!("Token already set ({}...)", &t[..t.len().min(8)]));
+            cli_ui::section_empty();
+            let keep = cli_ui::section_select(&["Keep existing token", "Enter a new token"], 0);
+            cli_ui::section_empty();
+            if keep == 0 {
+                String::new() // keep as-is
+            } else {
+                cli_ui::section_footer();
+                dialoguer::Password::new()
+                    .with_prompt(format!("  Paste your {} token", platform_label))
+                    .allow_empty_password(true)
+                    .interact()
+                    .unwrap_or_default()
+            }
+        } else {
+            cli_ui::section_footer();
+            dialoguer::Password::new()
+                .with_prompt(format!("  Paste your {} token", platform_label))
+                .allow_empty_password(true)
+                .interact()
+                .unwrap_or_default()
+        };
         if !token_value.is_empty() {
             write_env_var(&mut env_lines, &token_env, &token_value);
             std::env::set_var(&token_env, &token_value);
+        } else if existing_token.is_none() {
+            cli_ui::section_warn("No token provided — skipping");
+            cli_ui::section_empty();
+            continue;
         }
 
-        // user id
-        cli_ui::section_line(&format!(
-            "{}{}  User ID{}:",
-            cli_ui::SUBTEXT, platform_label, cli_ui::RESET
-        ));
+        // user id — pre-fill existing value
+        let existing_user_id = existing_cfg.as_ref().map(|(_, uid, ..)| uid.as_str()).unwrap_or("");
         let user_id: String = Input::new()
-            .with_prompt("  User ID")
+            .with_prompt("  Your numeric account ID")
+            .default(existing_user_id.to_string())
+            .allow_empty(false)
             .interact_text()
             .unwrap_or_default();
         if user_id.is_empty() {
@@ -2041,13 +2097,16 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
             continue;
         }
 
-        // admin channel
-        cli_ui::section_line(&format!(
-            "{}Admin channel{} for forward cards (e.g. discord:channel:123456):",
-            cli_ui::SUBTEXT, cli_ui::RESET
-        ));
+        // admin channel — pre-fill existing value
+        cli_ui::section_empty();
+        cli_ui::section_hint("Forward cards from this platform will be sent to this channel.");
+        cli_ui::section_hint("Use the channel/chat numeric ID, not the name.");
+        cli_ui::section_hint("discord:channel:<ID>  telegram:chat:<ID>  slack:channel:<ID>");
+        let existing_admin = existing_cfg.as_ref().map(|(_, _, ch, _)| ch.as_str()).unwrap_or("");
         let admin_channel: String = Input::new()
             .with_prompt("  Admin channel")
+            .default(existing_admin.to_string())
+            .allow_empty(false)
             .interact_text()
             .unwrap_or_default();
         if admin_channel.is_empty() {
@@ -2056,13 +2115,16 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
             continue;
         }
 
-        // mode
-        cli_ui::section_line(&format!(
-            "{}Receive mode{}: webhook (real-time, needs public URL) or polling (interval)?",
-            cli_ui::SUBTEXT, cli_ui::RESET
-        ));
-        let mode_choice = cli_ui::section_select(&["polling", "webhook"], 0);
-        let mode = if mode_choice == 1 { "webhook" } else { "polling" }.to_string();
+        // mode — default to existing mode if reconfiguring
+        cli_ui::section_empty();
+        cli_ui::section_line("How should CatClaw receive events from this platform?");
+        cli_ui::section_hint("polling: checks for new events every few minutes (simpler setup)");
+        cli_ui::section_hint("webhook: Meta pushes events instantly (needs a public URL)");
+        cli_ui::section_empty();
+        let existing_mode = existing_cfg.as_ref().map(|(.., m)| m.as_str()).unwrap_or("webhook");
+        let mode_default = if existing_mode == "polling" { 1 } else { 0 };
+        let mode_choice = cli_ui::section_select(&["webhook (real-time, recommended)", "polling (fallback, no public URL needed)"], mode_default);
+        let mode = if mode_choice == 0 { "webhook" } else { "polling" }.to_string();
 
         match *platform_key {
             "instagram" => {
