@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/CatiesGames/catclaw/compare/v0.17.0...v0.17.1) (2026-03-25)
+
+
+### Bug Fixes
+
+* diary 生成時 MCP 配置傳入正確的 mcpServers 結構 ([3ac79f2](https://github.com/CatiesGames/catclaw/commit/3ac79f2097ad9a1df8dbf5f95c5913b0408d4db6))
+
 ## [0.17.0](https://github.com/CatiesGames/catclaw/compare/v0.16.5...v0.17.0) (2026-03-25)
 
 
