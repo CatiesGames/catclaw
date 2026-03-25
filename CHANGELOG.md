@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.0](https://github.com/CatiesGames/catclaw/compare/v0.17.1...v0.18.0) (2026-03-25)
+
+
+### Features
+
+* Social Inbox 全設定可透過 TUI/CLI 設定 ([660318c](https://github.com/CatiesGames/catclaw/commit/660318c2c9910cc472f1d1d42dafd85177af7bcf))
+* TUI Skills 清單顯示 built-in 標記 ([a71c318](https://github.com/CatiesGames/catclaw/commit/a71c3188238647a287d8e5def3da62ff10fced31))
+
 ## [0.17.1](https://github.com/CatiesGames/catclaw/compare/v0.17.0...v0.17.1) (2026-03-25)
 
 
