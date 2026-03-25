@@ -1,7 +1,7 @@
 mod loader;
 pub mod models;
 
-pub use loader::{AgentLoader, SkillInfo, SkillSource, SkillsConfig};
+pub use loader::{AgentLoader, SkillInfo, SkillSource, SkillsConfig, BUILTIN_SKILL_NAMES};
 use crate::config::ApprovalConfig;
 
 use std::collections::HashMap;

@@ -4,7 +4,7 @@ use ratatui::widgets::*;
 
 use super::theme::Theme;
 use super::{Action, Component};
-use crate::agent::{AgentLoader, SkillInfo, SkillSource};
+use crate::agent::{AgentLoader, SkillInfo, SkillSource, BUILTIN_SKILL_NAMES};
 use crate::config::Config;
 
 /// A skill from the shared pool with per-agent enable status
@@ -76,9 +76,10 @@ impl SkillsPanel {
             // Read description from shared pool
             let skill_md = shared_dir.join(&name).join("SKILL.md");
             let description = read_skill_desc(&skill_md);
+            let is_builtin = BUILTIN_SKILL_NAMES.contains(&name.as_str());
 
             SkillEntry {
-                info: SkillInfo { name, is_enabled: !enabled_agents.is_empty(), description },
+                info: SkillInfo { name, is_enabled: !enabled_agents.is_empty(), description, is_builtin },
                 enabled_agents,
             }
         }).collect()
@@ -231,10 +232,21 @@ impl Component for SkillsPanel {
             } else {
                 entry.enabled_agents.join(", ")
             };
-            Row::new(vec![
+            let name_cell = if entry.info.is_builtin {
+                Cell::from(Line::from(vec![
+                    Span::styled(
+                        entry.info.name.clone(),
+                        style.add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() }),
+                    ),
+                    Span::styled(" built-in", Style::default().fg(Theme::OVERLAY0)),
+                ]))
+            } else {
                 Cell::from(entry.info.name.clone()).style(
                     style.add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })
-                ),
+                )
+            };
+            Row::new(vec![
+                name_cell,
                 Cell::from(entry.info.description.clone()).style(Style::default().fg(Theme::OVERLAY1)),
                 Cell::from(agents_str).style(Style::default().fg(Theme::SAPPHIRE)),
             ])
