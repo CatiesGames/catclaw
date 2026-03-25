@@ -681,11 +681,13 @@ impl Component for ConfigPanel {
                     let count = self.filtered_completions().len();
                     if count > 0 {
                         self.completion_idx = (self.completion_idx + 1).min(count - 1);
+                        self.accept_completion();
                     }
                     Action::None
                 }
                 KeyCode::Up if !self.completions.is_empty() => {
                     self.completion_idx = self.completion_idx.saturating_sub(1);
+                    self.accept_completion();
                     Action::None
                 }
                 KeyCode::Esc => {
