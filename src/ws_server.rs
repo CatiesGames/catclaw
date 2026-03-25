@@ -28,6 +28,7 @@ pub fn spawn(addr: String, gw: GatewayHandle) -> tokio::task::JoinHandle<()> {
         let webhook_router = crate::social::webhook::build_router(gw.clone());
         let app = Router::new()
             .route("/ws", get(ws_handler))
+            .route("/health", get(|| async { "ok" }))
             .merge(mcp_server::router())
             .merge(webhook_router)
             .with_state(gw);
