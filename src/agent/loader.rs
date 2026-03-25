@@ -12,6 +12,7 @@ pub struct SkillInfo {
     pub name: String,
     pub is_enabled: bool,
     pub description: String,
+    pub is_builtin: bool,
 }
 
 /// Skills config from {agent_workspace}/skills.toml
@@ -238,7 +239,8 @@ denied = []
                 if !path.join("SKILL.md").exists() { continue; }
                 let is_enabled = !skills_config.is_disabled(&name);
                 let description = read_skill_description_from_path(&path.join("SKILL.md"));
-                result.push(SkillInfo { name, is_enabled, description });
+                let is_builtin = BUILTIN_SKILL_NAMES.contains(&name.as_str());
+                result.push(SkillInfo { name, is_enabled, description, is_builtin });
             }
         }
 
@@ -1632,39 +1634,66 @@ catclaw social mode threads polling
 | `social.instagram.mode` | `webhook` / `polling` / `off` (default: `off`). CLI: `catclaw social mode instagram webhook` — prints the webhook URL. TUI: Config panel, also shows URL. |
 | `social.instagram.poll_interval_mins` | Polling interval (default 5, only when mode=polling) |
 | `social.instagram.admin_channel` | Forward card destination. Format: `discord:channel:<id>` / `telegram:chat:<id>` / `slack:channel:<id>` |
-| `social.instagram.token_env` | Env var holding the System User Token |
-| `social.instagram.app_secret_env` | Env var holding app secret (HMAC verification) |
-| `social.instagram.webhook_verify_token_env` | Env var holding hub verify token |
-| `social.instagram.user_id` | IG User ID |
-| `social.instagram.agent` | Agent to use for auto_reply |
+| `social.instagram.token_env` | Env var name for the System User Token (e.g. `CATCLAW_INSTAGRAM_TOKEN`) |
+| `social.instagram.token_value` | Actual token value — writes to `~/.catclaw/.env`, NOT TOML (masked in TUI) |
+| `social.instagram.app_secret_env` | Env var name for app secret (HMAC verification, webhook mode only) |
+| `social.instagram.app_secret_value` | Actual app secret value — writes to `~/.catclaw/.env` (masked) |
+| `social.instagram.webhook_verify_token_env` | Env var name for hub verify token (webhook mode only) |
+| `social.instagram.webhook_verify_token_value` | Actual verify token — writes to `~/.catclaw/.env` (masked) |
+| `social.instagram.user_id` | IG User ID (numeric, from Meta Business Manager) |
+| `social.instagram.subscribe` | Events to subscribe to (CSV): `comments`, `mentions`, `messages` |
+| `social.instagram.agent` | Agent for auto_reply sessions (default: `main`) |
+| `social.instagram.rules.count` | Read-only: number of rules |
+| `social.instagram.rules[N].match` | Rule N event type: `*` / `comments` / `mentions` / `messages` |
+| `social.instagram.rules[N].action` | Rule N action: `forward` / `auto_reply` / `auto_reply_template` / `ignore` |
+| `social.instagram.rules[N].keyword` | Rule N optional keyword filter (empty = clear) |
+| `social.instagram.rules[N].template` | Rule N template key (for `auto_reply_template`) |
+| `social.instagram.rules[N].agent` | Rule N agent override (for `auto_reply`) |
+| `social.instagram.rules.add` | Append a default rule (`match=*, action=forward`) |
+| `social.instagram.rules[N].delete` | Remove rule at index N |
+| `social.instagram.init` | Initialize platform section if not configured (set value to anything) |
 | `social.threads.mode` | `webhook` / `polling` / `off` (default: `off`). CLI: `catclaw social mode threads webhook` — prints the webhook URL. TUI: Config panel, also shows URL. |
 | `social.threads.poll_interval_mins` | Polling interval (default 5, only when mode=polling) |
 | `social.threads.admin_channel` | Forward card destination |
-| `social.threads.token_env` | OAuth token env var (60-day, needs periodic refresh) |
-| `social.threads.app_secret_env` | App secret env var |
-| `social.threads.webhook_verify_token_env` | Hub verify token env var |
+| `social.threads.token_env` | Env var name for OAuth token (60-day, needs periodic refresh) |
+| `social.threads.token_value` | Actual token value — writes to `~/.catclaw/.env` (masked) |
+| `social.threads.app_secret_env` | App secret env var name |
+| `social.threads.app_secret_value` | Actual app secret value — writes to `~/.catclaw/.env` (masked) |
+| `social.threads.webhook_verify_token_env` | Hub verify token env var name |
+| `social.threads.webhook_verify_token_value` | Actual verify token — writes to `~/.catclaw/.env` (masked) |
 | `social.threads.user_id` | Threads User ID |
-| `social.threads.agent` | Agent for auto_reply |
+| `social.threads.subscribe` | Events to subscribe to (CSV): `replies`, `mentions` |
+| `social.threads.agent` | Agent for auto_reply sessions (default: `main`) |
+| `social.threads.rules[N].*` | Same rule fields as instagram (match/action/keyword/template/agent) |
+| `social.threads.rules.add` | Append a default rule |
+| `social.threads.rules[N].delete` | Remove rule at index N |
+| `social.threads.init` | Initialize platform section if not configured |
 
-Rules are defined in `catclaw.toml` under `[[social.instagram.rules]]` / `[[social.threads.rules]]`:
+**Rules via CLI:**
+```bash
+catclaw config set social.instagram.init true          # Initialize if not configured
+catclaw config set social.instagram.rules.add ""       # Add default rule (match=*, forward)
+catclaw config set social.instagram.rules[0].match comments
+catclaw config set social.instagram.rules[0].action auto_reply
+catclaw config set social.instagram.rules[0].keyword "price"
+catclaw config set social.instagram.rules[0].delete "" # Remove rule 0
+catclaw config set social.instagram.token_value "EAA..." # Update token (writes to .env)
+```
 
+**TOML format** (for reference — use CLI/TUI instead):
 ```toml
 [[social.instagram.rules]]
-match = "comments"       # event type: comments | mentions | messages | *
-action = "forward"       # forward | auto_reply | auto_reply_template | ignore
+match = "comments"
+action = "forward"
 
 [[social.instagram.rules]]
 match = "mentions"
-keyword = "price"        # optional keyword filter
+keyword = "price"
 action = "auto_reply"
-agent = "support"        # optional agent override
-
-[[social.instagram.rules]]
-match = "*"
-action = "ignore"
+agent = "support"
 
 [social.instagram.templates]
-default_mention = "Thank you for mentioning us! We will reply soon."
+thanks = "Thank you for mentioning us!"
 ```
 
 ### MCP Tools (when social is configured)

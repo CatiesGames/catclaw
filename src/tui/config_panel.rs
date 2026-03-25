@@ -270,59 +270,87 @@ impl ConfigPanel {
         }
 
         // Social Inbox
+        let base = config.webhook_base_url();
         if let Some(ig) = &config.social.instagram {
-            let base = config.webhook_base_url();
-            entries.push(ConfigEntry {
-                key: "social.instagram.mode".to_string(),
-                value: ig.mode.clone(),
-                section: "Social: Instagram".to_string(),
-                editable: true,
-            });
-            entries.push(ConfigEntry {
-                key: "social.instagram.webhook_url".to_string(),
-                value: format!("{}/webhook/instagram", base),
-                section: "Social: Instagram".to_string(),
-                editable: false,
-            });
-            entries.push(ConfigEntry {
-                key: "social.instagram.poll_interval_mins".to_string(),
-                value: ig.poll_interval_mins.to_string(),
-                section: "Social: Instagram".to_string(),
-                editable: true,
-            });
-            entries.push(ConfigEntry {
-                key: "social.instagram.admin_channel".to_string(),
-                value: ig.admin_channel.clone(),
-                section: "Social: Instagram".to_string(),
-                editable: true,
-            });
+            let sec = "Social: Instagram";
+            entries.push(ConfigEntry { key: "social.instagram.mode".to_string(), value: ig.mode.clone(), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.instagram.webhook_url".to_string(), value: format!("{}/webhook/instagram", base), section: sec.to_string(), editable: false });
+            entries.push(ConfigEntry { key: "social.instagram.token_env".to_string(), value: ig.token_env.clone(), section: sec.to_string(), editable: true });
+            // token_value: display masked current value from env
+            let tok_masked = std::env::var(&ig.token_env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
+            entries.push(ConfigEntry { key: "social.instagram.token_value".to_string(), value: tok_masked, section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.instagram.user_id".to_string(), value: ig.user_id.clone(), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.instagram.poll_interval_mins".to_string(), value: ig.poll_interval_mins.to_string(), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.instagram.admin_channel".to_string(), value: ig.admin_channel.clone(), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.instagram.subscribe".to_string(), value: ig.subscribe.join(","), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.instagram.agent".to_string(), value: ig.agent.clone(), section: sec.to_string(), editable: true });
+            if let Some(ref env) = ig.app_secret_env {
+                let sec_val = std::env::var(env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
+                entries.push(ConfigEntry { key: "social.instagram.app_secret_env".to_string(), value: env.clone(), section: sec.to_string(), editable: true });
+                entries.push(ConfigEntry { key: "social.instagram.app_secret_value".to_string(), value: sec_val, section: sec.to_string(), editable: true });
+            }
+            if let Some(ref env) = ig.webhook_verify_token_env {
+                let sec_val = std::env::var(env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
+                entries.push(ConfigEntry { key: "social.instagram.webhook_verify_token_env".to_string(), value: env.clone(), section: sec.to_string(), editable: true });
+                entries.push(ConfigEntry { key: "social.instagram.webhook_verify_token_value".to_string(), value: sec_val, section: sec.to_string(), editable: true });
+            }
+            // Rules
+            let rules_sec = "Social: Instagram Rules";
+            for (i, rule) in ig.rules.iter().enumerate() {
+                entries.push(ConfigEntry { key: format!("social.instagram.rules[{}].match", i), value: rule.match_type.clone(), section: rules_sec.to_string(), editable: true });
+                entries.push(ConfigEntry { key: format!("social.instagram.rules[{}].action", i), value: rule.action.clone(), section: rules_sec.to_string(), editable: true });
+                if let Some(ref kw) = rule.keyword {
+                    entries.push(ConfigEntry { key: format!("social.instagram.rules[{}].keyword", i), value: kw.clone(), section: rules_sec.to_string(), editable: true });
+                }
+                if let Some(ref tmpl) = rule.template {
+                    entries.push(ConfigEntry { key: format!("social.instagram.rules[{}].template", i), value: tmpl.clone(), section: rules_sec.to_string(), editable: true });
+                }
+                if let Some(ref agt) = rule.agent {
+                    entries.push(ConfigEntry { key: format!("social.instagram.rules[{}].agent", i), value: agt.clone(), section: rules_sec.to_string(), editable: true });
+                }
+            }
+        } else {
+            entries.push(ConfigEntry { key: "social.instagram.init".to_string(), value: "(not configured — press Enter to initialize)".to_string(), section: "Social: Instagram".to_string(), editable: true });
         }
         if let Some(th) = &config.social.threads {
-            let base = config.webhook_base_url();
-            entries.push(ConfigEntry {
-                key: "social.threads.mode".to_string(),
-                value: th.mode.clone(),
-                section: "Social: Threads".to_string(),
-                editable: true,
-            });
-            entries.push(ConfigEntry {
-                key: "social.threads.webhook_url".to_string(),
-                value: format!("{}/webhook/threads", base),
-                section: "Social: Threads".to_string(),
-                editable: false,
-            });
-            entries.push(ConfigEntry {
-                key: "social.threads.poll_interval_mins".to_string(),
-                value: th.poll_interval_mins.to_string(),
-                section: "Social: Threads".to_string(),
-                editable: true,
-            });
-            entries.push(ConfigEntry {
-                key: "social.threads.admin_channel".to_string(),
-                value: th.admin_channel.clone(),
-                section: "Social: Threads".to_string(),
-                editable: true,
-            });
+            let sec = "Social: Threads";
+            entries.push(ConfigEntry { key: "social.threads.mode".to_string(), value: th.mode.clone(), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.threads.webhook_url".to_string(), value: format!("{}/webhook/threads", base), section: sec.to_string(), editable: false });
+            entries.push(ConfigEntry { key: "social.threads.token_env".to_string(), value: th.token_env.clone(), section: sec.to_string(), editable: true });
+            let tok_masked = std::env::var(&th.token_env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
+            entries.push(ConfigEntry { key: "social.threads.token_value".to_string(), value: tok_masked, section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.threads.user_id".to_string(), value: th.user_id.clone(), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.threads.poll_interval_mins".to_string(), value: th.poll_interval_mins.to_string(), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.threads.admin_channel".to_string(), value: th.admin_channel.clone(), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.threads.subscribe".to_string(), value: th.subscribe.join(","), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.threads.agent".to_string(), value: th.agent.clone(), section: sec.to_string(), editable: true });
+            if let Some(ref env) = th.app_secret_env {
+                let sec_val = std::env::var(env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
+                entries.push(ConfigEntry { key: "social.threads.app_secret_env".to_string(), value: env.clone(), section: sec.to_string(), editable: true });
+                entries.push(ConfigEntry { key: "social.threads.app_secret_value".to_string(), value: sec_val, section: sec.to_string(), editable: true });
+            }
+            if let Some(ref env) = th.webhook_verify_token_env {
+                let sec_val = std::env::var(env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
+                entries.push(ConfigEntry { key: "social.threads.webhook_verify_token_env".to_string(), value: env.clone(), section: sec.to_string(), editable: true });
+                entries.push(ConfigEntry { key: "social.threads.webhook_verify_token_value".to_string(), value: sec_val, section: sec.to_string(), editable: true });
+            }
+            // Rules
+            let rules_sec = "Social: Threads Rules";
+            for (i, rule) in th.rules.iter().enumerate() {
+                entries.push(ConfigEntry { key: format!("social.threads.rules[{}].match", i), value: rule.match_type.clone(), section: rules_sec.to_string(), editable: true });
+                entries.push(ConfigEntry { key: format!("social.threads.rules[{}].action", i), value: rule.action.clone(), section: rules_sec.to_string(), editable: true });
+                if let Some(ref kw) = rule.keyword {
+                    entries.push(ConfigEntry { key: format!("social.threads.rules[{}].keyword", i), value: kw.clone(), section: rules_sec.to_string(), editable: true });
+                }
+                if let Some(ref tmpl) = rule.template {
+                    entries.push(ConfigEntry { key: format!("social.threads.rules[{}].template", i), value: tmpl.clone(), section: rules_sec.to_string(), editable: true });
+                }
+                if let Some(ref agt) = rule.agent {
+                    entries.push(ConfigEntry { key: format!("social.threads.rules[{}].agent", i), value: agt.clone(), section: rules_sec.to_string(), editable: true });
+                }
+            }
+        } else {
+            entries.push(ConfigEntry { key: "social.threads.init".to_string(), value: "(not configured — press Enter to initialize)".to_string(), section: "Social: Threads".to_string(), editable: true });
         }
 
         // MCP Env
@@ -396,6 +424,18 @@ impl ConfigPanel {
         if key == "social.instagram.mode" || key == "social.threads.mode" {
             return vec!["webhook".into(), "polling".into(), "off".into()];
         }
+        if key == "social.instagram.subscribe" {
+            return vec!["comments,mentions".into(), "comments,mentions,messages".into()];
+        }
+        if key == "social.threads.subscribe" {
+            return vec!["replies,mentions".into(), "replies".into(), "mentions".into()];
+        }
+        if key.contains(".rules[") && key.ends_with("].match") {
+            return vec!["*".into(), "comments".into(), "mentions".into(), "messages".into(), "replies".into()];
+        }
+        if key.contains(".rules[") && key.ends_with("].action") {
+            return vec!["forward".into(), "auto_reply".into(), "auto_reply_template".into(), "ignore".into()];
+        }
         vec![]
     }
 
@@ -431,11 +471,16 @@ impl ConfigPanel {
         // Model fields and list fields (allow/deny) allow empty (= clear)
         let is_model_field = key == "default_model" || key == "default_fallback_model";
         let is_list_field = key.ends_with("_allow") || key.ends_with("_deny") || key.ends_with(".guilds");
-        if value.is_empty() && !is_model_field && !is_list_field {
+        // Secret value fields allow empty (to clear); init fields are sent as "true"
+        let is_social_secret = key.ends_with("_value") && key.starts_with("social.");
+        let is_init = key.ends_with(".init");
+        if value.is_empty() && !is_model_field && !is_list_field && !is_social_secret && !is_init {
             self.status_msg = Some("Value cannot be empty".to_string());
             self.mode = ConfigMode::Normal;
             return;
         }
+        // For init, always send "true" regardless of what user typed
+        let value = if is_init { "true".to_string() } else { value };
 
         // Route MCP env keys to mcp_env.set, everything else to config.set
         let client = self.client.clone();
@@ -557,9 +602,10 @@ impl Component for ConfigPanel {
                 KeyCode::Enter => {
                     if let Some(entry) = self.entries.get(self.selected) {
                         if entry.editable {
-                            // MCP env entries display masked values — start with empty buffer
-                            // to force the user to type the new value (not edit the mask)
-                            if entry.key.starts_with("mcp_env.") {
+                            // Secret fields display masked values — start with empty buffer
+                            let is_secret = entry.key.starts_with("mcp_env.") ||
+                                entry.key.ends_with("_value") && entry.key.starts_with("social.");
+                            if is_secret {
                                 self.edit_buffer.clear();
                             } else {
                                 self.edit_buffer = entry.value.clone();

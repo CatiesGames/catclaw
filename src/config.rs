@@ -603,11 +603,51 @@ impl Config {
             "social.instagram.poll_interval_mins" => Ok(self.social.instagram.as_ref().map_or(5, |c| c.poll_interval_mins).to_string()),
             "social.instagram.user_id" => Ok(self.social.instagram.as_ref().map(|c| c.user_id.clone()).unwrap_or_default()),
             "social.instagram.admin_channel" => Ok(self.social.instagram.as_ref().map(|c| c.admin_channel.clone()).unwrap_or_default()),
+            "social.instagram.token_env" => Ok(self.social.instagram.as_ref().map(|c| c.token_env.clone()).unwrap_or_default()),
+            "social.instagram.app_secret_env" => Ok(self.social.instagram.as_ref().and_then(|c| c.app_secret_env.clone()).unwrap_or_default()),
+            "social.instagram.webhook_verify_token_env" => Ok(self.social.instagram.as_ref().and_then(|c| c.webhook_verify_token_env.clone()).unwrap_or_default()),
+            "social.instagram.subscribe" => Ok(self.social.instagram.as_ref().map(|c| c.subscribe.join(",")).unwrap_or_default()),
+            "social.instagram.agent" => Ok(self.social.instagram.as_ref().map(|c| c.agent.clone()).unwrap_or_default()),
+            "social.instagram.rules.count" => Ok(self.social.instagram.as_ref().map_or(0, |c| c.rules.len()).to_string()),
             "social.threads.mode" => Ok(self.social.threads.as_ref().map_or_else(|| "off".to_string(), |c| c.mode.clone())),
             "social.threads.poll_interval_mins" => Ok(self.social.threads.as_ref().map_or(5, |c| c.poll_interval_mins).to_string()),
             "social.threads.user_id" => Ok(self.social.threads.as_ref().map(|c| c.user_id.clone()).unwrap_or_default()),
             "social.threads.admin_channel" => Ok(self.social.threads.as_ref().map(|c| c.admin_channel.clone()).unwrap_or_default()),
+            "social.threads.token_env" => Ok(self.social.threads.as_ref().map(|c| c.token_env.clone()).unwrap_or_default()),
+            "social.threads.app_secret_env" => Ok(self.social.threads.as_ref().and_then(|c| c.app_secret_env.clone()).unwrap_or_default()),
+            "social.threads.webhook_verify_token_env" => Ok(self.social.threads.as_ref().and_then(|c| c.webhook_verify_token_env.clone()).unwrap_or_default()),
+            "social.threads.subscribe" => Ok(self.social.threads.as_ref().map(|c| c.subscribe.join(",")).unwrap_or_default()),
+            "social.threads.agent" => Ok(self.social.threads.as_ref().map(|c| c.agent.clone()).unwrap_or_default()),
+            "social.threads.rules.count" => Ok(self.social.threads.as_ref().map_or(0, |c| c.rules.len()).to_string()),
             other => {
+                // social.{platform}.rules[N].{field}
+                for platform in ["instagram", "threads"] {
+                    let prefix = format!("social.{}.rules[", platform);
+                    if let Some(rest) = other.strip_prefix(&prefix) {
+                        if let Some((idx_str, field)) = rest.split_once("].") {
+                            if let Ok(idx) = idx_str.parse::<usize>() {
+                                let rules = match platform {
+                                    "instagram" => self.social.instagram.as_ref().map(|c| &c.rules),
+                                    _ => self.social.threads.as_ref().map(|c| &c.rules),
+                                };
+                                if let Some(rules) = rules {
+                                    if let Some(rule) = rules.get(idx) {
+                                        return match field {
+                                            "match" => Ok(rule.match_type.clone()),
+                                            "action" => Ok(rule.action.clone()),
+                                            "keyword" => Ok(rule.keyword.clone().unwrap_or_default()),
+                                            "template" => Ok(rule.template.clone().unwrap_or_default()),
+                                            "agent" => Ok(rule.agent.clone().unwrap_or_default()),
+                                            _ => Err(CatClawError::Config(format!("unknown rule field: {}", field))),
+                                        };
+                                    }
+                                    return Err(CatClawError::Config(format!("rule index {} out of range", idx)));
+                                }
+                                return Err(CatClawError::Config(format!("social.{} is not configured", platform)));
+                            }
+                        }
+                    }
+                }
                 if let Some(rest) = other.strip_prefix("channels[") {
                     if let Some((idx_str, field)) = rest.split_once("].") {
                         if let Ok(idx) = idx_str.parse::<usize>() {
@@ -787,7 +827,233 @@ impl Config {
                     Err(CatClawError::Config("social.threads is not configured".into()))
                 }
             }
+            // ── Social: additional writable fields ────────────────────────────
+            "social.instagram.token_env" => {
+                if let Some(ref mut ig) = self.social.instagram {
+                    ig.token_env = value.to_string();
+                    Ok(true)
+                } else {
+                    Err(CatClawError::Config("social.instagram is not configured".into()))
+                }
+            }
+            "social.instagram.app_secret_env" => {
+                if let Some(ref mut ig) = self.social.instagram {
+                    ig.app_secret_env = if value.is_empty() { None } else { Some(value.to_string()) };
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.instagram is not configured".into()))
+                }
+            }
+            "social.instagram.webhook_verify_token_env" => {
+                if let Some(ref mut ig) = self.social.instagram {
+                    ig.webhook_verify_token_env = if value.is_empty() { None } else { Some(value.to_string()) };
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.instagram is not configured".into()))
+                }
+            }
+            "social.instagram.user_id" => {
+                if let Some(ref mut ig) = self.social.instagram {
+                    ig.user_id = value.to_string();
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.instagram is not configured".into()))
+                }
+            }
+            "social.instagram.subscribe" => {
+                let vals = split_csv(value);
+                for v in &vals {
+                    if !["comments", "mentions", "messages"].contains(&v.as_str()) {
+                        return Err(CatClawError::Config(format!("invalid subscribe value '{}'. Valid: comments, mentions, messages", v)));
+                    }
+                }
+                if let Some(ref mut ig) = self.social.instagram {
+                    ig.subscribe = vals;
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.instagram is not configured".into()))
+                }
+            }
+            "social.instagram.agent" => {
+                if let Some(ref mut ig) = self.social.instagram {
+                    ig.agent = value.to_string();
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.instagram is not configured".into()))
+                }
+            }
+            "social.instagram.rules.add" => {
+                if let Some(ref mut ig) = self.social.instagram {
+                    ig.rules.push(SocialRule {
+                        match_type: "*".to_string(),
+                        keyword: None,
+                        action: "forward".to_string(),
+                        template: None,
+                        agent: None,
+                    });
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.instagram is not configured".into()))
+                }
+            }
+            "social.instagram.init" => {
+                if self.social.instagram.is_none() {
+                    self.social.instagram = Some(InstagramConfig {
+                        mode: "off".to_string(),
+                        poll_interval_mins: 5,
+                        token_env: "CATCLAW_INSTAGRAM_TOKEN".to_string(),
+                        app_secret_env: None,
+                        webhook_verify_token_env: None,
+                        user_id: String::new(),
+                        admin_channel: String::new(),
+                        subscribe: vec!["comments".to_string(), "mentions".to_string()],
+                        agent: "main".to_string(),
+                        rules: vec![SocialRule {
+                            match_type: "*".to_string(),
+                            keyword: None,
+                            action: "forward".to_string(),
+                            template: None,
+                            agent: None,
+                        }],
+                        templates: HashMap::new(),
+                    });
+                }
+                Ok(true)
+            }
+            "social.threads.token_env" => {
+                if let Some(ref mut th) = self.social.threads {
+                    th.token_env = value.to_string();
+                    Ok(true)
+                } else {
+                    Err(CatClawError::Config("social.threads is not configured".into()))
+                }
+            }
+            "social.threads.app_secret_env" => {
+                if let Some(ref mut th) = self.social.threads {
+                    th.app_secret_env = if value.is_empty() { None } else { Some(value.to_string()) };
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.threads is not configured".into()))
+                }
+            }
+            "social.threads.webhook_verify_token_env" => {
+                if let Some(ref mut th) = self.social.threads {
+                    th.webhook_verify_token_env = if value.is_empty() { None } else { Some(value.to_string()) };
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.threads is not configured".into()))
+                }
+            }
+            "social.threads.user_id" => {
+                if let Some(ref mut th) = self.social.threads {
+                    th.user_id = value.to_string();
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.threads is not configured".into()))
+                }
+            }
+            "social.threads.subscribe" => {
+                let vals = split_csv(value);
+                for v in &vals {
+                    if !["replies", "mentions"].contains(&v.as_str()) {
+                        return Err(CatClawError::Config(format!("invalid subscribe value '{}'. Valid: replies, mentions", v)));
+                    }
+                }
+                if let Some(ref mut th) = self.social.threads {
+                    th.subscribe = vals;
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.threads is not configured".into()))
+                }
+            }
+            "social.threads.agent" => {
+                if let Some(ref mut th) = self.social.threads {
+                    th.agent = value.to_string();
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.threads is not configured".into()))
+                }
+            }
+            "social.threads.rules.add" => {
+                if let Some(ref mut th) = self.social.threads {
+                    th.rules.push(SocialRule {
+                        match_type: "*".to_string(),
+                        keyword: None,
+                        action: "forward".to_string(),
+                        template: None,
+                        agent: None,
+                    });
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.threads is not configured".into()))
+                }
+            }
+            "social.threads.init" => {
+                if self.social.threads.is_none() {
+                    self.social.threads = Some(ThreadsConfig {
+                        mode: "off".to_string(),
+                        poll_interval_mins: 5,
+                        token_env: "CATCLAW_THREADS_TOKEN".to_string(),
+                        app_secret_env: None,
+                        webhook_verify_token_env: None,
+                        user_id: String::new(),
+                        admin_channel: String::new(),
+                        subscribe: vec!["replies".to_string(), "mentions".to_string()],
+                        agent: "main".to_string(),
+                        rules: vec![SocialRule {
+                            match_type: "*".to_string(),
+                            keyword: None,
+                            action: "forward".to_string(),
+                            template: None,
+                            agent: None,
+                        }],
+                        templates: HashMap::new(),
+                    });
+                }
+                Ok(true)
+            }
             other => {
+                // social.{platform}.rules[N].{field} and social.{platform}.rules[N].delete
+                for platform in ["instagram", "threads"] {
+                    let prefix = format!("social.{}.rules[", platform);
+                    if let Some(rest) = other.strip_prefix(&prefix) {
+                        if let Some((idx_str, field)) = rest.split_once("].") {
+                            let idx: usize = idx_str.parse().map_err(|_| CatClawError::Config("invalid rule index".into()))?;
+                            let rules = match platform {
+                                "instagram" => self.social.instagram.as_mut().map(|c| &mut c.rules),
+                                _ => self.social.threads.as_mut().map(|c| &mut c.rules),
+                            };
+                            let rules = rules.ok_or_else(|| CatClawError::Config(format!("social.{} is not configured", platform)))?;
+                            if field == "delete" {
+                                if idx >= rules.len() {
+                                    return Err(CatClawError::Config(format!("rule index {} out of range", idx)));
+                                }
+                                rules.remove(idx);
+                                return Ok(false);
+                            }
+                            if idx >= rules.len() {
+                                return Err(CatClawError::Config(format!("rule index {} out of range", idx)));
+                            }
+                            let rule = &mut rules[idx];
+                            return match field {
+                                "match" => { rule.match_type = value.to_string(); Ok(false) }
+                                "action" => {
+                                    match value {
+                                        "forward" | "auto_reply" | "auto_reply_template" | "ignore" => {
+                                            rule.action = value.to_string();
+                                            Ok(false)
+                                        }
+                                        _ => Err(CatClawError::Config("action must be forward, auto_reply, auto_reply_template, or ignore".into())),
+                                    }
+                                }
+                                "keyword" => { rule.keyword = if value.is_empty() { None } else { Some(value.to_string()) }; Ok(false) }
+                                "template" => { rule.template = if value.is_empty() { None } else { Some(value.to_string()) }; Ok(false) }
+                                "agent" => { rule.agent = if value.is_empty() { None } else { Some(value.to_string()) }; Ok(false) }
+                                _ => Err(CatClawError::Config(format!("unknown rule field: {}", field))),
+                            };
+                        }
+                    }
+                }
                 if let Some(rest) = other.strip_prefix("channels[") {
                     if let Some((idx_str, field)) = rest.split_once("].") {
                         let idx: usize = idx_str.parse().map_err(|_| CatClawError::Config("invalid channel index".into()))?;

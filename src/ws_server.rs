@@ -799,6 +799,57 @@ fn handle_config_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         None => return WsResponse::err(req.id, -32602, "missing param: value"),
     };
 
+    // Handle secret value keys: write actual token to ~/.catclaw/.env, not TOML
+    let is_secret_value = matches!(key,
+        "social.instagram.token_value" | "social.instagram.app_secret_value" | "social.instagram.webhook_verify_token_value" |
+        "social.threads.token_value" | "social.threads.app_secret_value" | "social.threads.webhook_verify_token_value"
+    );
+    if is_secret_value {
+        // Derive the env var name from config
+        let env_var_name = {
+            let config = gw.config.read().unwrap();
+            let result: Option<String> = match key {
+                "social.instagram.token_value" => config.social.instagram.as_ref().map(|c| c.token_env.clone()),
+                "social.instagram.app_secret_value" => config.social.instagram.as_ref().and_then(|c| c.app_secret_env.clone()),
+                "social.instagram.webhook_verify_token_value" => config.social.instagram.as_ref().and_then(|c| c.webhook_verify_token_env.clone()),
+                "social.threads.token_value" => config.social.threads.as_ref().map(|c| c.token_env.clone()),
+                "social.threads.app_secret_value" => config.social.threads.as_ref().and_then(|c| c.app_secret_env.clone()),
+                "social.threads.webhook_verify_token_value" => config.social.threads.as_ref().and_then(|c| c.webhook_verify_token_env.clone()),
+                _ => None,
+            };
+            result
+        };
+        let env_var_name = match env_var_name {
+            Some(n) if !n.is_empty() => n,
+            _ => return WsResponse::err(req.id, -1, "env var name not configured — set token_env first"),
+        };
+        let env_path = {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(home).join(".catclaw").join(".env")
+        };
+        // Read-modify-write .env
+        let mut lines: Vec<String> = if env_path.exists() {
+            std::fs::read_to_string(&env_path).unwrap_or_default().lines().map(String::from).collect()
+        } else {
+            Vec::new()
+        };
+        let prefix = format!("{}=", env_var_name);
+        if let Some(pos) = lines.iter().position(|l| l.starts_with(&prefix)) {
+            lines[pos] = format!("{}={}", env_var_name, value);
+        } else {
+            lines.push(format!("{}={}", env_var_name, value));
+        }
+        if let Some(parent) = env_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&env_path, lines.join("\n") + "\n") {
+            return WsResponse::err(req.id, -1, format!("failed to write .env: {}", e));
+        }
+        std::env::set_var(&env_var_name, value);
+        info!(key = %key, env_var = %env_var_name, "social secret updated in .env");
+        return WsResponse::ok(req.id, json!({"needs_restart": false, "key": key, "value": "***"}));
+    }
+
     let (needs_restart, serialized, channels_snapshot) = {
         let mut config = gw.config.write().unwrap();
         let needs_restart = match config.apply_config_set(key, value) {
