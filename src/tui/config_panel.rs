@@ -145,6 +145,12 @@ impl ConfigPanel {
                 editable: true,
             },
             ConfigEntry {
+                key: "bind_addr".to_string(),
+                value: config.general.bind_addr.clone(),
+                section: "General".to_string(),
+                editable: true,
+            },
+            ConfigEntry {
                 key: "webhook_base_url".to_string(),
                 value: config.general.webhook_base_url.clone().unwrap_or_default(),
                 section: "General".to_string(),

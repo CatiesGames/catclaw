@@ -445,7 +445,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     };
 
     // 10. Start gateway server (WS + MCP on single port)
-    let server_addr = format!("127.0.0.1:{}", config.general.port);
+    let server_addr = format!("{}:{}", config.general.bind_addr, config.general.port);
     ws_server::spawn(server_addr, handle.clone());
 
     Ok(handle)

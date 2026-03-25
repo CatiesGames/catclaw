@@ -221,6 +221,11 @@ pub struct GeneralConfig {
     #[serde(default = "default_ws_port", alias = "ws_port")]
     pub port: u16,
 
+    /// Bind address for the gateway server (default: "0.0.0.0").
+    /// Use "127.0.0.1" to restrict access to localhost only.
+    #[serde(default = "default_bind_addr")]
+    pub bind_addr: String,
+
     /// Enable streaming mode for TUI/WebUI (default: true).
     /// When false, TUI waits for complete response before displaying.
     #[serde(default = "default_streaming")]
@@ -451,6 +456,9 @@ fn default_archive_timeout() -> u64 {
 fn default_ws_port() -> u16 {
     21130
 }
+fn default_bind_addr() -> String {
+    "0.0.0.0".to_string()
+}
 fn default_streaming() -> bool {
     true
 }
@@ -587,6 +595,7 @@ impl Config {
             "session_idle_timeout_mins" => Ok(self.general.session_idle_timeout_mins.to_string()),
             "session_archive_timeout_hours" => Ok(self.general.session_archive_timeout_hours.to_string()),
             "port" | "ws_port" => Ok(self.general.port.to_string()),
+            "bind_addr" => Ok(self.general.bind_addr.clone()),
             "streaming" => Ok(self.general.streaming.to_string()),
             "default_model" => Ok(self.general.default_model.clone().unwrap_or_default()),
             "default_fallback_model" => Ok(self.general.default_fallback_model.clone().unwrap_or_default()),
@@ -707,6 +716,10 @@ impl Config {
             }
             "port" | "ws_port" => {
                 self.general.port = value.parse().map_err(|_| CatClawError::Config("invalid port".into()))?;
+                Ok(true)
+            }
+            "bind_addr" => {
+                self.general.bind_addr = value.to_string();
                 Ok(true)
             }
             "heartbeat.enabled" => {
@@ -1121,6 +1134,7 @@ impl Config {
                 session_idle_timeout_mins: default_idle_timeout(),
                 session_archive_timeout_hours: default_archive_timeout(),
                 port: default_ws_port(),
+                bind_addr: default_bind_addr(),
                 streaming: default_streaming(),
                 default_model: None,
                 default_fallback_model: None,
