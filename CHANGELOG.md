@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/CatiesGames/catclaw/compare/v0.16.5...v0.17.0) (2026-03-25)
+
+
+### Features
+
+* Social Inbox — Instagram + Threads 整合 ([26a7627](https://github.com/CatiesGames/catclaw/commit/26a76277bccf21548978fd9a66e8e28857c4cda8))
+
 ## [0.16.5](https://github.com/CatiesGames/catclaw/compare/v0.16.4...v0.16.5) (2026-03-24)
 
 
