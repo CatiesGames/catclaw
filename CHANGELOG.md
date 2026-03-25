@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/CatiesGames/catclaw/compare/v0.18.0...v0.18.1) (2026-03-25)
+
+
+### Bug Fixes
+
+* catclaw onboard 重複執行時進入 wizard 而非跳過；Config panel 選擇時自動捲動 ([9b65907](https://github.com/CatiesGames/catclaw/commit/9b659074bfc4abeb94105bdd6cedd3d5ae8f8808))
+
 ## [0.18.0](https://github.com/CatiesGames/catclaw/compare/v0.17.1...v0.18.0) (2026-03-25)
 
 
