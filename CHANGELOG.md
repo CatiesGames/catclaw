@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.19.0](https://github.com/CatiesGames/catclaw/compare/v0.18.2...v0.19.0) (2026-03-25)
+
+
+### Features
+
+* 新增 /health 端點 ([ea23da5](https://github.com/CatiesGames/catclaw/commit/ea23da5601bdbb799ceade11c937c8858ab6a3df))
+
+
+### Bug Fixes
+
+* gateway 改為預設 bind 0.0.0.0，新增 bind_addr 設定 ([6a31a67](https://github.com/CatiesGames/catclaw/commit/6a31a6788261e2c78d435dcfb7be0c643993b7a6))
+
 ## [0.18.2](https://github.com/CatiesGames/catclaw/compare/v0.18.1...v0.18.2) (2026-03-25)
 
 
