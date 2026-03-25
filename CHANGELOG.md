@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.2](https://github.com/CatiesGames/catclaw/compare/v0.18.1...v0.18.2) (2026-03-25)
+
+
+### Bug Fixes
+
+* TUI Config panel ↑↓ 選擇補全選項時同步填入輸入格 ([ff1f9d2](https://github.com/CatiesGames/catclaw/commit/ff1f9d2adaa1fb7ac601b511c80d9e6ed64cc012))
+* 社群 onboard webhook 排第一；Config panel 成功訊息不被覆蓋；admin_channel 提示說明 ID 格式 ([0f216ed](https://github.com/CatiesGames/catclaw/commit/0f216ede574583682d74713fb6d16dcd5f480ec4))
+
 ## [0.18.1](https://github.com/CatiesGames/catclaw/compare/v0.18.0...v0.18.1) (2026-03-25)
 
 
