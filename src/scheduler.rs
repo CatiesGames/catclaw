@@ -620,7 +620,7 @@ async fn generate_diary(agent: &Agent, transcript_text: &str) -> DiaryResult {
             "",
             "--strict-mcp-config",
             "--mcp-config",
-            "{}",
+            r#"{"mcpServers":{}}"#,
         ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
