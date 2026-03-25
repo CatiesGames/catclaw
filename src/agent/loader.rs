@@ -1626,6 +1626,21 @@ catclaw social mode instagram webhook             # Switch mode (webhook/polling
 catclaw social mode threads polling
 ```
 
+### Issue Tracking
+
+Heartbeat automatically scans ERROR/WARN logs and tracks them as issues in `memory/issues.json`.
+Issues that stop appearing are automatically removed. Ignored issues are permanently suppressed.
+
+```bash
+catclaw issues list                               # List all open + ignored issues
+catclaw issues list --open                        # Show only open issues
+catclaw issues list --agent main                  # Filter by agent
+catclaw issues ignore main <issue-id>             # Suppress forever (won't reappear)
+catclaw issues resolve main <issue-id>            # Remove (will reappear if error recurs)
+```
+
+TUI: **Issues** tab (Alt+0) — `i` ignore, `d`/`x` resolve, `r` reload.
+
 ### Social Config Keys
 
 | Key | Notes |

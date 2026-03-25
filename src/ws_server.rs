@@ -176,6 +176,9 @@ async fn dispatch(
         "social.inbox.reprocess" => handle_social_inbox_reprocess(req, gw),
         "social.poll" => handle_social_poll(req, gw),
         "social.mode" => handle_social_mode(req, gw),
+        "issues.list" => handle_issues_list(req, gw),
+        "issues.ignore" => handle_issues_ignore(req, gw).await,
+        "issues.resolve" => handle_issues_resolve(req, gw).await,
         _ => WsResponse::err(req.id, -32601, format!("unknown method: {}", req.method)),
     }
 }
@@ -1317,4 +1320,90 @@ fn handle_social_mode(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         result["webhook_url"] = json!(url);
     }
     WsResponse::ok(req.id, result)
+}
+
+// ── Issues handlers ──
+
+fn handle_issues_list(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let agents: Vec<crate::agent::Agent> = gw.agent_registry.read().unwrap().list().into_iter().cloned().collect();
+    let mut all_issues: Vec<serde_json::Value> = Vec::new();
+    for agent in &agents {
+        let issues_path = agent.workspace.join("memory").join("issues.json");
+        let issues: Vec<crate::scheduler::LogIssue> = std::fs::read_to_string(&issues_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        for issue in issues {
+            let mut v = serde_json::to_value(&issue).unwrap_or_default();
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("agent_id".to_string(), json!(agent.id));
+            }
+            all_issues.push(v);
+        }
+    }
+    WsResponse::ok(req.id, json!({ "issues": all_issues }))
+}
+
+async fn handle_issues_ignore(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let agent_id = match req.params.get("agent_id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing agent_id"),
+    };
+    let issue_id = match req.params.get("issue_id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing issue_id"),
+    };
+    let workspace = {
+        let registry = gw.agent_registry.read().unwrap();
+        registry.get(&agent_id).map(|a| a.workspace.clone())
+    };
+    let Some(workspace) = workspace else {
+        return WsResponse::err(req.id, -32602, format!("agent '{}' not found", agent_id));
+    };
+    let issues_path = workspace.join("memory").join("issues.json");
+    let mut issues: Vec<crate::scheduler::LogIssue> = tokio::fs::read_to_string(&issues_path)
+        .await.ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let found = issues.iter_mut().find(|i| i.id == issue_id);
+    match found {
+        Some(issue) => { issue.status = "ignored".to_string(); }
+        None => return WsResponse::err(req.id, -32602, format!("issue '{}' not found", issue_id)),
+    }
+    if let Ok(s) = serde_json::to_string_pretty(&issues) {
+        if let Err(e) = tokio::fs::write(&issues_path, s).await {
+            return WsResponse::err(req.id, -1, format!("failed to write issues.json: {}", e));
+        }
+    }
+    WsResponse::ok(req.id, json!({ "ok": true }))
+}
+
+async fn handle_issues_resolve(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let agent_id = match req.params.get("agent_id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing agent_id"),
+    };
+    let issue_id = match req.params.get("issue_id").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing issue_id"),
+    };
+    let workspace = {
+        let registry = gw.agent_registry.read().unwrap();
+        registry.get(&agent_id).map(|a| a.workspace.clone())
+    };
+    let Some(workspace) = workspace else {
+        return WsResponse::err(req.id, -32602, format!("agent '{}' not found", agent_id));
+    };
+    let issues_path = workspace.join("memory").join("issues.json");
+    let mut issues: Vec<crate::scheduler::LogIssue> = tokio::fs::read_to_string(&issues_path)
+        .await.ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let before = issues.len();
+    issues.retain(|i| i.id != issue_id);
+    if issues.len() == before {
+        return WsResponse::err(req.id, -32602, format!("issue '{}' not found", issue_id));
+    }
+    if let Ok(s) = serde_json::to_string_pretty(&issues) {
+        if let Err(e) = tokio::fs::write(&issues_path, s).await {
+            return WsResponse::err(req.id, -1, format!("failed to write issues.json: {}", e));
+        }
+    }
+    WsResponse::ok(req.id, json!({ "ok": true }))
 }

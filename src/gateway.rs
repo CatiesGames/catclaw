@@ -232,6 +232,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
             workspace: config.general.workspace.clone(),
             social_item_tx: Some(social_item_tx.clone()),
             social_config: Some(gw_config.clone()),
+            log_dir: config.logging.resolve_log_dir(&config.general.workspace),
         };
         let sched_db = state_db.clone();
         let sched_agents = agent_registry.clone();

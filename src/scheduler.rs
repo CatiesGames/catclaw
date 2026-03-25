@@ -33,6 +33,8 @@ pub struct SchedulerConfig {
     pub social_item_tx: Option<Arc<tokio::sync::mpsc::UnboundedSender<crate::social::SocialItem>>>,
     /// Social config (for polling intervals and credentials).
     pub social_config: Option<Arc<std::sync::RwLock<crate::config::Config>>>,
+    /// Log directory for scanning ERROR/WARN entries during heartbeat.
+    pub log_dir: std::path::PathBuf,
 }
 
 impl Default for SchedulerConfig {
@@ -45,6 +47,7 @@ impl Default for SchedulerConfig {
             workspace: std::path::PathBuf::from("./workspace"),
             social_item_tx: None,
             social_config: None,
+            log_dir: std::path::PathBuf::from("./workspace/logs"),
         }
     }
 }
@@ -109,7 +112,7 @@ pub async fn run(
         if config.heartbeat_enabled && now >= next_heartbeat {
             let agents: Vec<_> = agent_registry.read().unwrap().list().into_iter().cloned().collect();
             for agent in &agents {
-                execute_heartbeat(agent, &session_manager).await;
+                execute_heartbeat(agent, &session_manager, &config.log_dir).await;
             }
             next_heartbeat = now + chrono::Duration::minutes(config.heartbeat_interval_mins as i64);
         }
@@ -231,9 +234,14 @@ async fn tick_user_tasks(
 }
 
 /// Send a heartbeat poll to the agent, optionally including memory distillation instructions
-async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &SessionManager) {
+async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &SessionManager, log_dir: &Path) {
     let key = SessionKey::new(&agent.id, "system", "heartbeat");
     let sender = SenderInfo::default();
+
+    // Scan logs for new ERROR/WARN since last heartbeat, merge into issues.json
+    let issues_path = agent.workspace.join("memory").join("issues.json");
+    let last_ts_path = agent.workspace.join("memory").join(".last_heartbeat_log_ts");
+    scan_log_issues(log_dir, &issues_path, &last_ts_path).await;
 
     // Build heartbeat message, appending distillation instructions if due
     let mut message = "Heartbeat poll. Read HEARTBEAT.md and follow its instructions.".to_string();
@@ -244,6 +252,12 @@ async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &Sessio
     } else {
         false
     };
+
+    // Append open issues if any
+    if let Some(issues_text) = open_issues_summary(&issues_path).await {
+        info!(agent = %agent.id, "heartbeat: open issues found, appending to message");
+        message.push_str(&issues_text);
+    }
 
     match session_manager
         .send_and_wait(
@@ -774,4 +788,142 @@ async fn check_distillation_due(agent: &Agent) -> Option<String> {
          outdated entries from MEMORY.md.\n\nFiles to process:\n{}",
         file_list
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Log issue tracking — scan ERROR/WARN logs, persist to issues.json
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LogIssue {
+    /// Unique ID: hash of (level, target, msg) truncated to 8 hex chars
+    pub id: String,
+    pub level: String,
+    pub target: String,
+    pub msg: String,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub count: u32,
+    /// "open" | "ignored"
+    pub status: String,
+}
+
+impl LogIssue {
+    fn key(level: &str, target: &str, msg: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        level.hash(&mut h);
+        target.hash(&mut h);
+        msg.hash(&mut h);
+        format!("{:016x}", h.finish())[..8].to_string()
+    }
+}
+
+async fn load_issues(path: &Path) -> Vec<LogIssue> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+async fn save_issues(path: &Path, issues: &[LogIssue]) {
+    if let Ok(s) = serde_json::to_string_pretty(issues) {
+        if let Err(e) = tokio::fs::write(path, s).await {
+            warn!(error = %e, "failed to write issues.json");
+        }
+    }
+}
+
+/// Scan today's (and yesterday's, if ts straddles midnight) log file for ERROR/WARN
+/// entries newer than `.last_heartbeat_log_ts`. Merge into issues.json (dedup by key).
+/// Updates `.last_heartbeat_log_ts` to now after scanning.
+async fn scan_log_issues(log_dir: &Path, issues_path: &Path, last_ts_path: &Path) {
+    let last_ts = tokio::fs::read_to_string(last_ts_path).await.unwrap_or_default();
+    let last_ts = last_ts.trim().to_string();
+
+    // Collect candidate log files: today + yesterday (handles midnight boundary)
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let yesterday = (chrono::Local::now() - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+
+    let mut new_entries: Vec<crate::logging::LogRecord> = Vec::new();
+    for date in &[&yesterday, &today] {
+        let path = log_dir.join(format!("catclaw-{}.jsonl", date));
+        let records = crate::logging::read_log_file(&path);
+        for r in records {
+            if matches!(r.level.as_str(), "ERROR" | "WARN")
+                && (last_ts.is_empty() || r.ts.as_str() > last_ts.as_str()) {
+                new_entries.push(r);
+            }
+        }
+    }
+
+    let mut issues = load_issues(issues_path).await;
+    let now_ts = chrono::Utc::now().to_rfc3339();
+
+    // Build set of issue keys seen in this scan
+    let seen_ids: std::collections::HashSet<String> = new_entries
+        .iter()
+        .map(|r| LogIssue::key(&r.level, &r.target, &r.msg))
+        .collect();
+
+    // Auto-remove open issues that did NOT appear in this scan period
+    issues.retain(|i| i.status == "ignored" || seen_ids.contains(&i.id));
+
+    for record in &new_entries {
+        let id = LogIssue::key(&record.level, &record.target, &record.msg);
+        if let Some(existing) = issues.iter_mut().find(|i| i.id == id && i.status == "open") {
+            existing.last_seen = record.ts.clone();
+            existing.count += 1;
+        } else if !issues.iter().any(|i| i.id == id && i.status == "ignored") {
+            // Only add if not already ignored; ignored = suppress forever
+            issues.push(LogIssue {
+                id,
+                level: record.level.clone(),
+                target: record.target.clone(),
+                msg: record.msg.clone(),
+                first_seen: record.ts.clone(),
+                last_seen: record.ts.clone(),
+                count: 1,
+                status: "open".to_string(),
+            });
+        }
+    }
+
+    save_issues(issues_path, &issues).await;
+    let _ = tokio::fs::write(last_ts_path, &now_ts).await;
+}
+
+/// Build a summary of open issues to append to the heartbeat message.
+/// Returns None if there are no open issues.
+async fn open_issues_summary(issues_path: &Path) -> Option<String> {
+    let issues = load_issues(issues_path).await;
+    let open: Vec<&LogIssue> = issues.iter().filter(|i| i.status == "open").collect();
+    if open.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec![
+        "\n\nOPEN ISSUES (from system logs — do NOT reply HEARTBEAT_OK until addressed):".to_string(),
+        "Each issue is in memory/issues.json. To resolve or ignore, use Bash to update the status field.".to_string(),
+        "".to_string(),
+    ];
+    for issue in &open {
+        lines.push(format!(
+            "[{}] {} | {} | {} (seen {} time{}, last: {})",
+            issue.id,
+            issue.level,
+            issue.target,
+            issue.msg,
+            issue.count,
+            if issue.count == 1 { "" } else { "s" },
+            &issue.last_seen[..19.min(issue.last_seen.len())],
+        ));
+    }
+    lines.push("".to_string());
+    lines.push("To resolve: delete the entry from memory/issues.json.".to_string());
+    lines.push("To ignore forever: set status to 'ignored' in memory/issues.json.".to_string());
+    Some(lines.join("\n"))
 }

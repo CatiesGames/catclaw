@@ -168,6 +168,12 @@ enum Commands {
         #[command(subcommand)]
         command: SocialCommands,
     },
+
+    /// Manage system issue log (ERROR/WARN log entries tracked by heartbeat)
+    Issues {
+        #[command(subcommand)]
+        command: IssuesCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -440,6 +446,33 @@ enum SocialCommands {
         platform: String,
         /// Mode: webhook | polling | off
         mode: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum IssuesCommands {
+    /// List open and ignored issues across all agents
+    List {
+        /// Filter by agent ID
+        #[arg(long)]
+        agent: Option<String>,
+        /// Show only open issues (default: show all)
+        #[arg(long)]
+        open: bool,
+    },
+    /// Mark an issue as ignored (suppresses future occurrences)
+    Ignore {
+        /// Agent ID the issue belongs to
+        agent: String,
+        /// Issue ID (from issues list)
+        id: String,
+    },
+    /// Remove an issue (mark as resolved — will reappear if error recurs)
+    Resolve {
+        /// Agent ID the issue belongs to
+        agent: String,
+        /// Issue ID (from issues list)
+        id: String,
     },
 }
 
@@ -1338,6 +1371,65 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 HookCommands::PreTool { session_key } => {
                     // Note: this exits the process directly (exits 0 or 2)
                     cmd_hook::run_pre_tool(&cli.config, &session_key).await;
+                }
+            }
+        }
+
+        Some(Commands::Issues { command }) => {
+            let config = Config::load(&cli.config)?;
+            let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+            let (client, _rx) = crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await
+                .map_err(|e| format!("Cannot connect to gateway: {}", e))?;
+            match command {
+                IssuesCommands::List { agent, open } => {
+                    match client.request("issues.list", serde_json::json!({})).await {
+                        Ok(resp) => {
+                            let empty = vec![];
+                            let issues = resp.get("issues")
+                                .and_then(|v| v.as_array())
+                                .unwrap_or(&empty);
+                            let filtered: Vec<&serde_json::Value> = issues.iter().filter(|v| {
+                                let matches_agent = agent.as_deref()
+                                    .map(|a| v.get("agent_id").and_then(|x| x.as_str()) == Some(a))
+                                    .unwrap_or(true);
+                                let matches_open = !open || v.get("status").and_then(|x| x.as_str()) == Some("open");
+                                matches_agent && matches_open
+                            }).collect();
+                            if filtered.is_empty() {
+                                println!("No issues.");
+                            } else {
+                                for v in &filtered {
+                                    let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("?");
+                                    let agent_id = v.get("agent_id").and_then(|x| x.as_str()).unwrap_or("?");
+                                    let level = v.get("level").and_then(|x| x.as_str()).unwrap_or("?");
+                                    let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("?");
+                                    let msg = v.get("msg").and_then(|x| x.as_str()).unwrap_or("");
+                                    let target = v.get("target").and_then(|x| x.as_str()).unwrap_or("");
+                                    let count = v.get("count").and_then(|x| x.as_u64()).unwrap_or(1);
+                                    let last_seen = v.get("last_seen").and_then(|x| x.as_str()).unwrap_or("?");
+                                    println!("[{}] {} | {} | agent={} | count={} | last={} | {}",
+                                        id, level, status, agent_id, count,
+                                        &last_seen[..19.min(last_seen.len())], msg);
+                                    if !target.is_empty() {
+                                        println!("       target: {}", target);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+                    }
+                }
+                IssuesCommands::Ignore { agent, id } => {
+                    match client.request("issues.ignore", serde_json::json!({"agent_id": agent, "issue_id": id})).await {
+                        Ok(_) => println!("Issue '{}' marked as ignored.", id),
+                        Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+                    }
+                }
+                IssuesCommands::Resolve { agent, id } => {
+                    match client.request("issues.resolve", serde_json::json!({"agent_id": agent, "issue_id": id})).await {
+                        Ok(_) => println!("Issue '{}' resolved and removed.", id),
+                        Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+                    }
                 }
             }
         }
