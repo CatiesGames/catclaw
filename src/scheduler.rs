@@ -29,6 +29,10 @@ pub struct SchedulerConfig {
     pub archive_check_interval_mins: u64,
     /// Workspace root path (for attachment cleanup)
     pub workspace: std::path::PathBuf,
+    /// Social polling: send SocialItems into the ingest pipeline.
+    pub social_item_tx: Option<Arc<tokio::sync::mpsc::UnboundedSender<crate::social::SocialItem>>>,
+    /// Social config (for polling intervals and credentials).
+    pub social_config: Option<Arc<std::sync::RwLock<crate::config::Config>>>,
 }
 
 impl Default for SchedulerConfig {
@@ -39,6 +43,8 @@ impl Default for SchedulerConfig {
             archive_timeout_hours: 168, // 7 days
             archive_check_interval_mins: 360, // 6 hours
             workspace: std::path::PathBuf::from("./workspace"),
+            social_item_tx: None,
+            social_config: None,
         }
     }
 }
@@ -72,6 +78,29 @@ pub async fn run(
     let mut next_archive = now + chrono::Duration::minutes(config.archive_check_interval_mins as i64);
     let diary_in_flight: DiaryInFlight = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
+    // Social polling next-run timestamps (DateTime::MAX = never / not configured).
+    // Polling schedule is fixed at gateway startup — mode/interval changes require restart.
+    let (ig_poll_interval, th_poll_interval) = {
+        if let Some(ref sc) = config.social_config {
+            let cfg = sc.read().unwrap();
+            let ig = cfg.social.instagram.as_ref()
+                .filter(|c| c.mode == "polling")
+                .map(|c| c.poll_interval_mins);
+            let th = cfg.social.threads.as_ref()
+                .filter(|c| c.mode == "polling")
+                .map(|c| c.poll_interval_mins);
+            (ig, th)
+        } else {
+            (None, None)
+        }
+    };
+    let mut next_ig_poll = ig_poll_interval
+        .map(|m| now + chrono::Duration::minutes(m as i64))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC);
+    let mut next_th_poll = th_poll_interval
+        .map(|m| now + chrono::Duration::minutes(m as i64))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC);
+
     loop {
         interval.tick().await;
         let now = Utc::now();
@@ -92,6 +121,48 @@ pub async fn run(
             let max_age_days = config.archive_timeout_hours / 24;
             crate::router::cleanup_old_attachments(&config.workspace, max_age_days.max(1));
             next_archive = now + chrono::Duration::minutes(config.archive_check_interval_mins as i64);
+        }
+
+        // ── System: Social polling ──
+        if now >= next_ig_poll {
+            if let (Some(ref tx), Some(ref sc)) = (&config.social_item_tx, &config.social_config) {
+                let ig_cfg = sc.read().unwrap().social.instagram.clone();
+                if let Some(cfg) = ig_cfg {
+                    let tx = Arc::clone(tx);
+                    let db = Arc::clone(&state_db);
+                    tokio::spawn(async move {
+                        match crate::social::poller::poll_instagram(&cfg, &db).await {
+                            Ok(items) => {
+                                let count = items.len();
+                                for item in items { let _ = tx.send(item); }
+                                if count > 0 { info!(count, "social poll instagram: new items"); }
+                            }
+                            Err(e) => warn!(error = %e, "social poll instagram failed"),
+                        }
+                    });
+                }
+                next_ig_poll = now + chrono::Duration::minutes(ig_poll_interval.unwrap_or(5) as i64);
+            }
+        }
+        if now >= next_th_poll {
+            if let (Some(ref tx), Some(ref sc)) = (&config.social_item_tx, &config.social_config) {
+                let th_cfg = sc.read().unwrap().social.threads.clone();
+                if let Some(cfg) = th_cfg {
+                    let tx = Arc::clone(tx);
+                    let db = Arc::clone(&state_db);
+                    tokio::spawn(async move {
+                        match crate::social::poller::poll_threads(&cfg, &db).await {
+                            Ok(items) => {
+                                let count = items.len();
+                                for item in items { let _ = tx.send(item); }
+                                if count > 0 { info!(count, "social poll threads: new items"); }
+                            }
+                            Err(e) => warn!(error = %e, "social poll threads failed"),
+                        }
+                    });
+                }
+                next_th_poll = now + chrono::Duration::minutes(th_poll_interval.unwrap_or(5) as i64);
+            }
         }
 
         // ── System: Diary extraction ──

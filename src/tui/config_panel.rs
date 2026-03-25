@@ -144,6 +144,12 @@ impl ConfigPanel {
                 section: "General".to_string(),
                 editable: true,
             },
+            ConfigEntry {
+                key: "webhook_base_url".to_string(),
+                value: config.general.webhook_base_url.clone().unwrap_or_default(),
+                section: "General".to_string(),
+                editable: true,
+            },
         ];
 
     // Heartbeat section
@@ -263,6 +269,62 @@ impl ConfigPanel {
             });
         }
 
+        // Social Inbox
+        if let Some(ig) = &config.social.instagram {
+            let base = config.webhook_base_url();
+            entries.push(ConfigEntry {
+                key: "social.instagram.mode".to_string(),
+                value: ig.mode.clone(),
+                section: "Social: Instagram".to_string(),
+                editable: true,
+            });
+            entries.push(ConfigEntry {
+                key: "social.instagram.webhook_url".to_string(),
+                value: format!("{}/webhook/instagram", base),
+                section: "Social: Instagram".to_string(),
+                editable: false,
+            });
+            entries.push(ConfigEntry {
+                key: "social.instagram.poll_interval_mins".to_string(),
+                value: ig.poll_interval_mins.to_string(),
+                section: "Social: Instagram".to_string(),
+                editable: true,
+            });
+            entries.push(ConfigEntry {
+                key: "social.instagram.admin_channel".to_string(),
+                value: ig.admin_channel.clone(),
+                section: "Social: Instagram".to_string(),
+                editable: true,
+            });
+        }
+        if let Some(th) = &config.social.threads {
+            let base = config.webhook_base_url();
+            entries.push(ConfigEntry {
+                key: "social.threads.mode".to_string(),
+                value: th.mode.clone(),
+                section: "Social: Threads".to_string(),
+                editable: true,
+            });
+            entries.push(ConfigEntry {
+                key: "social.threads.webhook_url".to_string(),
+                value: format!("{}/webhook/threads", base),
+                section: "Social: Threads".to_string(),
+                editable: false,
+            });
+            entries.push(ConfigEntry {
+                key: "social.threads.poll_interval_mins".to_string(),
+                value: th.poll_interval_mins.to_string(),
+                section: "Social: Threads".to_string(),
+                editable: true,
+            });
+            entries.push(ConfigEntry {
+                key: "social.threads.admin_channel".to_string(),
+                value: th.admin_channel.clone(),
+                section: "Social: Threads".to_string(),
+                editable: true,
+            });
+        }
+
         // MCP Env
         for (server, vars) in &config.mcp_env {
             for (k, v) in vars {
@@ -331,6 +393,9 @@ impl ConfigPanel {
         if key.ends_with(".group_policy") && key.starts_with("channels[") {
             return vec!["open".into(), "allowlist".into()];
         }
+        if key == "social.instagram.mode" || key == "social.threads.mode" {
+            return vec!["webhook".into(), "polling".into(), "off".into()];
+        }
         vec![]
     }
 
@@ -396,6 +461,35 @@ impl ConfigPanel {
                     }
                 });
             }
+            self.status_msg = Some(format!("Setting {} ...", key));
+            self.mode = ConfigMode::Normal;
+            return;
+        }
+
+        // Route social mode changes to social.mode (returns webhook_url in response)
+        if key == "social.instagram.mode" || key == "social.threads.mode" {
+            let platform = if key.contains("instagram") { "instagram" } else { "threads" }.to_string();
+            tokio::spawn(async move {
+                match client.request("social.mode", json!({"platform": platform, "mode": value_clone})).await {
+                    Ok(resp) => {
+                        let mode_str = resp.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+                        let requires_restart = resp.get("requires_restart").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let display = if let Some(url) = resp.get("webhook_url").and_then(|v| v.as_str()) {
+                            format!("{} — webhook URL: {} (immediate)", mode_str, url)
+                        } else if requires_restart {
+                            format!("{} — restart gateway to apply", mode_str)
+                        } else {
+                            mode_str.to_string()
+                        };
+                        let _ = tx.send(ConfigEvent::SetResult {
+                            key: key_clone,
+                            value: display,
+                            needs_restart: requires_restart,
+                        });
+                    }
+                    Err(e) => { let _ = tx.send(ConfigEvent::SetError(e)); }
+                }
+            });
             self.status_msg = Some(format!("Setting {} ...", key));
             self.mode = ConfigMode::Normal;
             return;

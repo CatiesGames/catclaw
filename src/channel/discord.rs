@@ -29,6 +29,10 @@ pub struct DiscordAdapter {
     approval_tx: mpsc::UnboundedSender<(String, bool)>,
     /// Receiver half — taken once by gateway to wire into approval handling loop.
     approval_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(String, bool)>>>,
+    /// Sender half for social inbox button actions (inbox_id, action) from interaction_create → gateway.
+    social_action_tx: mpsc::UnboundedSender<(i64, String)>,
+    /// Receiver half — taken once by gateway.
+    social_action_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(i64, String)>>>,
 }
 
 struct Handler {
@@ -36,11 +40,14 @@ struct Handler {
     filter: Arc<std::sync::RwLock<AdapterFilter>>,
     /// Channel to send approval decisions (request_id, approved) back to gateway.
     approval_tx: mpsc::UnboundedSender<(String, bool)>,
+    /// Channel to send social inbox button actions back to gateway.
+    social_action_tx: mpsc::UnboundedSender<(i64, String)>,
 }
 
 impl DiscordAdapter {
     pub fn new(token: String, filter: Arc<std::sync::RwLock<AdapterFilter>>) -> Self {
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
+        let (social_action_tx, social_action_rx) = mpsc::unbounded_channel();
         DiscordAdapter {
             token,
             filter,
@@ -48,12 +55,19 @@ impl DiscordAdapter {
             cache: RwLock::new(None),
             approval_tx,
             approval_rx: tokio::sync::Mutex::new(Some(approval_rx)),
+            social_action_tx,
+            social_action_rx: tokio::sync::Mutex::new(Some(social_action_rx)),
         }
     }
 
     /// Take the approval receiver (called once by gateway to wire into approval handling).
     pub async fn take_approval_rx(&self) -> Option<mpsc::UnboundedReceiver<(String, bool)>> {
         self.approval_rx.lock().await.take()
+    }
+
+    /// Take the social action receiver (called once by gateway).
+    pub async fn take_social_action_rx(&self) -> Option<mpsc::UnboundedReceiver<(i64, String)>> {
+        self.social_action_rx.lock().await.take()
     }
 
     pub fn from_config(config: &crate::config::ChannelConfig) -> Result<(Self, Arc<std::sync::RwLock<AdapterFilter>>)> {
@@ -354,6 +368,23 @@ impl EventHandler for Handler {
             }
             Interaction::Component(comp) => {
                 let custom_id = comp.data.custom_id.clone();
+
+                // Social inbox button: social:{action}:{inbox_id}
+                if let Some(rest) = custom_id.strip_prefix("social:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        if let Ok(inbox_id) = parts[1].parse::<i64>() {
+                            let _ = self.social_action_tx.send((inbox_id, parts[0].to_string()));
+                        }
+                    }
+                    // Acknowledge without modifying the message
+                    let _ = comp.create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Acknowledge,
+                    ).await;
+                    return;
+                }
+
                 let (request_id, approved) =
                     if let Some(rid) = custom_id.strip_prefix("approve:") {
                         (rid.to_string(), true)
@@ -436,6 +467,7 @@ impl ChannelAdapter for DiscordAdapter {
             msg_tx,
             filter: self.filter.clone(),
             approval_tx: self.approval_tx.clone(),
+            social_action_tx: self.social_action_tx.clone(),
         };
 
         let mut client = Client::builder(&self.token, intents)
@@ -1096,6 +1128,69 @@ impl ChannelAdapter for DiscordAdapter {
 
     fn supported_actions(&self) -> Vec<ActionInfo> {
         discord_action_infos()
+    }
+
+    async fn send_social_card(
+        &self,
+        channel_id: &str,
+        card: &crate::social::forward::ForwardCard,
+    ) -> crate::error::Result<Option<String>> {
+        use crate::social::forward::ForwardCardType;
+        let http = self.http.read().await;
+        let http = http
+            .as_ref()
+            .ok_or_else(|| CatClawError::Discord("not connected".to_string()))?;
+        let ch_id = channel_id
+            .parse::<u64>()
+            .map_err(|_| CatClawError::Discord("invalid channel id".to_string()))?;
+
+        let color = match card.card_type {
+            ForwardCardType::Incoming => 0x5865F2u32,
+            ForwardCardType::DraftReview => 0xFEE75Cu32,
+        };
+        let mut embed = CreateEmbed::new()
+            .title(&card.title)
+            .description(&card.text)
+            .color(color)
+            .field("From", format!("@{}", card.author), true)
+            .footer(serenity::all::CreateEmbedFooter::new(format!("inbox_id: {}", card.inbox_id)));
+
+        if let Some(ref url) = card.permalink {
+            embed = embed.field("Post", url, false);
+        }
+
+        let buttons: Vec<CreateButton> = match card.card_type {
+            ForwardCardType::Incoming => vec![
+                CreateButton::new(format!("social:ai_reply:{}", card.inbox_id))
+                    .label("AI 回覆")
+                    .style(ButtonStyle::Primary),
+                CreateButton::new(format!("social:manual_reply:{}", card.inbox_id))
+                    .label("手動回覆")
+                    .style(ButtonStyle::Secondary),
+                CreateButton::new(format!("social:ignore:{}", card.inbox_id))
+                    .label("忽略")
+                    .style(ButtonStyle::Danger),
+            ],
+            ForwardCardType::DraftReview => vec![
+                CreateButton::new(format!("social:approve_draft:{}", card.inbox_id))
+                    .label("核准發送")
+                    .style(ButtonStyle::Success),
+                CreateButton::new(format!("social:discard_draft:{}", card.inbox_id))
+                    .label("捨棄")
+                    .style(ButtonStyle::Danger),
+            ],
+        };
+
+        let builder = CreateMessage::new()
+            .embed(embed)
+            .components(vec![CreateActionRow::Buttons(buttons)]);
+
+        let msg = ChannelId::new(ch_id)
+            .send_message(http, builder)
+            .await
+            .map_err(|e| CatClawError::Discord(format!("failed to send social card: {}", e)))?;
+
+        Ok(Some(msg.id.to_string()))
     }
 
     async fn create_reaction_handle(

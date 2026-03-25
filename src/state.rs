@@ -267,6 +267,40 @@ impl StateDb {
              ALTER TABLE scheduled_tasks ADD COLUMN description TEXT;",
         );
 
+        // Social inbox tables
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS social_inbox (
+                id            INTEGER PRIMARY KEY,
+                platform      TEXT NOT NULL,
+                platform_id   TEXT NOT NULL,
+                event_type    TEXT NOT NULL,
+                author_id     TEXT,
+                author_name   TEXT,
+                media_id      TEXT,
+                text          TEXT,
+                status        TEXT NOT NULL DEFAULT 'pending',
+                action        TEXT,
+                draft         TEXT,
+                reply_id      TEXT,
+                session_key   TEXT,
+                forward_ref   TEXT,
+                metadata      TEXT,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                UNIQUE(platform, platform_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS social_cursors (
+                platform    TEXT NOT NULL,
+                feed        TEXT NOT NULL,
+                cursor_val  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (platform, feed)
+            );
+            ",
+        )?;
+
         Ok(())
     }
 
@@ -593,4 +627,267 @@ impl StateDb {
             .optional()?;
         Ok(row)
     }
+
+    // --- Social Inbox ---
+
+    /// Insert a new social inbox item. Returns false if already exists (dedup).
+    pub fn insert_social_inbox(&self, row: &SocialInboxRow) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "INSERT OR IGNORE INTO social_inbox
+             (platform, platform_id, event_type, author_id, author_name, media_id, text,
+              status, action, draft, reply_id, session_key, forward_ref, metadata, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+            params![
+                row.platform, row.platform_id, row.event_type,
+                row.author_id, row.author_name, row.media_id, row.text,
+                row.status, row.action, row.draft, row.reply_id,
+                row.session_key, row.forward_ref, row.metadata,
+                row.created_at, row.updated_at,
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn get_social_inbox_by_platform_id(&self, platform: &str, platform_id: &str) -> Result<Option<SocialInboxRow>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT id,platform,platform_id,event_type,author_id,author_name,media_id,text,
+                    status,action,draft,reply_id,session_key,forward_ref,metadata,created_at,updated_at
+             FROM social_inbox WHERE platform=?1 AND platform_id=?2",
+            params![platform, platform_id],
+            social_inbox_row_mapper,
+        ).optional()?;
+        Ok(row)
+    }
+
+    pub fn get_social_inbox(&self, id: i64) -> Result<Option<SocialInboxRow>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT id,platform,platform_id,event_type,author_id,author_name,media_id,text,
+                    status,action,draft,reply_id,session_key,forward_ref,metadata,created_at,updated_at
+             FROM social_inbox WHERE id=?1",
+            params![id],
+            social_inbox_row_mapper,
+        ).optional()?;
+        Ok(row)
+    }
+
+    pub fn list_social_inbox(&self, platform_filter: Option<&str>, status_filter: Option<&str>, limit: i64) -> Result<Vec<SocialInboxRow>> {
+        const COLS: &str = "id,platform,platform_id,event_type,author_id,author_name,media_id,text,status,action,draft,reply_id,session_key,forward_ref,metadata,created_at,updated_at";
+        let conn = self.conn.lock().unwrap();
+        let rows: Vec<SocialInboxRow> = match (platform_filter, status_filter) {
+            (Some(p), Some(s)) => {
+                let sql = format!("SELECT {COLS} FROM social_inbox WHERE platform=?1 AND status=?2 ORDER BY created_at DESC LIMIT ?3");
+                conn.prepare(&sql)?.query_map(params![p, s, limit], social_inbox_row_mapper)?
+                    .filter_map(|r| r.ok()).collect()
+            }
+            (Some(p), None) => {
+                let sql = format!("SELECT {COLS} FROM social_inbox WHERE platform=?1 ORDER BY created_at DESC LIMIT ?2");
+                conn.prepare(&sql)?.query_map(params![p, limit], social_inbox_row_mapper)?
+                    .filter_map(|r| r.ok()).collect()
+            }
+            (None, Some(s)) => {
+                let sql = format!("SELECT {COLS} FROM social_inbox WHERE status=?1 ORDER BY created_at DESC LIMIT ?2");
+                conn.prepare(&sql)?.query_map(params![s, limit], social_inbox_row_mapper)?
+                    .filter_map(|r| r.ok()).collect()
+            }
+            (None, None) => {
+                let sql = format!("SELECT {COLS} FROM social_inbox ORDER BY created_at DESC LIMIT ?1");
+                conn.prepare(&sql)?.query_map(params![limit], social_inbox_row_mapper)?
+                    .filter_map(|r| r.ok()).collect()
+            }
+        };
+        Ok(rows)
+    }
+
+    pub fn update_social_inbox_status(&self, id: i64, status: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_inbox SET status=?1, updated_at=?2 WHERE id=?3",
+            params![status, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Reset an inbox item for reprocessing: clear draft/reply/forward/session and set status=pending.
+    pub fn reset_social_inbox_for_reprocess(&self, id: i64) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_inbox SET status='pending', action=NULL, draft=NULL, reply_id=NULL, \
+             session_key=NULL, forward_ref=NULL, updated_at=?1 WHERE id=?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_social_inbox_draft(&self, id: i64, draft: &str, status: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_inbox SET draft=?1, status=?2, updated_at=?3 WHERE id=?4",
+            params![draft, status, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_social_inbox_forward_ref(&self, id: i64, forward_ref: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_inbox SET forward_ref=?1, status='forwarded', updated_at=?2 WHERE id=?3",
+            params![forward_ref, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_social_inbox_sent(&self, id: i64, reply_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_inbox SET reply_id=?1, status='sent', updated_at=?2 WHERE id=?3",
+            params![reply_id, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_social_inbox_session(&self, id: i64, session_key: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_inbox SET session_key=?1, status='auto_replying', updated_at=?2 WHERE id=?3",
+            params![session_key, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Update status by (platform, platform_id) — no prior lookup required.
+    pub fn set_social_inbox_status_by_platform_id(
+        &self,
+        platform: &str,
+        platform_id: &str,
+        status: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_inbox SET status=?1, updated_at=?2 WHERE platform=?3 AND platform_id=?4",
+            params![status, now, platform, platform_id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark as sent (reply_id + status=sent) by (platform, platform_id) — no prior lookup.
+    pub fn set_social_inbox_sent_by_platform_id(
+        &self,
+        platform: &str,
+        platform_id: &str,
+        reply_id: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_inbox SET reply_id=?1, status='sent', updated_at=?2 WHERE platform=?3 AND platform_id=?4",
+            params![reply_id, now, platform, platform_id],
+        )?;
+        Ok(())
+    }
+
+    // --- Social Cursors ---
+
+    pub fn get_social_cursor(&self, platform: &str, feed: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let val = conn.query_row(
+            "SELECT cursor_val FROM social_cursors WHERE platform=?1 AND feed=?2",
+            params![platform, feed],
+            |row| row.get::<_, String>(0),
+        ).optional()?;
+        Ok(val)
+    }
+
+    pub fn upsert_social_cursor(&self, platform: &str, feed: &str, cursor_val: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO social_cursors (platform, feed, cursor_val, updated_at)
+             VALUES (?1,?2,?3,?4)
+             ON CONFLICT(platform,feed) DO UPDATE SET cursor_val=excluded.cursor_val, updated_at=excluded.updated_at",
+            params![platform, feed, cursor_val, now],
+        )?;
+        Ok(())
+    }
+}
+
+// --- Social Inbox Row ---
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[allow(dead_code)]
+pub struct SocialInboxRow {
+    pub id: i64,
+    pub platform: String,
+    pub platform_id: String,
+    pub event_type: String,
+    pub author_id: Option<String>,
+    pub author_name: Option<String>,
+    pub media_id: Option<String>,
+    pub text: Option<String>,
+    /// Status: pending | forwarded | auto_replying | draft_ready | approved | sent | ignored | failed
+    pub status: String,
+    pub action: Option<String>,
+    pub draft: Option<String>,
+    pub reply_id: Option<String>,
+    pub session_key: Option<String>,
+    pub forward_ref: Option<String>,
+    pub metadata: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl SocialInboxRow {
+    pub fn new(platform: &str, platform_id: &str, event_type: &str) -> Self {
+        let now = Utc::now().to_rfc3339();
+        SocialInboxRow {
+            id: 0,
+            platform: platform.to_string(),
+            platform_id: platform_id.to_string(),
+            event_type: event_type.to_string(),
+            author_id: None,
+            author_name: None,
+            media_id: None,
+            text: None,
+            status: "pending".to_string(),
+            action: None,
+            draft: None,
+            reply_id: None,
+            session_key: None,
+            forward_ref: None,
+            metadata: None,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+}
+
+fn social_inbox_row_mapper(row: &rusqlite::Row) -> rusqlite::Result<SocialInboxRow> {
+    Ok(SocialInboxRow {
+        id: row.get(0)?,
+        platform: row.get(1)?,
+        platform_id: row.get(2)?,
+        event_type: row.get(3)?,
+        author_id: row.get(4)?,
+        author_name: row.get(5)?,
+        media_id: row.get(6)?,
+        text: row.get(7)?,
+        status: row.get(8)?,
+        action: row.get(9)?,
+        draft: row.get(10)?,
+        reply_id: row.get(11)?,
+        session_key: row.get(12)?,
+        forward_ref: row.get(13)?,
+        metadata: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
+    })
 }

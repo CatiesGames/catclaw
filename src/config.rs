@@ -4,6 +4,159 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{CatClawError, Result};
 
+// ── Social config ────────────────────────────────────────────────────────────
+
+/// Top-level social platforms config (Instagram + Threads).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SocialConfig {
+    #[serde(default)]
+    pub instagram: Option<InstagramConfig>,
+    #[serde(default)]
+    pub threads: Option<ThreadsConfig>,
+}
+
+fn default_social_mode() -> String { "off".to_string() }
+fn default_poll_interval() -> u64 { 5 }
+fn default_social_agent() -> String { "main".to_string() }
+fn default_ig_subscribe() -> Vec<String> {
+    vec!["comments".to_string(), "mentions".to_string()]
+}
+fn default_threads_subscribe() -> Vec<String> {
+    vec!["replies".to_string(), "mentions".to_string()]
+}
+
+/// Instagram Graph API integration config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstagramConfig {
+    /// Receive mode: "webhook" | "polling" | "off"
+    #[serde(default = "default_social_mode")]
+    pub mode: String,
+
+    /// Polling interval in minutes (only when mode = "polling")
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_mins: u64,
+
+    /// Env var holding the Instagram System User Access Token
+    pub token_env: String,
+
+    /// Env var holding the App Secret (for webhook HMAC-SHA256 signature verification)
+    #[serde(default)]
+    pub app_secret_env: Option<String>,
+
+    /// Env var holding the webhook verify token (set when subscribing the webhook in Meta dashboard)
+    #[serde(default)]
+    pub webhook_verify_token_env: Option<String>,
+
+    /// Instagram User ID (from Meta Business Manager)
+    pub user_id: String,
+
+    /// Admin channel for forward cards and draft review.
+    /// Format: "discord:channel:<channel_id>" | "telegram:chat:<chat_id>" | "slack:channel:<channel_id>"
+    pub admin_channel: String,
+
+    /// Webhook event fields to subscribe to.
+    /// Possible values: "comments", "mentions", "messages"
+    #[serde(default = "default_ig_subscribe")]
+    pub subscribe: Vec<String>,
+
+    /// Agent to use for auto_reply sessions
+    #[serde(default = "default_social_agent")]
+    pub agent: String,
+
+    /// Action rules — evaluated top-to-bottom, first match wins.
+    /// If no rule matches, the event is ignored.
+    #[serde(default)]
+    pub rules: Vec<SocialRule>,
+
+    /// Named reply templates used by auto_reply_template rules.
+    #[serde(default)]
+    pub templates: HashMap<String, String>,
+}
+
+/// Threads API integration config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadsConfig {
+    /// Receive mode: "webhook" | "polling" | "off"
+    #[serde(default = "default_social_mode")]
+    pub mode: String,
+
+    /// Polling interval in minutes (only when mode = "polling")
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_mins: u64,
+
+    /// Env var holding the Threads OAuth access token (60-day long-lived)
+    pub token_env: String,
+
+    /// Env var holding the App Secret (for webhook HMAC-SHA256 signature verification)
+    #[serde(default)]
+    pub app_secret_env: Option<String>,
+
+    /// Env var holding the webhook verify token (set when subscribing the webhook in Meta dashboard)
+    #[serde(default)]
+    pub webhook_verify_token_env: Option<String>,
+
+    /// Threads User ID
+    pub user_id: String,
+
+    /// Admin channel for forward cards and draft review.
+    /// Format: "discord:channel:<channel_id>" | "telegram:chat:<chat_id>" | "slack:channel:<channel_id>"
+    pub admin_channel: String,
+
+    /// Webhook event fields to subscribe to.
+    /// Possible values: "replies", "mentions"
+    #[serde(default = "default_threads_subscribe")]
+    pub subscribe: Vec<String>,
+
+    /// Agent to use for auto_reply sessions
+    #[serde(default = "default_social_agent")]
+    pub agent: String,
+
+    /// Action rules — evaluated top-to-bottom, first match wins.
+    #[serde(default)]
+    pub rules: Vec<SocialRule>,
+
+    /// Named reply templates used by auto_reply_template rules.
+    #[serde(default)]
+    pub templates: HashMap<String, String>,
+}
+
+/// A single action rule for social event routing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocialRule {
+    /// Event type to match: "comments" | "mentions" | "messages" | "replies" | "*"
+    #[serde(rename = "match")]
+    pub match_type: String,
+
+    /// Optional substring keyword filter (matches against event text, case-insensitive)
+    #[serde(default)]
+    pub keyword: Option<String>,
+
+    /// Action to take: "forward" | "auto_reply" | "auto_reply_template" | "ignore"
+    pub action: String,
+
+    /// Template key (only for action = "auto_reply_template")
+    #[serde(default)]
+    pub template: Option<String>,
+
+    /// Override the platform-level agent for this rule (only for action = "auto_reply")
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+/// Parse an admin_channel string into (adapter_name, channel_id).
+/// Format: "<adapter>:channel:<id>" or "<adapter>:chat:<id>"
+/// e.g. "discord:channel:123456" -> ("discord", "123456")
+///      "telegram:chat:987654"   -> ("telegram", "987654")
+///      "slack:channel:CABCDEF"  -> ("slack", "CABCDEF")
+pub fn parse_admin_channel(s: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = s.splitn(3, ':').collect();
+    if parts.len() == 3 {
+        Some((parts[0].to_string(), parts[2].to_string()))
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub general: GeneralConfig,
@@ -41,6 +194,10 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub mcp_env: HashMap<String, HashMap<String, String>>,
+
+    /// Social inbox integration (Instagram + Threads).
+    #[serde(default)]
+    pub social: SocialConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +244,12 @@ pub struct GeneralConfig {
     /// Falls back to system local timezone if not set.
     #[serde(default)]
     pub timezone: Option<String>,
+
+    /// Public base URL for webhook callbacks (e.g. "https://myserver.com").
+    /// Used to display the full webhook URL in TUI/CLI after setting mode=webhook.
+    /// If not set, falls back to "http://localhost:{port}".
+    #[serde(default)]
+    pub webhook_base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -400,6 +563,12 @@ impl Config {
         Ok(())
     }
 
+    /// Return the effective webhook base URL (falls back to localhost:{port}).
+    pub fn webhook_base_url(&self) -> String {
+        self.general.webhook_base_url.clone()
+            .unwrap_or_else(|| format!("http://localhost:{}", self.general.port))
+    }
+
     /// Get the default agent ID
     pub fn default_agent_id(&self) -> Option<&str> {
         self.agents
@@ -429,6 +598,15 @@ impl Config {
                 let t = self.agents.first().map(|a| a.approval.timeout_secs).unwrap_or(120);
                 Ok(if t == 0 { "120".to_string() } else { t.to_string() })
             }
+            "webhook_base_url" => Ok(self.general.webhook_base_url.clone().unwrap_or_else(|| format!("http://localhost:{}", self.general.port))),
+            "social.instagram.mode" => Ok(self.social.instagram.as_ref().map_or_else(|| "off".to_string(), |c| c.mode.clone())),
+            "social.instagram.poll_interval_mins" => Ok(self.social.instagram.as_ref().map_or(5, |c| c.poll_interval_mins).to_string()),
+            "social.instagram.user_id" => Ok(self.social.instagram.as_ref().map(|c| c.user_id.clone()).unwrap_or_default()),
+            "social.instagram.admin_channel" => Ok(self.social.instagram.as_ref().map(|c| c.admin_channel.clone()).unwrap_or_default()),
+            "social.threads.mode" => Ok(self.social.threads.as_ref().map_or_else(|| "off".to_string(), |c| c.mode.clone())),
+            "social.threads.poll_interval_mins" => Ok(self.social.threads.as_ref().map_or(5, |c| c.poll_interval_mins).to_string()),
+            "social.threads.user_id" => Ok(self.social.threads.as_ref().map(|c| c.user_id.clone()).unwrap_or_default()),
+            "social.threads.admin_channel" => Ok(self.social.threads.as_ref().map(|c| c.admin_channel.clone()).unwrap_or_default()),
             other => {
                 if let Some(rest) = other.strip_prefix("channels[") {
                     if let Some((idx_str, field)) = rest.split_once("].") {
@@ -545,6 +723,70 @@ impl Config {
                 }
                 Ok(false)
             }
+            "webhook_base_url" => {
+                self.general.webhook_base_url = if value.is_empty() { None } else { Some(value.trim_end_matches('/').to_string()) };
+                Ok(false)
+            }
+            "social.instagram.mode" => {
+                match value {
+                    "webhook" | "polling" | "off" => {
+                        if let Some(ref mut ig) = self.social.instagram {
+                            ig.mode = value.to_string();
+                            Ok(false)
+                        } else {
+                            Err(CatClawError::Config("social.instagram is not configured".into()))
+                        }
+                    }
+                    _ => Err(CatClawError::Config("social.instagram.mode must be 'webhook', 'polling', or 'off'".into())),
+                }
+            }
+            "social.instagram.poll_interval_mins" => {
+                let mins: u64 = value.parse().map_err(|_| CatClawError::Config("invalid number".into()))?;
+                if let Some(ref mut ig) = self.social.instagram {
+                    ig.poll_interval_mins = mins;
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.instagram is not configured".into()))
+                }
+            }
+            "social.threads.mode" => {
+                match value {
+                    "webhook" | "polling" | "off" => {
+                        if let Some(ref mut th) = self.social.threads {
+                            th.mode = value.to_string();
+                            Ok(false)
+                        } else {
+                            Err(CatClawError::Config("social.threads is not configured".into()))
+                        }
+                    }
+                    _ => Err(CatClawError::Config("social.threads.mode must be 'webhook', 'polling', or 'off'".into())),
+                }
+            }
+            "social.threads.poll_interval_mins" => {
+                let mins: u64 = value.parse().map_err(|_| CatClawError::Config("invalid number".into()))?;
+                if let Some(ref mut th) = self.social.threads {
+                    th.poll_interval_mins = mins;
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.threads is not configured".into()))
+                }
+            }
+            "social.instagram.admin_channel" => {
+                if let Some(ref mut ig) = self.social.instagram {
+                    ig.admin_channel = value.to_string();
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.instagram is not configured".into()))
+                }
+            }
+            "social.threads.admin_channel" => {
+                if let Some(ref mut th) = self.social.threads {
+                    th.admin_channel = value.to_string();
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.threads is not configured".into()))
+                }
+            }
             other => {
                 if let Some(rest) = other.strip_prefix("channels[") {
                     if let Some((idx_str, field)) = rest.split_once("].") {
@@ -618,6 +860,7 @@ impl Config {
                 default_fallback_model: None,
                 ws_token: generate_token(),
                 timezone: None,
+                webhook_base_url: None,
             },
             channels: vec![],
             agents: vec![AgentConfig {
@@ -647,6 +890,7 @@ impl Config {
             }),
             logging: LoggingConfig::default(),
             mcp_env: HashMap::new(),
+            social: SocialConfig::default(),
         }
     }
 }

@@ -30,6 +30,9 @@ pub struct GatewayHandle {
     pub session_manager: Arc<SessionManager>,
     pub agent_registry: Arc<std::sync::RwLock<AgentRegistry>>,
     pub adapters: Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
+    /// Ordered list of all active adapters (used by social forward cards and auto_reply).
+    #[allow(dead_code)]
+    pub adapters_list: Arc<Vec<Arc<dyn ChannelAdapter>>>,
     /// Path to the config file (for saving changes).
     pub config_path: PathBuf,
     /// Shared mutable config (for hot-reload via config.set).
@@ -43,6 +46,8 @@ pub struct GatewayHandle {
     /// Discovered MCP tools per server (populated at startup).
     /// In-memory only; re-discovered on each gateway restart.
     pub mcp_tools: Arc<std::sync::RwLock<HashMap<String, Vec<String>>>>,
+    /// Channel to inject social SocialItems into the ingest pipeline (webhook + manual poll).
+    pub social_item_tx: Arc<tokio::sync::mpsc::UnboundedSender<crate::social::SocialItem>>,
 }
 
 /// Start gateway services (DB, agents, session manager, channel adapters, scheduler)
@@ -106,6 +111,8 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
 
     // Collect approval_rx receivers from adapters to wire later
     let mut approval_receivers: Vec<tokio_mpsc::UnboundedReceiver<(String, bool)>> = Vec::new();
+    // Collect social_action_rx receivers from adapters
+    let mut social_action_receivers: Vec<tokio_mpsc::UnboundedReceiver<(i64, String)>> = Vec::new();
 
     // 7. Start channel adapters
     let mut adapters: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
@@ -121,6 +128,9 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 // Take approval_rx before moving adapter into the start task
                 if let Some(rx) = adapter.take_approval_rx().await {
                     approval_receivers.push(rx);
+                }
+                if let Some(rx) = adapter.take_social_action_rx().await {
+                    social_action_receivers.push(rx);
                 }
 
                 adapters.push(adapter.clone());
@@ -143,6 +153,9 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 if let Some(rx) = adapter.take_approval_rx().await {
                     approval_receivers.push(rx);
                 }
+                if let Some(rx) = adapter.take_social_action_rx().await {
+                    social_action_receivers.push(rx);
+                }
 
                 adapters.push(adapter.clone());
 
@@ -163,6 +176,9 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 // Take approval_rx before moving adapter into the start task
                 if let Some(rx) = adapter.take_approval_rx().await {
                     approval_receivers.push(rx);
+                }
+                if let Some(rx) = adapter.take_social_action_rx().await {
+                    social_action_receivers.push(rx);
                 }
 
                 adapters.push(adapter.clone());
@@ -201,6 +217,11 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         });
     }
 
+    // Create social ingest channel early (used by both scheduler and ingest task).
+    let (social_item_tx_raw, social_item_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::social::SocialItem>();
+    let social_item_tx = Arc::new(social_item_tx_raw);
+
     // 8. Start scheduler
     {
         let sched_config = scheduler::SchedulerConfig {
@@ -209,6 +230,8 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
             archive_timeout_hours: config.general.session_archive_timeout_hours,
             archive_check_interval_mins: 360, // every 6 hours
             workspace: config.general.workspace.clone(),
+            social_item_tx: Some(social_item_tx.clone()),
+            social_config: Some(gw_config.clone()),
         };
         let sched_db = state_db.clone();
         let sched_agents = agent_registry.clone();
@@ -220,6 +243,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     }
 
     // 9. Start message router as a background task
+    let adapters_list = Arc::new(adapters.clone());
     let adapter_map: HashMap<String, Arc<dyn ChannelAdapter>> = adapters
         .iter()
         .map(|a| (a.name().to_string(), a.clone()))
@@ -314,6 +338,74 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         });
     }
 
+    // Start social ingest pipeline (receives SocialItems from webhook + polling, deduplicates,
+    // resolves action, dispatches forward/auto_reply/template).
+    {
+        let ingest_db = state_db.clone();
+        let ingest_config = gw_config.clone();
+        let ingest_adapters = adapters_list.clone();
+        let ingest_sm = session_manager.clone();
+        let ingest_ar = agent_registry.clone();
+        tokio::spawn(crate::social::run_ingest(
+            social_item_rx,
+            ingest_db,
+            ingest_config,
+            ingest_adapters,
+            ingest_sm,
+            ingest_ar,
+        ));
+        info!("social ingest pipeline started");
+    }
+
+    // Startup catchup poll: regardless of mode, run one poll on launch to recover
+    // any events that arrived while the gateway was offline (webhook gap recovery).
+    {
+        let startup_config = gw_config.read().unwrap().clone();
+        let startup_tx = social_item_tx.clone();
+        let startup_db = state_db.clone();
+        tokio::spawn(async move {
+            let ig_cfg = startup_config.social.instagram.clone();
+            let th_cfg = startup_config.social.threads.clone();
+
+            if let Some(cfg) = ig_cfg.filter(|c| c.mode == "webhook" || c.mode == "polling") {
+                match crate::social::poller::poll_instagram(&cfg, &startup_db).await {
+                    Ok(items) => {
+                        let count = items.len();
+                        for item in items { let _ = startup_tx.send(item); }
+                        if count > 0 { info!(count, "startup catchup: instagram"); }
+                    }
+                    Err(e) => warn!(error = %e, "startup catchup: instagram poll failed"),
+                }
+            }
+            if let Some(cfg) = th_cfg.filter(|c| c.mode == "webhook" || c.mode == "polling") {
+                match crate::social::poller::poll_threads(&cfg, &startup_db).await {
+                    Ok(items) => {
+                        let count = items.len();
+                        for item in items { let _ = startup_tx.send(item); }
+                        if count > 0 { info!(count, "startup catchup: threads"); }
+                    }
+                    Err(e) => warn!(error = %e, "startup catchup: threads poll failed"),
+                }
+            }
+        });
+    }
+
+    // Wire social action receivers (button presses from adapters → approve/ignore/auto_reply handlers).
+    for mut rx in social_action_receivers {
+        let sa_db = state_db.clone();
+        let sa_config = gw_config.clone();
+        let sa_adapters = adapters_list.clone();
+        let sa_sm = session_manager.clone();
+        let sa_ar = agent_registry.clone();
+        tokio::spawn(async move {
+            while let Some((inbox_id, action)) = rx.recv().await {
+                handle_social_button_action(
+                    inbox_id, &action, &sa_db, &sa_config, &sa_adapters, &sa_sm, &sa_ar,
+                ).await;
+            }
+        });
+    }
+
     // Discover MCP tools from user .mcp.json servers (non-blocking, best-effort)
     let mcp_tools: Arc<std::sync::RwLock<HashMap<String, Vec<String>>>> =
         Arc::new(std::sync::RwLock::new(HashMap::new()));
@@ -342,12 +434,14 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         session_manager,
         agent_registry,
         adapters: adapter_map,
+        adapters_list,
         config_path,
         config: gw_config,
         adapter_filters,
         pending_approvals,
         event_bus,
         mcp_tools,
+        social_item_tx,
     };
 
     // 10. Start gateway server (WS + MCP on single port)
@@ -390,4 +484,131 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     info!("gateway stopped");
 
     Ok(())
+}
+
+// ── Social button action dispatcher ──────────────────────────────────────────
+
+/// Handle a social inbox button press from any adapter.
+/// `action` is one of: "ai_reply", "manual_reply", "ignore", "approve_draft", "discard_draft".
+#[allow(clippy::too_many_arguments)]
+async fn handle_social_button_action(
+    inbox_id: i64,
+    action: &str,
+    db: &Arc<StateDb>,
+    config: &Arc<std::sync::RwLock<Config>>,
+    adapters: &Arc<Vec<Arc<dyn ChannelAdapter>>>,
+    session_manager: &Arc<SessionManager>,
+    agent_registry: &Arc<std::sync::RwLock<crate::agent::AgentRegistry>>,
+) {
+    use crate::social::{dispatch_action, ResolvedAction, SocialItem, SocialPlatform};
+
+    let row = match db.get_social_inbox(inbox_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            warn!(inbox_id, "social button action: inbox item not found");
+            return;
+        }
+        Err(e) => {
+            error!(inbox_id, error = %e, "social button action: db error");
+            return;
+        }
+    };
+
+    match action {
+        "ignore" => {
+            let _ = db.update_social_inbox_status(inbox_id, "ignored");
+        }
+        "discard_draft" => {
+            let _ = db.update_social_inbox_status(inbox_id, "ignored");
+        }
+        "approve_draft" => {
+            // Same as WS social.inbox.approve — send draft via Meta API.
+            let draft = match &row.draft {
+                Some(d) => d.clone(),
+                None => {
+                    warn!(inbox_id, "social approve_draft: no draft");
+                    return;
+                }
+            };
+            let cfg = config.read().unwrap().clone();
+            let result: crate::error::Result<String> = match row.platform.as_str() {
+                "instagram" => {
+                    async {
+                        use crate::social::instagram::InstagramClient;
+                        let ig = cfg.social.instagram.as_ref()
+                            .ok_or_else(|| crate::error::CatClawError::Social("no instagram config".into()))?;
+                        let token = std::env::var(&ig.token_env)
+                            .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", ig.token_env)))?;
+                        let resp = InstagramClient::new(token, ig.user_id.clone())
+                            .reply_comment(&row.platform_id, &draft)
+                            .await?;
+                        Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+                    }.await
+                }
+                "threads" => {
+                    async {
+                        use crate::social::threads::ThreadsClient;
+                        let th = cfg.social.threads.as_ref()
+                            .ok_or_else(|| crate::error::CatClawError::Social("no threads config".into()))?;
+                        let token = std::env::var(&th.token_env)
+                            .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", th.token_env)))?;
+                        let resp = ThreadsClient::new(token, th.user_id.clone())
+                            .reply(&row.platform_id, &draft)
+                            .await?;
+                        Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+                    }.await
+                }
+                p => Err(crate::error::CatClawError::Social(format!("unknown platform '{}'", p))),
+            };
+            match result {
+                Ok(reply_id) => { let _ = db.update_social_inbox_sent(inbox_id, &reply_id); }
+                Err(e) => {
+                    error!(inbox_id, error = %e, "social approve_draft: send failed");
+                    let _ = db.update_social_inbox_status(inbox_id, "failed");
+                }
+            }
+        }
+        "ai_reply" | "manual_reply" => {
+            // Resolve admin_channel and agent from config.
+            let (agent_id, admin_channel) = {
+                let cfg = config.read().unwrap();
+                match row.platform.as_str() {
+                    "instagram" => cfg.social.instagram.as_ref().map(|c| (c.agent.clone(), c.admin_channel.clone())),
+                    "threads" => cfg.social.threads.as_ref().map(|c| (c.agent.clone(), c.admin_channel.clone())),
+                    _ => None,
+                }.unwrap_or_else(|| ("main".to_string(), String::new()))
+            };
+            if admin_channel.is_empty() { return; }
+
+            let platform = match row.platform.as_str() {
+                "instagram" => SocialPlatform::Instagram,
+                "threads" => SocialPlatform::Threads,
+                _ => return,
+            };
+            let item = SocialItem {
+                platform,
+                platform_id: row.platform_id.clone(),
+                event_type: row.event_type.clone(),
+                author_id: row.author_id.clone(),
+                author_name: row.author_name.clone(),
+                media_id: row.media_id.clone(),
+                text: row.text.clone(),
+                metadata: row.metadata.as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(serde_json::json!({})),
+            };
+
+            let resolved = if action == "ai_reply" {
+                ResolvedAction::AutoReply { agent: agent_id }
+            } else {
+                // manual_reply: re-send as Forward so admin can type a reply via the card
+                ResolvedAction::Forward
+            };
+
+            dispatch_action(resolved, item, db, config, adapters, session_manager, agent_registry, &admin_channel).await;
+        }
+        unknown => {
+            warn!(inbox_id, action = unknown, "social button action: unknown action");
+        }
+    }
 }

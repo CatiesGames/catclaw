@@ -395,6 +395,107 @@ default = true
 timeout_secs = 120                  # approval timeout (global)
 ```
 
+## Social Inbox
+
+CatClaw integrates Instagram and Threads via an independent Social Inbox subsystem — separate from channel adapters. Events flow: poll/webhook → dedup → rule-based action router → forward card or auto-reply draft → staged admin approval → send via Meta API.
+
+### Architecture
+
+```
+Instagram Graph API ──┐
+                       ├─→ SocialItem channel ─→ run_ingest()
+Threads API ──────────┘         │
+Webhook (POST /webhook/*)        ↓
+                          action router (rules)
+                               │
+         ┌─────────────────────┼──────────────────┐
+         ↓                     ↓                  ↓
+      forward              auto_reply          template / ignore
+      card → admin       Claude session →      call Meta API
+      [AI Reply]         stage_reply →         directly
+      [Manual Reply]     draft review card →
+      [Ignore]           admin approves →
+                         call Meta API
+```
+
+### Config
+
+```toml
+[social.instagram]
+mode = "polling"                           # polling | webhook | off
+poll_interval_mins = 5
+token_env = "INSTAGRAM_TOKEN"              # System User Token env var (never expires)
+app_secret_env = "INSTAGRAM_APP_SECRET"   # For HMAC webhook verification
+user_id = "17841412345678"
+admin_channel = "discord:channel:123456"  # Forward card destination
+agent = "main"
+
+[[social.instagram.rules]]
+match = "comments"        # event type: comments | mentions | messages | *
+action = "forward"        # forward | auto_reply | auto_reply_template | ignore
+
+[[social.instagram.rules]]
+match = "mentions"
+keyword = "price"         # optional keyword filter
+action = "auto_reply"
+agent = "support"
+
+[[social.instagram.rules]]
+match = "*"
+action = "ignore"
+
+[social.instagram.templates]
+default_mention = "Thank you for the mention! We will be in touch soon."
+
+[social.threads]
+mode = "polling"
+poll_interval_mins = 3
+token_env = "THREADS_TOKEN"               # Threads OAuth token (expires 60 days)
+app_secret_env = "THREADS_APP_SECRET"
+user_id = "12345678"
+admin_channel = "slack:channel:C0A9FFY7QAZ"
+agent = "main"
+
+[[social.threads.rules]]
+match = "replies"
+action = "forward"
+
+[[social.threads.rules]]
+match = "*"
+action = "ignore"
+```
+
+### Webhook Setup
+
+Add `webhook_verify_token_env` to the config and register the callback URL in Meta Developer Console:
+
+```
+GET/POST https://yourhost:PORT/webhook/instagram
+GET/POST https://yourhost:PORT/webhook/threads
+```
+
+The GET handler validates `hub.verify_token`; the POST handler verifies HMAC-SHA256 signature against the app secret.
+
+### CLI
+
+```bash
+catclaw social inbox                              # List all inbox items
+catclaw social inbox --platform instagram         # Filter by platform
+catclaw social inbox --status pending             # Filter by status
+catclaw social poll instagram                     # Trigger manual poll
+catclaw social mode instagram polling             # Switch mode (hot-reload)
+```
+
+### TUI
+
+Alt+9 opens the Social Inbox tab. Use Tab/BackTab to filter by status, Enter to view details, A to approve a draft, D to discard.
+
+### Agent MCP Tools
+
+When social is configured, agents get `instagram_*` and `threads_*` MCP tools for direct API access. The `*_stage_reply` tools store a draft and trigger an admin review card — no approval hook needed.
+
+---
+
 ## Tech Stack
 
 | Component | Crate |

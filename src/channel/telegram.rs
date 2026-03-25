@@ -22,23 +22,35 @@ pub struct TelegramAdapter {
     approval_tx: mpsc::UnboundedSender<(String, bool)>,
     /// Receiver half — taken once by gateway to wire into approval handling loop.
     approval_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(String, bool)>>>,
+    /// Sender half for social inbox button actions (inbox_id, action) → gateway.
+    social_action_tx: mpsc::UnboundedSender<(i64, String)>,
+    /// Receiver half — taken once by gateway.
+    social_action_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(i64, String)>>>,
 }
 
 impl TelegramAdapter {
     pub fn new(token: String, filter: std::sync::Arc<std::sync::RwLock<AdapterFilter>>) -> Self {
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
+        let (social_action_tx, social_action_rx) = mpsc::unbounded_channel();
         TelegramAdapter {
             token,
             filter,
             bot: RwLock::new(None),
             approval_tx,
             approval_rx: tokio::sync::Mutex::new(Some(approval_rx)),
+            social_action_tx,
+            social_action_rx: tokio::sync::Mutex::new(Some(social_action_rx)),
         }
     }
 
     /// Take the approval receiver (called once by gateway to wire into approval handling).
     pub async fn take_approval_rx(&self) -> Option<mpsc::UnboundedReceiver<(String, bool)>> {
         self.approval_rx.lock().await.take()
+    }
+
+    /// Take the social action receiver (called once by gateway).
+    pub async fn take_social_action_rx(&self) -> Option<mpsc::UnboundedReceiver<(i64, String)>> {
+        self.social_action_rx.lock().await.take()
     }
 
     pub fn from_config(config: &crate::config::ChannelConfig) -> Result<(Self, std::sync::Arc<std::sync::RwLock<AdapterFilter>>)> {
@@ -302,13 +314,27 @@ impl ChannelAdapter for TelegramAdapter {
             },
         );
 
-        // Callback query handler for approval button presses
+        // Callback query handler for approval and social inbox button presses
         let approval_tx = self.approval_tx.clone();
+        let social_action_tx = self.social_action_tx.clone();
         let callback_handler = Update::filter_callback_query().endpoint(
             move |bot: Bot, q: teloxide::types::CallbackQuery| {
                 let approval_tx = approval_tx.clone();
+                let social_action_tx = social_action_tx.clone();
                 async move {
                     if let Some(data) = &q.data {
+                        // Social inbox button: social:{action}:{inbox_id}
+                        if let Some(rest) = data.strip_prefix("social:") {
+                            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                            if parts.len() == 2 {
+                                if let Ok(inbox_id) = parts[1].parse::<i64>() {
+                                    let _ = social_action_tx.send((inbox_id, parts[0].to_string()));
+                                }
+                            }
+                            let _ = bot.answer_callback_query(&q.id).await;
+                            return Ok(());
+                        }
+
                         let (request_id, approved) = if let Some(rid) = data.strip_prefix("approve:") {
                             (rid.to_string(), true)
                         } else if let Some(rid) = data.strip_prefix("deny:") {
@@ -806,6 +832,37 @@ impl ChannelAdapter for TelegramAdapter {
 
     fn supported_actions(&self) -> Vec<ActionInfo> {
         telegram_action_infos()
+    }
+
+    async fn send_social_card(
+        &self,
+        channel_id: &str,
+        card: &crate::social::forward::ForwardCard,
+    ) -> crate::error::Result<Option<String>> {
+        let bot = self.bot.read().await;
+        let bot = bot
+            .as_ref()
+            .ok_or_else(|| CatClawError::Telegram("not connected".to_string()))?;
+
+        let chat_id: i64 = channel_id
+            .parse()
+            .map_err(|_| CatClawError::Telegram("invalid chat id".to_string()))?;
+
+        let (text, keyboard_json) = card.to_telegram_text_and_keyboard();
+        let buttons: Vec<Vec<InlineKeyboardButton>> = keyboard_json
+            .get("inline_keyboard")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let kb = InlineKeyboardMarkup::new(buttons);
+
+        let msg = bot
+            .send_message(ChatId(chat_id), &text)
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+            .reply_markup(kb)
+            .await
+            .map_err(|e| CatClawError::Telegram(format!("failed to send social card: {}", e)))?;
+
+        Ok(Some(msg.id.to_string()))
     }
 }
 

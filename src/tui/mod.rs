@@ -8,6 +8,7 @@ mod logs;
 mod sessions;
 mod skills;
 pub(crate) mod splash;
+mod social_inbox;
 mod tasks;
 mod theme;
 
@@ -99,6 +100,7 @@ pub enum Tab {
     Bindings,
     Config,
     Logs,
+    Social,
 }
 
 impl Tab {
@@ -112,6 +114,7 @@ impl Tab {
             Tab::Bindings,
             Tab::Config,
             Tab::Logs,
+            Tab::Social,
         ]
     }
 
@@ -125,6 +128,7 @@ impl Tab {
             Tab::Bindings => "Bindings",
             Tab::Config => "Config",
             Tab::Logs => "Logs",
+            Tab::Social => "Social",
         }
     }
 
@@ -138,6 +142,7 @@ impl Tab {
             Tab::Bindings => "🔗",
             Tab::Config => "⚙️",
             Tab::Logs => "📜",
+            Tab::Social => "📥",
         }
     }
 
@@ -189,6 +194,7 @@ struct App {
     bindings_panel: bindings::BindingsPanel,
     config_panel: config_panel::ConfigPanel,
     logs_panel: logs::LogsPanel,
+    social_panel: social_inbox::SocialInboxPanel,
     should_quit: bool,
     agent_count: usize,
     channel_count: usize,
@@ -232,6 +238,7 @@ impl App {
                 panel.add_log(logs::LogLevel::Info, "CatClaw TUI started".to_string());
                 panel
             },
+            social_panel: social_inbox::SocialInboxPanel::new(client.clone()),
             should_quit: false,
             agent_count: config.agents.len(),
             channel_count: config.channels.len(),
@@ -255,6 +262,7 @@ impl App {
             Tab::Bindings => self.bindings_panel.captures_input(),
             Tab::Config => self.config_panel.captures_input(),
             Tab::Logs => self.logs_panel.captures_input(),
+            Tab::Social => self.social_panel.captures_input(),
         };
 
         // Ctrl+C always quits
@@ -311,6 +319,10 @@ impl App {
                     self.active_tab = Tab::Logs;
                     return Action::Refresh;
                 }
+                (_, KeyCode::Char('9')) if event.modifiers.contains(KeyModifiers::ALT) => {
+                    self.active_tab = Tab::Social;
+                    return Action::Refresh;
+                }
                 _ => {}
             }
         } else if matches!(
@@ -330,6 +342,7 @@ impl App {
             Tab::Bindings => self.bindings_panel.handle_event(event),
             Tab::Config => self.config_panel.handle_event(event),
             Tab::Logs => self.logs_panel.handle_event(event),
+            Tab::Social => self.social_panel.handle_event(event),
         };
 
         match &action {
@@ -409,6 +422,7 @@ impl App {
             Tab::Bindings => self.bindings_panel.render(frame, chunks[1]),
             Tab::Config => self.config_panel.render(frame, chunks[1]),
             Tab::Logs => self.logs_panel.render(frame, chunks[1]),
+            Tab::Social => self.social_panel.render(frame, chunks[1]),
         }
 
         // Status bar

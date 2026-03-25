@@ -84,6 +84,12 @@ axum = { version = "0.8", features = ["ws"] }
 # SHA256 checksum verification (for self-update)
 sha2 = "0.10"
 
+# HMAC-SHA256 for Meta webhook signature verification
+hmac = "0.12"
+
+# Hex encoding for HMAC output
+hex = "0.4"
+
 # Unix UID for launchd domain target
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

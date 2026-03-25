@@ -48,6 +48,9 @@ pub enum CatClawError {
     #[error("service error: {0}")]
     Service(String),
 
+    #[error("social error: {0}")]
+    Social(String),
+
     #[error("{0}")]
     Other(String),
 }

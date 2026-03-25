@@ -26,6 +26,10 @@ pub struct SlackAdapter {
     approval_tx: mpsc::UnboundedSender<(String, bool)>,
     /// Receiver half — taken once by gateway.
     approval_rx: Mutex<Option<mpsc::UnboundedReceiver<(String, bool)>>>,
+    /// Sender half for social inbox button actions (inbox_id, action) → gateway.
+    social_action_tx: mpsc::UnboundedSender<(i64, String)>,
+    /// Receiver half — taken once by gateway.
+    social_action_rx: Mutex<Option<mpsc::UnboundedReceiver<(i64, String)>>>,
     /// User display name cache: user_id → display_name
     user_cache: DashMap<String, String>,
     /// Channel name cache: channel_id → channel_name
@@ -39,6 +43,7 @@ impl SlackAdapter {
         filter: Arc<std::sync::RwLock<AdapterFilter>>,
     ) -> Self {
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
+        let (social_action_tx, social_action_rx) = mpsc::unbounded_channel();
         SlackAdapter {
             bot_token,
             app_token,
@@ -47,6 +52,8 @@ impl SlackAdapter {
             bot_user_id: RwLock::new(None),
             approval_tx,
             approval_rx: Mutex::new(Some(approval_rx)),
+            social_action_tx,
+            social_action_rx: Mutex::new(Some(social_action_rx)),
             user_cache: DashMap::new(),
             channel_cache: DashMap::new(),
         }
@@ -55,6 +62,11 @@ impl SlackAdapter {
     /// Take the approval receiver (called once by gateway to wire into approval handling).
     pub async fn take_approval_rx(&self) -> Option<mpsc::UnboundedReceiver<(String, bool)>> {
         self.approval_rx.lock().await.take()
+    }
+
+    /// Take the social action receiver (called once by gateway).
+    pub async fn take_social_action_rx(&self) -> Option<mpsc::UnboundedReceiver<(i64, String)>> {
+        self.social_action_rx.lock().await.take()
     }
 
     pub fn from_config(
@@ -142,6 +154,7 @@ impl ChannelAdapter for SlackAdapter {
         // Socket Mode reconnection loop
         let filter_arc = self.filter.clone();
         let approval_tx = self.approval_tx.clone();
+        let social_action_tx = self.social_action_tx.clone();
         let http = self.http.clone();
         let bot_token = self.bot_token.clone();
         let app_token = self.app_token.clone();
@@ -535,6 +548,18 @@ impl ChannelAdapter for SlackAdapter {
                                 .get("action_id")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
+
+                            // Social inbox button: social:{action}:{inbox_id}
+                            if let Some(rest) = action_id.strip_prefix("social:") {
+                                let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                                if parts.len() == 2 {
+                                    if let Ok(inbox_id) = parts[1].parse::<i64>() {
+                                        let _ = social_action_tx.send((inbox_id, parts[0].to_string()));
+                                    }
+                                }
+                                continue;
+                            }
+
                             let (request_id, approved) =
                                 if let Some(rid) = action_id.strip_prefix("approve:") {
                                     (rid.to_string(), true)
@@ -1190,6 +1215,30 @@ impl ChannelAdapter for SlackAdapter {
 
     fn supported_actions(&self) -> Vec<ActionInfo> {
         slack_action_infos()
+    }
+
+    async fn send_social_card(
+        &self,
+        channel_id: &str,
+        card: &crate::social::forward::ForwardCard,
+    ) -> crate::error::Result<Option<String>> {
+        let blocks = card.to_slack_blocks();
+        let blocks_arr = blocks.get("blocks").cloned().unwrap_or(serde_json::json!([]));
+        let resp = slack_api(
+            &self.http,
+            &self.bot_token,
+            "chat.postMessage",
+            &serde_json::json!({
+                "channel": channel_id,
+                "text": format!("[{}] @{}: {}", card.title, card.author, card.text),
+                "blocks": blocks_arr,
+            }),
+        )
+        .await
+        .map_err(|e| CatClawError::Slack(format!("failed to send social card: {}", e)))?;
+
+        let ts = resp.get("ts").and_then(|v| v.as_str()).map(str::to_string);
+        Ok(ts)
     }
 
     async fn create_reaction_handle(

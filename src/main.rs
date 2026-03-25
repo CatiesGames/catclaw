@@ -14,6 +14,7 @@ mod pidfile;
 mod router;
 mod scheduler;
 mod session;
+mod social;
 mod state;
 mod tui;
 mod ws_client;
@@ -21,6 +22,7 @@ mod ws_protocol;
 mod ws_server;
 
 use clap::{Parser, Subcommand};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::agent::AgentLoader;
@@ -159,6 +161,12 @@ enum Commands {
     Hook {
         #[command(subcommand)]
         command: HookCommands,
+    },
+
+    /// Manage Social Inbox (Instagram/Threads)
+    Social {
+        #[command(subcommand)]
+        command: SocialCommands,
     },
 }
 
@@ -405,6 +413,34 @@ enum ChannelCommands {
     },
     /// List configured channels
     List,
+}
+
+#[derive(Subcommand)]
+enum SocialCommands {
+    /// View Social Inbox
+    Inbox {
+        /// Filter by platform (instagram, threads)
+        #[arg(long)]
+        platform: Option<String>,
+        /// Filter by status (pending, forwarded, draft_ready, sent, ignored, failed)
+        #[arg(long)]
+        status: Option<String>,
+        /// Max rows to display
+        #[arg(long, default_value = "20")]
+        limit: i64,
+    },
+    /// Manually trigger a poll for new events
+    Poll {
+        /// Platform to poll (instagram, threads, or omit for both)
+        platform: Option<String>,
+    },
+    /// Switch receive mode for a platform
+    Mode {
+        /// Platform (instagram or threads)
+        platform: String,
+        /// Mode: webhook | polling | off
+        mode: String,
+    },
 }
 
 #[tokio::main]
@@ -1188,6 +1224,123 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             println!("catclaw {}", env!("CARGO_PKG_VERSION"));
         }
 
+        Some(Commands::Social { command }) => {
+            let config = Config::load(&cli.config)?;
+            let state_db = StateDb::open(&config.general.state_db)?;
+            match command {
+                SocialCommands::Inbox { platform, status, limit } => {
+                    let rows = state_db.list_social_inbox(
+                        platform.as_deref(),
+                        status.as_deref(),
+                        limit,
+                    )?;
+                    if rows.is_empty() {
+                        println!("No social inbox items.");
+                    } else {
+                        println!(
+                            "{:<5} {:<12} {:<10} {:<15} {:<40} {:<12}",
+                            "ID", "PLATFORM", "TYPE", "FROM", "TEXT", "STATUS"
+                        );
+                        println!("{}", "-".repeat(96));
+                        for row in &rows {
+                            let text_preview = row.text.as_deref().unwrap_or("").chars().take(38).collect::<String>();
+                            println!(
+                                "{:<5} {:<12} {:<10} {:<15} {:<40} {:<12}",
+                                row.id,
+                                row.platform,
+                                row.event_type,
+                                row.author_name.as_deref().unwrap_or("-"),
+                                text_preview,
+                                row.status,
+                            );
+                        }
+                    }
+                }
+                SocialCommands::Poll { platform } => {
+                    println!("Triggering poll for {}…", platform.as_deref().unwrap_or("all platforms"));
+                    let tokio_db = std::sync::Arc::new(state_db);
+                    match platform.as_deref().unwrap_or("all") {
+                        "instagram" | "all" => {
+                            if let Some(ig_cfg) = &config.social.instagram {
+                                if ig_cfg.mode == "polling" {
+                                    match crate::social::poller::poll_instagram(ig_cfg, &tokio_db).await {
+                                        Ok(items) => println!("Instagram: {} new items", items.len()),
+                                        Err(e) => eprintln!("Instagram poll failed: {}", e),
+                                    }
+                                } else {
+                                    println!("Instagram mode is '{}', not 'polling'", ig_cfg.mode);
+                                }
+                            } else {
+                                println!("Instagram not configured.");
+                            }
+                        }
+                        _ => {}
+                    }
+                    match platform.as_deref().unwrap_or("all") {
+                        "threads" | "all" => {
+                            if let Some(th_cfg) = &config.social.threads {
+                                if th_cfg.mode == "polling" {
+                                    match crate::social::poller::poll_threads(th_cfg, &tokio_db).await {
+                                        Ok(items) => println!("Threads: {} new items", items.len()),
+                                        Err(e) => eprintln!("Threads poll failed: {}", e),
+                                    }
+                                } else {
+                                    println!("Threads mode is '{}', not 'polling'", th_cfg.mode);
+                                }
+                            } else {
+                                println!("Threads not configured.");
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                SocialCommands::Mode { platform, mode } => {
+                    if !matches!(mode.as_str(), "webhook" | "polling" | "off") {
+                        eprintln!("Invalid mode '{}'. Use: webhook | polling | off", mode);
+                        return Ok(());
+                    }
+                    let mut full_config = config;
+                    match platform.as_str() {
+                        "instagram" => {
+                            if let Some(ref mut ig) = full_config.social.instagram {
+                                ig.mode = mode.clone();
+                                full_config.save(&cli.config)?;
+                                println!("Instagram mode set to '{}'", mode);
+                                if mode == "webhook" {
+                                    let url = format!("{}/webhook/instagram", full_config.webhook_base_url());
+                                    println!("Webhook URL: {}", url);
+                                    println!("Register this URL in Meta Developer Console → Webhooks.");
+                                    println!("(webhook mode takes effect immediately — no restart needed)");
+                                } else {
+                                    println!("Restart the gateway for polling schedule to take effect.");
+                                }
+                            } else {
+                                eprintln!("Instagram not configured in catclaw.toml");
+                            }
+                        }
+                        "threads" => {
+                            if let Some(ref mut th) = full_config.social.threads {
+                                th.mode = mode.clone();
+                                full_config.save(&cli.config)?;
+                                println!("Threads mode set to '{}'", mode);
+                                if mode == "webhook" {
+                                    let url = format!("{}/webhook/threads", full_config.webhook_base_url());
+                                    println!("Webhook URL: {}", url);
+                                    println!("Register this URL in Meta Developer Console → Webhooks.");
+                                    println!("(webhook mode takes effect immediately — no restart needed)");
+                                } else {
+                                    println!("Restart the gateway for polling schedule to take effect.");
+                                }
+                            } else {
+                                eprintln!("Threads not configured in catclaw.toml");
+                            }
+                        }
+                        _ => eprintln!("Unknown platform '{}'. Use: instagram | threads", platform),
+                    }
+                }
+            }
+        }
+
         Some(Commands::Hook { command }) => {
             match command {
                 HookCommands::PreTool { session_key } => {
@@ -1211,7 +1364,7 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
         Config::default_init()
     };
 
-    let total_steps = 2;
+    let total_steps = 3;
 
     // ── Step 1: Claude Code CLI ────────────────────────────────────────
     cli_ui::step_indicator(1, total_steps, "Prerequisites");
@@ -1826,6 +1979,159 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
         cli_ui::status_msg("ℹ️", "No channels configured. Add later: catclaw channel add");
         println!();
     }
+
+    // ── Step 3: Social Inbox (optional) ───────────────────────────────
+    cli_ui::step_indicator(3, total_steps, "Social Inbox (optional)");
+    cli_ui::section_header("📥", "Social Inbox");
+    cli_ui::section_empty();
+    cli_ui::section_line("Connect Instagram or Threads to receive comments, mentions, and replies.");
+    cli_ui::section_line("Events are routed by rules — forwarded to admins or auto-replied by agents.");
+    cli_ui::section_empty();
+
+    let social_platforms: &[(&str, &str)] = &[
+        ("instagram", "Instagram"),
+        ("threads", "Threads"),
+    ];
+
+    for (platform_key, platform_label) in social_platforms {
+        let already = match *platform_key {
+            "instagram" => config.social.instagram.is_some(),
+            _ => config.social.threads.is_some(),
+        };
+
+        let prompt = if already {
+            format!("{} ✓ (reconfigure?)", platform_label)
+        } else {
+            format!("Set up {}?", platform_label)
+        };
+
+        if !cli_ui::section_confirm(&prompt, false) {
+            cli_ui::section_empty();
+            continue;
+        }
+
+        cli_ui::section_empty();
+
+        // token env var name
+        let token_env_default = format!("CATCLAW_{}_TOKEN", platform_key.to_uppercase());
+        cli_ui::section_line(&format!(
+            "{}Env var name for access token{} (e.g. {}):",
+            cli_ui::SUBTEXT, cli_ui::RESET, token_env_default
+        ));
+        let token_env: String = Input::new()
+            .default(token_env_default.clone())
+            .interact_text()
+            .unwrap_or(token_env_default.clone());
+
+        // token value
+        let token_value: String = dialoguer::Password::new()
+            .with_prompt(format!("  {} access token (stored in .env)", platform_label))
+            .allow_empty_password(true)
+            .interact()
+            .unwrap_or_default();
+        if !token_value.is_empty() {
+            write_env_var(&mut env_lines, &token_env, &token_value);
+            std::env::set_var(&token_env, &token_value);
+        }
+
+        // user id
+        cli_ui::section_line(&format!(
+            "{}{}  User ID{}:",
+            cli_ui::SUBTEXT, platform_label, cli_ui::RESET
+        ));
+        let user_id: String = Input::new()
+            .with_prompt("  User ID")
+            .interact_text()
+            .unwrap_or_default();
+        if user_id.is_empty() {
+            cli_ui::section_warn("User ID required — skipping");
+            cli_ui::section_empty();
+            continue;
+        }
+
+        // admin channel
+        cli_ui::section_line(&format!(
+            "{}Admin channel{} for forward cards (e.g. discord:channel:123456):",
+            cli_ui::SUBTEXT, cli_ui::RESET
+        ));
+        let admin_channel: String = Input::new()
+            .with_prompt("  Admin channel")
+            .interact_text()
+            .unwrap_or_default();
+        if admin_channel.is_empty() {
+            cli_ui::section_warn("Admin channel required — skipping");
+            cli_ui::section_empty();
+            continue;
+        }
+
+        // mode
+        cli_ui::section_line(&format!(
+            "{}Receive mode{}: webhook (real-time, needs public URL) or polling (interval)?",
+            cli_ui::SUBTEXT, cli_ui::RESET
+        ));
+        let mode_choice = cli_ui::section_select(&["polling", "webhook"], 0);
+        let mode = if mode_choice == 1 { "webhook" } else { "polling" }.to_string();
+
+        match *platform_key {
+            "instagram" => {
+                config.social.instagram = Some(crate::config::InstagramConfig {
+                    mode: mode.clone(),
+                    poll_interval_mins: 5,
+                    token_env,
+                    app_secret_env: None,
+                    webhook_verify_token_env: None,
+                    user_id,
+                    admin_channel,
+                    subscribe: vec!["comments".to_string(), "mentions".to_string()],
+                    agent: "main".to_string(),
+                    rules: vec![
+                        crate::config::SocialRule {
+                            match_type: "*".to_string(),
+                            keyword: None,
+                            action: "forward".to_string(),
+                            template: None,
+                            agent: None,
+                        },
+                    ],
+                    templates: HashMap::new(),
+                });
+            }
+            _ => {
+                config.social.threads = Some(crate::config::ThreadsConfig {
+                    mode: mode.clone(),
+                    poll_interval_mins: 5,
+                    token_env,
+                    app_secret_env: None,
+                    webhook_verify_token_env: None,
+                    user_id,
+                    admin_channel,
+                    subscribe: vec!["replies".to_string(), "mentions".to_string()],
+                    agent: "main".to_string(),
+                    rules: vec![
+                        crate::config::SocialRule {
+                            match_type: "*".to_string(),
+                            keyword: None,
+                            action: "forward".to_string(),
+                            template: None,
+                            agent: None,
+                        },
+                    ],
+                    templates: HashMap::new(),
+                });
+            }
+        }
+
+        cli_ui::section_ok(&format!("{} configured (mode: {})", platform_label, mode));
+        if mode == "webhook" {
+            let base = config.webhook_base_url();
+            let path = if *platform_key == "instagram" { "/webhook/instagram" } else { "/webhook/threads" };
+            cli_ui::section_hint(&format!("Webhook URL: {}{}", base, path));
+            cli_ui::section_hint("Register this URL in Meta Developer Console → Webhooks.");
+            cli_ui::section_hint("Set webhook_base_url in [general] if your server has a public hostname.");
+        }
+        cli_ui::section_empty();
+    }
+    cli_ui::section_footer();
 
     // Ensure ~/.catclaw/ exists
     std::fs::create_dir_all(catclaw_home())?;

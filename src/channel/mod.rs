@@ -230,6 +230,33 @@ pub trait ChannelAdapter: Send + Sync {
     ) -> Option<reaction::ReactionHandle> {
         None
     }
+
+    /// Platform name used to match admin_channel config (e.g. "discord", "telegram", "slack").
+    fn platform_name(&self) -> &str {
+        self.name()
+    }
+
+    /// Send a Social Inbox forward/draft card with action buttons.
+    /// Returns the platform message ID (for tracking button responses), or None if unsupported.
+    async fn send_social_card(
+        &self,
+        channel_id: &str,
+        card: &crate::social::forward::ForwardCard,
+    ) -> crate::error::Result<Option<String>> {
+        // Default: send plain text fallback without buttons.
+        // channel_type is a placeholder — concrete adapters ignore this field (see send_approval).
+        let text = format!("[{}] @{}: {}", card.title, card.author, card.text);
+        self.send(OutboundMessage {
+            channel_type: ChannelType::Tui, // placeholder, adapter ignores
+            channel_id: channel_id.to_string(),
+            peer_id: String::new(),
+            text,
+            thread_id: None,
+            reply_to_message_id: None,
+        })
+        .await?;
+        Ok(None)
+    }
 }
 
 /// Hot-reloadable filter settings shared between adapter and gateway.

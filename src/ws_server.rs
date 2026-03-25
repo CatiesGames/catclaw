@@ -25,9 +25,11 @@ pub fn spawn(addr: String, gw: GatewayHandle) -> tokio::task::JoinHandle<()> {
     let gw = Arc::new(gw);
 
     tokio::spawn(async move {
+        let webhook_router = crate::social::webhook::build_router(gw.clone());
         let app = Router::new()
             .route("/ws", get(ws_handler))
             .merge(mcp_server::router())
+            .merge(webhook_router)
             .with_state(gw);
 
         let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -166,6 +168,13 @@ async fn dispatch(
         "mcp_env.set" => handle_mcp_env_set(req, gw),
         "mcp_env.remove" => handle_mcp_env_remove(req, gw),
         "mcp.tools" => handle_mcp_tools(req, gw),
+        "social.inbox.list" => handle_social_inbox_list(req, gw),
+        "social.inbox.get" => handle_social_inbox_get(req, gw),
+        "social.inbox.approve" => handle_social_inbox_approve(req, gw).await,
+        "social.inbox.discard" => handle_social_inbox_discard(req, gw),
+        "social.inbox.reprocess" => handle_social_inbox_reprocess(req, gw),
+        "social.poll" => handle_social_poll(req, gw),
+        "social.mode" => handle_social_mode(req, gw),
         _ => WsResponse::err(req.id, -32601, format!("unknown method: {}", req.method)),
     }
 }
@@ -983,4 +992,277 @@ fn handle_mcp_tools(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         .map(|(server, tool_list)| (server.clone(), json!(tool_list)))
         .collect();
     WsResponse::ok(req.id, json!(result))
+}
+
+// ── Social Inbox handlers ─────────────────────────────────────────────────────
+
+fn handle_social_inbox_list(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let platform = req.params.get("platform").and_then(|v| v.as_str());
+    let status = req.params.get("status").and_then(|v| v.as_str());
+    let limit = req.params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+    match gw.state_db.list_social_inbox(platform, status, limit) {
+        Ok(rows) => WsResponse::ok(req.id, json!(rows)),
+        Err(e) => WsResponse::err(req.id, -32603, format!("db error: {}", e)),
+    }
+}
+
+fn handle_social_inbox_get(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return WsResponse::err(req.id, -32602, "missing param: id"),
+    };
+    match gw.state_db.get_social_inbox(id) {
+        Ok(Some(row)) => WsResponse::ok(req.id, json!(row)),
+        Ok(None) => WsResponse::err(req.id, -32602, format!("inbox item {} not found", id)),
+        Err(e) => WsResponse::err(req.id, -32603, format!("db error: {}", e)),
+    }
+}
+
+async fn handle_social_inbox_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return WsResponse::err(req.id, -32602, "missing param: id"),
+    };
+    let row = match gw.state_db.get_social_inbox(id) {
+        Ok(Some(r)) => r,
+        Ok(None) => return WsResponse::err(req.id, -32602, format!("inbox item {} not found", id)),
+        Err(e) => return WsResponse::err(req.id, -32603, format!("db error: {}", e)),
+    };
+    let draft = match &row.draft {
+        Some(d) => d.clone(),
+        None => return WsResponse::err(req.id, -32602, "no draft to approve"),
+    };
+
+    // Send via Meta API.
+    let cfg = gw.config.read().unwrap().clone();
+    let result: crate::error::Result<String> = match row.platform.as_str() {
+        "instagram" => {
+            async {
+                use crate::social::instagram::InstagramClient;
+                let ig = cfg.social.instagram.as_ref()
+                    .ok_or_else(|| crate::error::CatClawError::Social("no instagram config".into()))?;
+                let token = std::env::var(&ig.token_env)
+                    .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", ig.token_env)))?;
+                let resp = InstagramClient::new(token, ig.user_id.clone())
+                    .reply_comment(&row.platform_id, &draft)
+                    .await?;
+                Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+            }.await
+        }
+        "threads" => {
+            async {
+                use crate::social::threads::ThreadsClient;
+                let th = cfg.social.threads.as_ref()
+                    .ok_or_else(|| crate::error::CatClawError::Social("no threads config".into()))?;
+                let token = std::env::var(&th.token_env)
+                    .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", th.token_env)))?;
+                let resp = ThreadsClient::new(token, th.user_id.clone())
+                    .reply(&row.platform_id, &draft)
+                    .await?;
+                Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+            }.await
+        }
+        p => Err(crate::error::CatClawError::Social(format!("unknown platform '{}'", p))),
+    };
+
+    match result {
+        Ok(reply_id) => {
+            let _ = gw.state_db.update_social_inbox_sent(id, &reply_id);
+            WsResponse::ok(req.id, json!({ "status": "sent", "reply_id": reply_id }))
+        }
+        Err(e) => {
+            let _ = gw.state_db.update_social_inbox_status(id, "failed");
+            WsResponse::err(req.id, -32603, format!("send failed: {}", e))
+        }
+    }
+}
+
+fn handle_social_inbox_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return WsResponse::err(req.id, -32602, "missing param: id"),
+    };
+    match gw.state_db.update_social_inbox_status(id, "ignored") {
+        Ok(()) => WsResponse::ok(req.id, json!({ "status": "ignored" })),
+        Err(e) => WsResponse::err(req.id, -32603, format!("db error: {}", e)),
+    }
+}
+
+fn handle_social_inbox_reprocess(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return WsResponse::err(req.id, -32602, "missing param: id"),
+    };
+    // Reset draft/reply/session state, then re-inject as a SocialItem so the
+    // ingest pipeline re-runs the action router. We bypass the dedup guard by
+    // resetting first (the DB row already exists, INSERT OR IGNORE would skip
+    // it), so we send directly into the channel and let run_ingest re-dispatch.
+    let row = match gw.state_db.get_social_inbox(id) {
+        Ok(Some(r)) => r,
+        Ok(None) => return WsResponse::err(req.id, -32602, format!("inbox item {} not found", id)),
+        Err(e) => return WsResponse::err(req.id, -32603, format!("db error: {}", e)),
+    };
+    if let Err(e) = gw.state_db.reset_social_inbox_for_reprocess(id) {
+        return WsResponse::err(req.id, -32603, format!("db error: {}", e));
+    }
+    let platform = match row.platform.as_str() {
+        "instagram" => crate::social::SocialPlatform::Instagram,
+        "threads" => crate::social::SocialPlatform::Threads,
+        p => return WsResponse::err(req.id, -32602, format!("unknown platform '{}'", p)),
+    };
+    let item = crate::social::SocialItem {
+        platform,
+        platform_id: row.platform_id.clone(),
+        event_type: row.event_type.clone(),
+        author_id: row.author_id.clone(),
+        author_name: row.author_name.clone(),
+        media_id: row.media_id.clone(),
+        text: row.text.clone(),
+        metadata: row.metadata.as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::json!({})),
+    };
+    // dedup_insert will see the existing row and return inserted=false, so
+    // run_ingest would skip it. We reset the row above and re-send; to bypass
+    // the INSERT OR IGNORE guard we delete and re-insert via the channel.
+    // Simplest correct approach: call the action router inline here instead.
+    let gw2 = gw.clone();
+    tokio::spawn(async move {
+        let (action, admin_channel_opt) = {
+            let cfg = gw2.config.read().unwrap();
+            match item.platform {
+                crate::social::SocialPlatform::Instagram => {
+                    if let Some(ig_cfg) = &cfg.social.instagram {
+                        let (rules, templates, default_agent) = crate::social::instagram_rule_set(ig_cfg);
+                        let action = crate::social::resolve_action(&item, rules, templates, default_agent);
+                        (action, Some(ig_cfg.admin_channel.clone()))
+                    } else {
+                        (crate::social::ResolvedAction::Ignore, None)
+                    }
+                }
+                crate::social::SocialPlatform::Threads => {
+                    if let Some(th_cfg) = &cfg.social.threads {
+                        let (rules, templates, default_agent) = crate::social::threads_rule_set(th_cfg);
+                        let action = crate::social::resolve_action(&item, rules, templates, default_agent);
+                        (action, Some(th_cfg.admin_channel.clone()))
+                    } else {
+                        (crate::social::ResolvedAction::Ignore, None)
+                    }
+                }
+            }
+        };
+        let Some(admin_channel) = admin_channel_opt else { return; };
+        crate::social::dispatch_action(
+            action, item, &gw2.state_db, &gw2.config, &gw2.adapters_list,
+            &gw2.session_manager, &gw2.agent_registry, &admin_channel,
+        ).await;
+    });
+    WsResponse::ok(req.id, json!({ "status": "pending" }))
+}
+
+fn handle_social_poll(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let platform = req.params.get("platform").and_then(|v| v.as_str());
+    let cfg = gw.config.read().unwrap();
+    let ig_mode = cfg.social.instagram.as_ref().map(|c| c.mode.clone()).unwrap_or_default();
+    let th_mode = cfg.social.threads.as_ref().map(|c| c.mode.clone()).unwrap_or_default();
+    let ig_cfg = cfg.social.instagram.clone();
+    let th_cfg = cfg.social.threads.clone();
+    drop(cfg);
+
+    let tx = gw.social_item_tx.clone();
+    let db = gw.state_db.clone();
+
+    match platform.unwrap_or("all") {
+        "instagram" | "all" if ig_mode == "polling" => {
+            if let Some(ig) = ig_cfg {
+                let tx2 = tx.clone();
+                let db2 = db.clone();
+                tokio::spawn(async move {
+                    match crate::social::poller::poll_instagram(&ig, &db2).await {
+                        Ok(items) => { for item in items { let _ = tx2.send(item); } }
+                        Err(e) => warn!("manual poll instagram failed: {}", e),
+                    }
+                });
+            }
+        }
+        _ => {}
+    }
+    match platform.unwrap_or("all") {
+        "threads" | "all" if th_mode == "polling" => {
+            if let Some(th) = th_cfg {
+                tokio::spawn(async move {
+                    match crate::social::poller::poll_threads(&th, &db).await {
+                        Ok(items) => { for item in items { let _ = tx.send(item); } }
+                        Err(e) => warn!("manual poll threads failed: {}", e),
+                    }
+                });
+            }
+        }
+        _ => {}
+    }
+    WsResponse::ok(req.id, json!({ "status": "polling" }))
+}
+
+fn handle_social_mode(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let platform = match req.params.get("platform").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: platform"),
+    };
+    let mode = match req.params.get("mode").and_then(|v| v.as_str()) {
+        Some(m) => m.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: mode"),
+    };
+    if !matches!(mode.as_str(), "webhook" | "polling" | "off") {
+        return WsResponse::err(req.id, -32602, "mode must be webhook, polling, or off");
+    }
+
+    let (serialized, webhook_url) = {
+        let mut cfg = gw.config.write().unwrap();
+        match platform.as_str() {
+            "instagram" => {
+                if let Some(ref mut ig) = cfg.social.instagram {
+                    ig.mode = mode.clone();
+                } else {
+                    return WsResponse::err(req.id, -32602, "social.instagram is not configured");
+                }
+            }
+            "threads" => {
+                if let Some(ref mut th) = cfg.social.threads {
+                    th.mode = mode.clone();
+                } else {
+                    return WsResponse::err(req.id, -32602, "social.threads is not configured");
+                }
+            }
+            _ => return WsResponse::err(req.id, -32602, format!("unknown platform '{}'", platform)),
+        }
+        let webhook_url = if mode == "webhook" {
+            let base = cfg.webhook_base_url();
+            let path = match platform.as_str() {
+                "instagram" => "/webhook/instagram",
+                _ => "/webhook/threads",
+            };
+            Some(format!("{}{}", base, path))
+        } else {
+            None
+        };
+        let serialized = match toml::to_string_pretty(&*cfg) {
+            Ok(s) => s,
+            Err(e) => return WsResponse::err(req.id, -1, format!("failed to serialize config: {}", e)),
+        };
+        (serialized, webhook_url)
+        // lock released here
+    };
+
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+
+    // webhook mode: immediate (handler reads config on each request).
+    // polling / off: requires gateway restart to take effect.
+    let requires_restart = mode != "webhook";
+    let mut result = json!({ "platform": platform, "mode": mode, "requires_restart": requires_restart });
+    if let Some(url) = webhook_url {
+        result["webhook_url"] = json!(url);
+    }
+    WsResponse::ok(req.id, result)
 }

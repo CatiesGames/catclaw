@@ -125,7 +125,14 @@ Each tool exists in exactly one list: `allowed` (directly usable), `denied` (una
 | `src/cmd_hook.rs` | PreToolUse hook binary logic |
 | `src/tui/agents.rs` | TUI Agents panel: tools 3-state toggle (allowed/approval/denied) |
 | `src/tui/config_panel.rs` | TUI Config panel: editable settings including `approval.timeout_secs` |
-| `src/scheduler.rs` | Heartbeat, cron, archive cleanup, diary extraction, memory distillation |
+| `src/tui/social_inbox.rs` | TUI Social Inbox panel: list/filter/approve/discard inbox items |
+| `src/scheduler.rs` | Heartbeat, cron, archive cleanup, diary extraction, memory distillation, social polling |
+| `src/social/mod.rs` | Social Inbox core types (`SocialItem`, `ResolvedAction`), action router, `run_ingest()` orchestrator |
+| `src/social/instagram.rs` | Instagram Graph API client (`InstagramClient`) — profile, media, comments, insights |
+| `src/social/threads.rs` | Threads API client (`ThreadsClient`) — timeline, replies, two-step post/reply |
+| `src/social/webhook.rs` | Axum webhook handlers for `/webhook/instagram` and `/webhook/threads` with HMAC verification |
+| `src/social/poller.rs` | Polling logic for Instagram/Threads feeds, cursor management via `social_cursors` table |
+| `src/social/forward.rs` | Forward card builder (`ForwardCard`) + adapter-specific renderers for Discord/Slack/Telegram |
 
 ## Automatic Memory System
 
@@ -183,6 +190,13 @@ JSON-RPC methods supported by the gateway WS server (`/ws`):
 | `approval.request` / `.respond` / `.list` | Tool approval flow | — |
 | `mcp_env.list` / `.get` / `.set` / `.remove` | MCP env var management | YES (hot-reload) |
 | `mcp.tools` | Query discovered MCP tools per server | — |
+| `social.inbox.list` | Query social_inbox (supports `status` filter) | — |
+| `social.inbox.get` | Get single inbox item by ID | — |
+| `social.inbox.approve` | Approve draft → call Meta API → status=sent | — |
+| `social.inbox.discard` | Discard draft → status=ignored | — |
+| `social.inbox.reprocess` | Reset item to pending, re-run action router | — |
+| `social.poll` | Trigger manual poll for instagram / threads | — |
+| `social.mode` | Hot-reload platform mode (polling/webhook/off) | YES |
 
 When adding a new WS method, update this table and the `dispatch()` function in `src/ws_server.rs`.
 
@@ -221,3 +235,6 @@ Always do the complete fix. Never leave warnings, tech debt, or half-done work w
 8. **Hook subprocess cannot create a new tokio runtime** — `catclaw hook pre-tool` runs as a subprocess where `main` is already `#[tokio::main]` (runtime exists). Using `tokio::runtime::Builder` in `cmd_hook.rs` to create a second runtime would panic. Use `async fn` + `.await` instead.
 9. **Transcript JSONL is ours, not Claude's** — CatClaw's transcript is written by `send_and_wait` (immediate append on each event), not by the Claude subprocess. After `stop_session()` kills the subprocess, no new events are produced, so the transcript is already complete. Don't assume async flush issues or add sleeps before reading transcript. **Rule:** Before reasoning about race conditions, clarify data flow ownership — who writes, when, and where.
 10. **`Skill` is a built-in tool that must be in the `--tools` whitelist** — Claude Code agents load skills via the `Skill` tool, not `/` slash commands. If `--tools` whitelist is set but doesn't include `Skill`, agents can't load skills and will fall back to reading files manually with Bash. CatClaw now auto-injects `Skill` into every whitelist.
+11. **Social Inbox is a separate subsystem, not a ChannelAdapter** — its staged approval flow (draft stored in DB indefinitely, admin reviews at their own pace) is fundamentally incompatible with the hook-based approval system (synchronous timeout). Never try to shoehorn social events into the ChannelAdapter trait.
+12. **`Theme` in TUI is a unit struct with const colors, not an instance** — use `Theme::MAUVE`, `Theme::BASE`, etc. (static constants), not `Theme::default()` (doesn't exist). `Theme` has no fields.
+13. **Social channel creation order in gateway.rs** — `social_item_tx`/`social_item_rx` must be created before the scheduler block (scheduler config references `social_item_tx`) but the ingest task spawn must happen after `adapters_list` is built. Solution: create the unbounded channel early, spawn the ingest task after `adapters_list` is available.
