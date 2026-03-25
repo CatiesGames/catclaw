@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.20.0](https://github.com/CatiesGames/catclaw/compare/v0.19.0...v0.20.0) (2026-03-25)
+
+
+### Features
+
+* issue tracking + TUI Issues panel + Instagram/Threads MCP tools 顯示 ([065465b](https://github.com/CatiesGames/catclaw/commit/065465b6f315578a80ba7fe9c23b59cce673a734))
+
+
+### Bug Fixes
+
+* TUI Agents &gt; Tools 正確顯示 Instagram/Threads MCP tools ([065465b](https://github.com/CatiesGames/catclaw/commit/065465b6f315578a80ba7fe9c23b59cce673a734))
+
 ## [0.19.0](https://github.com/CatiesGames/catclaw/compare/v0.18.2...v0.19.0) (2026-03-25)
 
 
