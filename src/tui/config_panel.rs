@@ -817,6 +817,8 @@ impl Component for ConfigPanel {
 
         let mut lines: Vec<Line> = Vec::new();
         let mut current_section = String::new();
+        // Track which line index each entry lands on (for scroll calculation)
+        let mut entry_line_indices: Vec<usize> = Vec::with_capacity(self.entries.len());
 
         for (i, entry) in self.entries.iter().enumerate() {
             if entry.section != current_section {
@@ -836,6 +838,8 @@ impl Component for ConfigPanel {
                 current_section = entry.section.clone();
             }
 
+            entry_line_indices.push(lines.len());
+
             let style = if i == self.selected {
                 Style::default().fg(Theme::TEXT).bg(Theme::SURFACE0)
             } else {
@@ -851,13 +855,24 @@ impl Component for ConfigPanel {
             ]));
         }
 
-        let paragraph = Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Theme::SURFACE1))
-                .title(" Config ")
-                .title_style(Style::default().fg(Theme::MAUVE)),
-        );
+        // Compute scroll offset so selected entry stays in view
+        let visible_height = entries_area.height.saturating_sub(2) as usize; // subtract borders
+        let selected_line = entry_line_indices.get(self.selected).copied().unwrap_or(0);
+        let scroll_offset = if selected_line < visible_height {
+            0
+        } else {
+            selected_line.saturating_sub(visible_height / 2)
+        };
+
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Theme::SURFACE1))
+                    .title(" Config ")
+                    .title_style(Style::default().fg(Theme::MAUVE)),
+            )
+            .scroll((scroll_offset as u16, 0));
 
         frame.render_widget(paragraph, entries_area);
 

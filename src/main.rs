@@ -562,15 +562,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             // Unified startup: splash → onboard → ensure gateway → TUI
             tui::splash::print_splash_to_terminal();
 
-            // Check if config exists, auto-onboard if not
-            let config = if cli.config.exists() {
-                cli_ui::spinner_start("Loading configuration...");
-                let cfg = Config::load(&cli.config)?;
-                cli_ui::spinner_finish("✓", "Configuration loaded");
-                cfg
-            } else {
-                cmd_onboard(&cli.config).await?
-            };
+            let config = cmd_onboard(&cli.config).await?;
 
             load_dotenv();
 
