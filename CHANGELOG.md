@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/CatiesGames/catclaw/compare/v0.23.1...v0.24.0) (2026-03-26)
+
+
+### Features
+
+* [env] 子進程環境變數 + 社群發文審核流程改進 ([30f09e9](https://github.com/CatiesGames/catclaw/commit/30f09e97c0276923362b1719254df1e58cdefae5))
+
 ## [0.23.1](https://github.com/CatiesGames/catclaw/compare/v0.23.0...v0.23.1) (2026-03-26)
 
 
