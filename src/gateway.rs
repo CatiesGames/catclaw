@@ -569,16 +569,16 @@ async fn handle_social_button_action(
         };
 
         if action == "draft_discard" {
-            if draft.status != "awaiting_approval" && draft.status != "draft" {
-                warn!(card_id, status = %draft.status, "social draft_discard: already resolved");
+            if draft.status == "sent" {
+                warn!(card_id, status = %draft.status, "social draft_discard: already sent, cannot discard");
                 return;
             }
-            let _ = db.update_social_draft_status(card_id, "ignored");
             let workspace = config.read().unwrap().general.workspace.clone();
             crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
             let base = forward::build_social_draft_card(&draft);
             let resolved = forward::build_resolved_card(&base, "已捨棄");
             try_update_draft_card(resolved).await;
+            let _ = db.delete_social_draft(card_id);
             return;
         }
 

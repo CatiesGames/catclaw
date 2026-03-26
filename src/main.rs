@@ -264,6 +264,11 @@ enum ConfigCommands {
         #[command(subcommand)]
         command: McpEnvCommands,
     },
+    /// Manage subprocess environment variables
+    Env {
+        #[command(subcommand)]
+        command: EnvCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -288,6 +293,29 @@ enum McpEnvCommands {
     Remove {
         /// MCP server name
         server: String,
+        /// Environment variable name
+        key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvCommands {
+    /// List all subprocess env vars
+    List,
+    /// Get a subprocess env var
+    Get {
+        /// Environment variable name
+        key: String,
+    },
+    /// Set a subprocess env var
+    Set {
+        /// Environment variable name
+        key: String,
+        /// Environment variable value
+        value: String,
+    },
+    /// Remove a subprocess env var
+    Remove {
         /// Environment variable name
         key: String,
     },
@@ -440,6 +468,11 @@ enum SocialCommands {
         #[arg(long, default_value = "20")]
         limit: i64,
     },
+    /// View Social Drafts
+    Draft {
+        #[command(subcommand)]
+        command: DraftCommands,
+    },
     /// Manually trigger a poll for new events
     Poll {
         /// Platform to poll (instagram, threads, or omit for both)
@@ -451,6 +484,27 @@ enum SocialCommands {
         platform: String,
         /// Mode: webhook | polling | off
         mode: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DraftCommands {
+    /// List drafts
+    List {
+        /// Filter by platform (instagram, threads)
+        #[arg(long)]
+        platform: Option<String>,
+        /// Filter by status (draft, awaiting_approval, sent, ignored, failed)
+        #[arg(long)]
+        status: Option<String>,
+        /// Max rows to display
+        #[arg(long, default_value = "20")]
+        limit: i64,
+    },
+    /// Show a single draft by ID (full content + media)
+    Get {
+        /// Draft ID
+        id: i64,
     },
 }
 
@@ -1023,6 +1077,64 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                ConfigCommands::Env { command } => {
+                    let mask = |s: &str| -> String {
+                        let chars: Vec<char> = s.chars().collect();
+                        if chars.len() <= 6 {
+                            "***".to_string()
+                        } else {
+                            let prefix: String = chars[..3].iter().collect();
+                            let suffix: String = chars[chars.len()-3..].iter().collect();
+                            format!("{}...{}", prefix, suffix)
+                        }
+                    };
+
+                    match command {
+                        EnvCommands::List => {
+                            if config.env.is_empty() {
+                                println!("No subprocess env vars configured.");
+                            } else {
+                                for (k, v) in &config.env {
+                                    println!("{} = {}", k, mask(v));
+                                }
+                            }
+                        }
+                        EnvCommands::Get { key } => {
+                            match config.env.get(&key) {
+                                Some(v) => println!("{} = {}", key, mask(v)),
+                                None => println!("Not set: {}", key),
+                            }
+                        }
+                        EnvCommands::Set { key, value } => {
+                            let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+                            if let Ok((client, _event_rx)) = crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await {
+                                match client.request("env.set", serde_json::json!({"key": &key, "value": &value})).await {
+                                    Ok(_) => println!("Set {} (applied)", key),
+                                    Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+                                }
+                            } else {
+                                let mut config = config;
+                                config.env.insert(key.clone(), value);
+                                config.save(&cli.config)?;
+                                println!("Set {} (saved to file)", key);
+                            }
+                        }
+                        EnvCommands::Remove { key } => {
+                            let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+                            if let Ok((client, _event_rx)) = crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await {
+                                match client.request("env.remove", serde_json::json!({"key": &key})).await {
+                                    Ok(_) => println!("Removed {}", key),
+                                    Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+                                }
+                            } else {
+                                let mut config = config;
+                                config.env.remove(&key);
+                                config.save(&cli.config)?;
+                                println!("Removed {} (saved to file)", key);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1290,6 +1402,71 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                 text_preview,
                                 row.status,
                             );
+                        }
+                    }
+                }
+                SocialCommands::Draft { command } => {
+                    match command {
+                        DraftCommands::List { platform, status, limit } => {
+                            let rows = state_db.list_social_drafts(
+                                platform.as_deref(),
+                                status.as_deref(),
+                                limit,
+                            )?;
+                            if rows.is_empty() {
+                                println!("No social drafts.");
+                            } else {
+                                println!(
+                                    "{:<5} {:<12} {:<8} {:<40} {:<6} {:<18}",
+                                    "ID", "PLATFORM", "TYPE", "CONTENT", "MEDIA", "STATUS"
+                                );
+                                println!("{}", "-".repeat(91));
+                                for row in &rows {
+                                    let content_preview: String = row.content.chars().take(38).collect();
+                                    let media = if row.media_url.is_some() { "yes" } else { "-" };
+                                    println!(
+                                        "{:<5} {:<12} {:<8} {:<40} {:<6} {:<18}",
+                                        row.id,
+                                        row.platform,
+                                        row.draft_type,
+                                        content_preview,
+                                        media,
+                                        row.status,
+                                    );
+                                }
+                            }
+                        }
+                        DraftCommands::Get { id } => {
+                            match state_db.get_social_draft(id) {
+                                Ok(Some(d)) => {
+                                    println!("Draft #{}", d.id);
+                                    println!("  Platform:   {} ({})", d.platform, d.draft_type);
+                                    println!("  Status:     {}", d.status);
+                                    println!("  Content:    {}", d.content);
+                                    if let Some(ref url) = d.media_url {
+                                        println!("  Media:      {}", url);
+                                    }
+                                    if let Some(ref reply_to) = d.reply_to_id {
+                                        println!("  Reply to:   {}", reply_to);
+                                    }
+                                    if let Some(ref orig) = d.original_text {
+                                        println!("  Original:   {}", orig);
+                                    }
+                                    if let Some(ref author) = d.original_author {
+                                        println!("  Orig author: {}", author);
+                                    }
+                                    println!("  Created:    {}", d.created_at);
+                                    println!("  Updated:    {}", d.updated_at);
+                                }
+                                Ok(None) => {
+                                    eprintln!("Draft {} not found", id);
+                                    std::process::exit(1);
+                                }
+                                Err(e) => {
+                                    eprintln!("Error: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
                         }
                     }
                 }

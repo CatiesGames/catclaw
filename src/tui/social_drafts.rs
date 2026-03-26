@@ -18,6 +18,7 @@ struct DraftItem {
     platform: String,
     draft_type: String,
     content: String,
+    media_url: Option<String>,
     status: String,
     created_at: String,
 }
@@ -173,42 +174,65 @@ impl Component for SocialDraftsPanel {
             }
         }
 
-        match event.code {
-            KeyCode::Char('r') | KeyCode::F(5) => {
-                self.refresh();
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected + 1 < self.items.len() {
-                    self.selected += 1;
+        // Clear status message on any key press
+        self.status_msg = None;
+
+        if self.detail_view {
+            // Detail view: limited key handling
+            match event.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    self.detail_view = false;
                 }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected > 0 {
-                    self.selected -= 1;
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    self.approve();
+                    self.status_msg = Some("Approving draft…".to_string());
                 }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    self.discard();
+                    self.status_msg = Some("Discarding draft…".to_string());
+                    self.detail_view = false;
+                }
+                _ => {}
             }
-            KeyCode::Enter => {
-                self.detail_view = !self.detail_view;
+        } else {
+            // List view
+            match event.code {
+                KeyCode::Char('r') | KeyCode::F(5) => {
+                    self.refresh();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.selected + 1 < self.items.len() {
+                        self.selected += 1;
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.selected > 0 {
+                        self.selected -= 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    self.detail_view = true;
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    self.approve();
+                    self.status_msg = Some("Approving draft…".to_string());
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    self.discard();
+                    self.status_msg = Some("Discarding draft…".to_string());
+                }
+                KeyCode::Tab => {
+                    self.filter_idx = (self.filter_idx + 1) % StatusFilter::all().len();
+                    self.selected = 0;
+                    self.refresh();
+                }
+                KeyCode::BackTab => {
+                    self.filter_idx = (self.filter_idx + StatusFilter::all().len() - 1) % StatusFilter::all().len();
+                    self.selected = 0;
+                    self.refresh();
+                }
+                _ => {}
             }
-            KeyCode::Char('a') | KeyCode::Char('A') => {
-                self.approve();
-                self.status_msg = Some("Approving draft…".to_string());
-            }
-            KeyCode::Char('d') | KeyCode::Char('D') => {
-                self.discard();
-                self.status_msg = Some("Discarding draft…".to_string());
-            }
-            KeyCode::Tab => {
-                self.filter_idx = (self.filter_idx + 1) % StatusFilter::all().len();
-                self.selected = 0;
-                self.refresh();
-            }
-            KeyCode::BackTab => {
-                self.filter_idx = (self.filter_idx + StatusFilter::all().len() - 1) % StatusFilter::all().len();
-                self.selected = 0;
-                self.refresh();
-            }
-            _ => {}
         }
 
         if !self.loaded {
@@ -267,7 +291,7 @@ impl Component for SocialDraftsPanel {
         // ── Draft list / detail ───────────────────────────────────────────────
         if self.detail_view {
             if let Some(item) = self.items.get(self.selected) {
-                let detail_text = vec![
+                let mut detail_text = vec![
                     Line::from(vec![
                         Span::styled("Platform: ", Style::default().add_modifier(Modifier::BOLD)),
                         Span::raw(format!("{} ({})", item.platform, item.draft_type)),
@@ -280,12 +304,18 @@ impl Component for SocialDraftsPanel {
                         Span::styled("Content: ", Style::default().add_modifier(Modifier::BOLD)),
                         Span::raw(item.content.clone()),
                     ]),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::styled("Created: ", Style::default().add_modifier(Modifier::BOLD)),
-                        Span::raw(item.created_at.clone()),
-                    ]),
                 ];
+                if let Some(ref url) = item.media_url {
+                    detail_text.push(Line::from(vec![
+                        Span::styled("Media: ", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(url.to_string()),
+                    ]));
+                }
+                detail_text.push(Line::from(""));
+                detail_text.push(Line::from(vec![
+                    Span::styled("Created: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(item.created_at.clone()),
+                ]));
                 let detail = Paragraph::new(detail_text)
                     .block(
                         Block::default()
@@ -303,7 +333,10 @@ impl Component for SocialDraftsPanel {
                 .iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    let content_preview: String = item.content.chars().take(40).collect();
+                    let mut content_preview: String = item.content.chars().take(40).collect();
+                    if item.media_url.is_some() {
+                        content_preview = format!("[img] {}", content_preview);
+                    }
                     let style = if i == self.selected {
                         Style::default().bg(Theme::MAUVE).fg(Theme::BASE)
                     } else {
@@ -334,13 +367,14 @@ impl Component for SocialDraftsPanel {
         }
 
         // ── Hints bar ─────────────────────────────────────────────────────────
-        let hint_text = if let Some(ref msg) = self.status_msg {
-            msg.clone()
+        let (hint_text, hint_style) = if let Some(ref msg) = self.status_msg {
+            (msg.clone(), Style::default().fg(Theme::GREEN).bg(Theme::MANTLE))
+        } else if self.detail_view {
+            (" Esc Back  A Approve  D Discard".to_string(), Style::default().fg(Theme::TEXT).bg(Theme::MANTLE))
         } else {
-            "[Enter] Detail  [A] Approve  [D] Discard  [Tab] Filter  [r] Refresh".to_string()
+            (" Enter Detail  A Approve  D Discard  Tab Filter  r Refresh".to_string(), Style::default().fg(Theme::TEXT).bg(Theme::MANTLE))
         };
-        let hints = Paragraph::new(hint_text)
-            .style(Style::default().fg(Theme::OVERLAY1));
+        let hints = Paragraph::new(hint_text).style(hint_style);
         frame.render_widget(hints, chunks[2]);
     }
 }
@@ -355,6 +389,7 @@ fn parse_items(val: &serde_json::Value) -> Vec<DraftItem> {
                         platform: v.get("platform")?.as_str()?.to_string(),
                         draft_type: v.get("draft_type")?.as_str()?.to_string(),
                         content: v.get("content")?.as_str()?.to_string(),
+                        media_url: v.get("media_url").and_then(|x| x.as_str()).map(str::to_string),
                         status: v.get("status")?.as_str()?.to_string(),
                         created_at: v.get("created_at").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                     })

@@ -263,7 +263,7 @@ impl ClaudeHandle {
     /// Spawn a new claude -p subprocess with the given args.
     /// The args should NOT include the initial prompt — it will be sent via stdin
     /// if using stream-json input, or the caller should include it in args.
-    pub async fn spawn(args: Vec<String>) -> Result<Self> {
+    pub async fn spawn(args: Vec<String>, env: &std::collections::HashMap<String, String>) -> Result<Self> {
         info!(args = ?args, "spawning claude process");
 
         let mut child = Command::new("claude")
@@ -271,6 +271,7 @@ impl ClaudeHandle {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .envs(env)
             .env_remove("CLAUDECODE")
             .spawn()
             .map_err(|e| CatClawError::Claude(format!("failed to spawn claude: {}", e)))?;
@@ -347,6 +348,7 @@ impl ClaudeHandle {
     pub async fn spawn_with_prompt(
         mut base_args: Vec<String>,
         prompt: &str,
+        env: &std::collections::HashMap<String, String>,
     ) -> Result<Self> {
         // Insert the prompt right after -p
         // base_args should already contain -p, --output-format, etc.
@@ -359,12 +361,12 @@ impl ClaudeHandle {
             base_args.insert(1, prompt.to_string());
         }
 
-        Self::spawn_no_stdin(base_args).await
+        Self::spawn_no_stdin(base_args, env).await
     }
 
     /// Like spawn() but with stdin set to null (for CLI-arg prompt mode).
     /// This prevents claude from hanging waiting for stdin input.
-    async fn spawn_no_stdin(args: Vec<String>) -> Result<Self> {
+    async fn spawn_no_stdin(args: Vec<String>, env: &std::collections::HashMap<String, String>) -> Result<Self> {
         info!(args = ?args, "spawning claude process");
 
         let mut child = Command::new("claude")
@@ -372,6 +374,7 @@ impl ClaudeHandle {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .envs(env)
             .env_remove("CLAUDECODE")
             .spawn()
             .map_err(|e| CatClawError::Claude(format!("failed to spawn claude: {}", e)))?;

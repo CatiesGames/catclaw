@@ -1505,6 +1505,27 @@ catclaw config mcp-env set dotdot DOTDOT_API_KEY sk-abc123
 
 Changes take effect on the next session spawn — no gateway restart needed. Values are masked in all output (CLI, TUI, WS responses).
 
+### Subprocess Environment Variables
+
+Environment variables injected into every `claude` subprocess as OS-level env vars. Accessible by any tool (Bash, etc.) the agent uses. Use this for CLI tools that read env vars (e.g., `op` CLI needs `OP_SERVICE_ACCOUNT_TOKEN`).
+
+```bash
+catclaw config env list                  # List all (values are masked)
+catclaw config env get <key>             # Show a specific env var
+catclaw config env set <key> <value>     # Set an env var
+catclaw config env remove <key>          # Remove an env var
+```
+
+**How it works:** When CatClaw spawns a Claude subprocess, it injects all `[env]` entries as OS-level environment variables via `Command::envs()`. The agent's Bash tool can then read them with `$VAR_NAME`.
+
+**Example:**
+```bash
+catclaw config env set OP_SERVICE_ACCOUNT_TOKEN ops_xxx
+# Next session: agent can run `op` CLI and it will find the token
+```
+
+Changes take effect on the next session spawn — no gateway restart needed. Values are masked in all output.
+
 ---
 
 ## Scheduled Tasks
@@ -1632,6 +1653,10 @@ Events flow: poll/webhook → dedup → action router → forward card / auto re
 catclaw social inbox                              # List all inbox items
 catclaw social inbox --platform instagram         # Filter by platform
 catclaw social inbox --status pending             # Filter by status
+catclaw social draft list                         # List all drafts
+catclaw social draft list --status awaiting_approval  # Filter by status
+catclaw social draft list --platform instagram    # Filter by platform
+catclaw social draft get <id>                     # Show full draft content + media URL
 catclaw social poll instagram                     # Trigger a manual poll now
 catclaw social poll threads
 catclaw social mode instagram webhook             # Switch mode (webhook/polling/off)
@@ -1759,7 +1784,11 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 | `threads_get_inbox` | Query social_inbox table |
 | `threads_keyword_search` | Search posts by keyword |
 
-**Two-step publish flow:** Stage draft → publish tool. When `require_approval` is set, the hook immediately exits and a review card is sent to the admin channel. The agent is released — a human reviews and approves via the admin channel or TUI Drafts panel.
+**Two-step publish flow (BOTH steps required):**
+1. **Stage** the draft (`*_stage_*` tool) — saves content to social_drafts DB.
+2. **Call the publish tool** (`instagram_create_post`, `threads_create_post`, etc.) — this triggers the approval hook and sends a review card to the admin channel.
+
+**IMPORTANT:** Staging alone does NOT send a review card. You MUST call the publish tool after staging. The publish tool is intercepted by the hook, which creates the review card for human approval. Without step 2, no review card is generated and the draft sits in the DB forever.
 
 For full setup guidance, load the `instagram` or `threads` skill.
 "#;
@@ -2023,6 +2052,9 @@ webhook_verify_token_env = "INSTAGRAM_WEBHOOK_VERIFY_TOKEN"
 ```bash
 catclaw social inbox --platform instagram --status pending
 catclaw social inbox --platform instagram --status draft_ready
+catclaw social draft list --platform instagram               # List drafts
+catclaw social draft list --platform instagram --status awaiting_approval
+catclaw social draft get <id>                                # Full content + media URL
 ```
 
 Statuses: `pending` → `forwarded` / `auto_replying` / `template_sent` / `ignored` → `draft_ready` → `sent` / `failed`
@@ -2046,11 +2078,13 @@ Statuses: `pending` → `forwarded` / `auto_replying` / `template_sent` / `ignor
 | `instagram_create_post` | approval/auto | Publish an image post (image_url + caption) |
 | `instagram_send_dm` | approval/auto | Send a DM to a user (recipient_id + text) |
 
-**Two-step publish flow:**
-1. Call `instagram_stage_reply` / `instagram_stage_post` / `instagram_stage_dm` to store the draft
-2. Call the publish tool (`instagram_reply_comment` / `instagram_create_post` / `instagram_send_dm`)
+**Two-step publish flow (BOTH steps required):**
+1. **Stage** the draft: call `instagram_stage_reply` / `instagram_stage_post` / `instagram_stage_dm` to save content to social_drafts.
+2. **Call the publish tool**: `instagram_reply_comment` / `instagram_create_post` / `instagram_send_dm`.
 
-If `require_approval` is set: hook immediately exits (agent released), admin reviews via the Drafts panel (Alt+0) or admin channel card, then approves → gateway publishes.
+**IMPORTANT:** Staging alone does NOT trigger review or publishing. You MUST call the publish tool after staging — the hook intercepts it and sends a review card to the admin channel. Without step 2, the draft sits in the DB with no review card generated.
+
+If `require_approval` is set: hook intercepts the publish tool, sends a review card, and releases the agent immediately. A human reviews via the admin channel or TUI Drafts panel (Alt+0), then approves → gateway publishes.
 If `allowed`: publish tool executes directly and updates draft status to sent.
 
 ## TUI
@@ -2165,16 +2199,21 @@ The `threads_reply` and `threads_create_post` MCP tools handle both steps transp
 | `threads_get_inbox` | none | Query social_inbox table |
 | `threads_keyword_search` | none | Search posts by keyword (q, search_type: TOP/RECENT, limit) |
 
-**Two-step publish flow:**
-1. Call `threads_stage_reply` / `threads_stage_post` to store the draft
-2. Call the publish tool (`threads_reply` / `threads_create_post`)
+**Two-step publish flow (BOTH steps required):**
+1. **Stage** the draft: call `threads_stage_reply` / `threads_stage_post` to save content to social_drafts.
+2. **Call the publish tool**: `threads_reply` / `threads_create_post`.
 
-If `require_approval` is set: hook immediately exits (agent released), admin reviews via the Drafts panel or admin channel card, then approves → gateway publishes.
+**IMPORTANT:** Staging alone does NOT trigger review or publishing. You MUST call the publish tool after staging — the hook intercepts it and sends a review card to the admin channel. Without step 2, the draft sits in the DB with no review card generated.
+
+If `require_approval` is set: hook intercepts the publish tool, sends a review card, and releases the agent immediately. A human reviews via the admin channel or TUI Drafts panel (Alt+0), then approves → gateway publishes.
 
 ## Inbox Management
 
 ```bash
 catclaw social inbox --platform threads --status pending
+catclaw social draft list --platform threads                 # List drafts
+catclaw social draft list --platform threads --status awaiting_approval
+catclaw social draft get <id>                                # Full content + media URL
 ```
 
 ## TUI

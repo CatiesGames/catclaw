@@ -95,6 +95,14 @@ impl SessionManager {
             .unwrap_or_default()
     }
 
+    /// Read the current env from config (or empty if no config).
+    /// These are injected as OS-level env vars into claude subprocesses.
+    fn subprocess_env(&self) -> HashMap<String, String> {
+        self.config.as_ref()
+            .map(|c| c.read().unwrap().env.clone())
+            .unwrap_or_default()
+    }
+
     /// Send a message to a session, creating or resuming as needed.
     /// Returns the response text.
     ///
@@ -113,6 +121,7 @@ impl SessionManager {
     ) -> Result<String> {
         let session_key = key.to_key_string();
         let mcp_env = self.mcp_env();
+        let subprocess_env = self.subprocess_env();
 
         // Per-session mutex: queue concurrent messages instead of rejecting them
         let lock = self.session_lock(&session_key);
@@ -189,7 +198,7 @@ impl SessionManager {
                         self.active_handles.insert(session_key.clone(), kill_tx);
 
                         let mut handle =
-                            ClaudeHandle::spawn_with_prompt(args, &combined).await?;
+                            ClaudeHandle::spawn_with_prompt(args, &combined, &subprocess_env).await?;
 
                         let response = tokio::select! {
                             result = handle.wait_for_result(event_observer.clone()) => result?,
@@ -261,7 +270,7 @@ impl SessionManager {
         self.active_handles.insert(session_key.clone(), kill_tx);
 
         // Spawn claude with the prompt as CLI argument
-        let mut handle = ClaudeHandle::spawn_with_prompt(args, message).await?;
+        let mut handle = ClaudeHandle::spawn_with_prompt(args, message, &subprocess_env).await?;
 
         // Wait for result, but also listen for kill signal
         let response = tokio::select! {
@@ -365,6 +374,7 @@ impl SessionManager {
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<SessionEvent>> {
         let session_key = key.to_key_string();
         let mcp_env = self.mcp_env();
+        let subprocess_env = self.subprocess_env();
 
         // Per-session mutex: queue concurrent messages instead of rejecting them
         let lock = self.session_lock(&session_key);
@@ -456,7 +466,7 @@ impl SessionManager {
         self.active_handles.insert(session_key.clone(), kill_tx);
 
         // Spawn claude
-        let mut handle = ClaudeHandle::spawn_with_prompt(args, &actual_message).await?;
+        let mut handle = ClaudeHandle::spawn_with_prompt(args, &actual_message, &subprocess_env).await?;
 
         // Create channel for streaming events
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();

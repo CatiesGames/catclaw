@@ -890,6 +890,12 @@ impl StateDb {
         Ok(())
     }
 
+    pub fn delete_social_draft(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM social_drafts WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
     pub fn update_social_draft_sent(&self, id: i64, reply_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();

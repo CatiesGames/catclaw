@@ -51,6 +51,7 @@ pub fn build_forward_card(row: &SocialInboxRow) -> ForwardCard {
         author: author.to_string(),
         text: text.to_string(),
         permalink,
+        image_url: None,
         created_at: row.created_at.clone(),
         card_type: ForwardCardType::Incoming,
     }
@@ -73,6 +74,7 @@ pub fn build_draft_card(row: &SocialInboxRow, draft: &str) -> ForwardCard {
         author: author.to_string(),
         text: format!("Original ({}): {}\nDraft: {}", author, original_text, draft),
         permalink: None,
+        image_url: None,
         created_at: row.created_at.clone(),
         card_type: ForwardCardType::DraftReview,
     }
@@ -104,11 +106,7 @@ pub fn build_social_draft_card(draft: &SocialDraftRow) -> ForwardCard {
         }
         _ => {
             // "post" or anything else
-            let mut body = format!("Draft: {}", draft.content);
-            if let Some(ref url) = draft.media_url {
-                body.push_str(&format!("\nMedia: {}", url));
-            }
-            (format!("{} Draft Post", platform_label), body)
+            (format!("{} Draft Post", platform_label), format!("Draft: {}", draft.content))
         }
     };
 
@@ -119,6 +117,7 @@ pub fn build_social_draft_card(draft: &SocialDraftRow) -> ForwardCard {
         author: author.to_string(),
         text,
         permalink: None,
+        image_url: draft.media_url.clone(),
         created_at: draft.created_at.clone(),
         card_type: ForwardCardType::DraftReview,
     }
@@ -141,6 +140,8 @@ pub struct ForwardCard {
     pub author: String,
     pub text: String,
     pub permalink: Option<String>,
+    /// Image URL to display in the card (e.g., draft post media).
+    pub image_url: Option<String>,
     pub created_at: String,
     pub card_type: ForwardCardType,
 }
@@ -154,6 +155,7 @@ pub fn build_resolved_card(card: &ForwardCard, status: &str) -> ForwardCard {
         author: card.author.clone(),
         text: card.text.clone(),
         permalink: card.permalink.clone(),
+        image_url: card.image_url.clone(),
         created_at: card.created_at.clone(),
         card_type: ForwardCardType::Resolved(status.to_string()),
     }
@@ -204,15 +206,20 @@ impl ForwardCard {
             json!([{ "type": 1, "components": buttons }])
         };
 
+        let mut embed = json!({
+            "title": self.title,
+            "description": description,
+            "color": color,
+            "fields": fields,
+            "footer": { "text": format!("id: {}", self.card_id) },
+            "timestamp": ts
+        });
+        if let Some(ref url) = self.image_url {
+            embed["image"] = json!({"url": url});
+        }
+
         json!({
-            "embeds": [{
-                "title": self.title,
-                "description": description,
-                "color": color,
-                "fields": fields,
-                "footer": { "text": format!("id: {}", self.card_id) },
-                "timestamp": ts
-            }],
+            "embeds": [embed],
             "components": components
         })
     }
@@ -220,13 +227,17 @@ impl ForwardCard {
     /// Render as a Telegram message with inline keyboard.
     pub fn to_telegram_text_and_keyboard(&self) -> (String, Value) {
         let text = format!(
-            "*{}*\nFrom: @{}\n\n{}{}",
+            "*{}*\nFrom: @{}\n\n{}{}{}",
             escape_markdown(&self.title),
             escape_markdown(&self.author),
             escape_markdown(&self.text),
             self.permalink
                 .as_ref()
                 .map(|u| format!("\n[Post]({})", u))
+                .unwrap_or_default(),
+            self.image_url
+                .as_ref()
+                .map(|u| format!("\n[Media]({})", escape_markdown(u)))
                 .unwrap_or_default()
         );
         let pfx = &self.button_prefix;
@@ -261,6 +272,14 @@ impl ForwardCard {
             "type": "section",
             "text": { "type": "mrkdwn", "text": format!("*From:* @{}\n{}", self.author, self.text) }
         });
+        let mut blocks = vec![header, body];
+        if let Some(ref url) = self.image_url {
+            blocks.push(json!({
+                "type": "image",
+                "image_url": url,
+                "alt_text": "Draft media"
+            }));
+        }
         let pfx = &self.button_prefix;
         let id = self.card_id;
         let actions: Vec<Value> = match &self.card_type {
@@ -275,17 +294,15 @@ impl ForwardCard {
                 slack_button(&format!("{pfx}:discard:{id}"), "捨棄", "danger"),
             ],
             ForwardCardType::Resolved(s) => {
-                return json!({
-                    "blocks": [header, body, json!({
-                        "type": "context",
-                        "elements": [{ "type": "mrkdwn", "text": s }]
-                    })]
-                });
+                blocks.push(json!({
+                    "type": "context",
+                    "elements": [{ "type": "mrkdwn", "text": s }]
+                }));
+                return json!({ "blocks": blocks });
             }
         };
-        json!({
-            "blocks": [header, body, { "type": "actions", "elements": actions }]
-        })
+        blocks.push(json!({ "type": "actions", "elements": actions }));
+        json!({ "blocks": blocks })
     }
 }
 

@@ -203,6 +203,17 @@ pub struct Config {
     #[serde(default)]
     pub mcp_env: HashMap<String, HashMap<String, String>>,
 
+    /// Environment variables injected into claude subprocesses.
+    /// These are set as OS-level env vars on the spawned process,
+    /// accessible by any tool (Bash, etc.) the agent uses.
+    /// Example in TOML:
+    /// ```toml
+    /// [env]
+    /// OP_SERVICE_ACCOUNT_TOKEN = "ops_xxx"
+    /// ```
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+
     /// Social inbox integration (Instagram + Threads).
     #[serde(default)]
     pub social: SocialConfig,
@@ -639,6 +650,10 @@ impl Config {
             "social.threads.agent" => Ok(self.social.threads.as_ref().map(|c| c.agent.clone()).unwrap_or_default()),
             "social.threads.rules.count" => Ok(self.social.threads.as_ref().map_or(0, |c| c.rules.len()).to_string()),
             other => {
+                // env.{KEY}
+                if let Some(env_key) = other.strip_prefix("env.") {
+                    return Ok(self.env.get(env_key).cloned().unwrap_or_default());
+                }
                 // social.{platform}.rules[N].{field}
                 for platform in ["instagram", "threads"] {
                     let prefix = format!("social.{}.rules[", platform);
@@ -1054,6 +1069,15 @@ impl Config {
                 Ok(true)
             }
             other => {
+                // env.{KEY}
+                if let Some(env_key) = other.strip_prefix("env.") {
+                    if value.is_empty() {
+                        self.env.remove(env_key);
+                    } else {
+                        self.env.insert(env_key.to_string(), value.to_string());
+                    }
+                    return Ok(false);
+                }
                 // social.{platform}.rules[N].{field} and social.{platform}.rules[N].delete
                 for platform in ["instagram", "threads"] {
                     let prefix = format!("social.{}.rules[", platform);
@@ -1198,6 +1222,7 @@ impl Config {
             }),
             logging: LoggingConfig::default(),
             mcp_env: HashMap::new(),
+            env: HashMap::new(),
             social: SocialConfig::default(),
         }
     }

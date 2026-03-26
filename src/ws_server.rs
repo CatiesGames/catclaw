@@ -224,6 +224,10 @@ async fn dispatch(
         "mcp_env.get" => handle_mcp_env_get(req, gw),
         "mcp_env.set" => handle_mcp_env_set(req, gw),
         "mcp_env.remove" => handle_mcp_env_remove(req, gw),
+        "env.list" => handle_env_list(req, gw),
+        "env.get" => handle_env_get(req, gw),
+        "env.set" => handle_env_set(req, gw),
+        "env.remove" => handle_env_remove(req, gw),
         "mcp.tools" => handle_mcp_tools(req, gw),
         "social.inbox.list" => handle_social_inbox_list(req, gw),
         "social.inbox.get" => handle_social_inbox_get(req, gw),
@@ -234,7 +238,7 @@ async fn dispatch(
         "social.mode" => handle_social_mode(req, gw),
         "social.draft.list" => handle_social_draft_list(req, gw),
         "social.draft.approve" => handle_social_draft_approve(req, gw).await,
-        "social.draft.discard" => handle_social_draft_discard(req, gw),
+        "social.draft.discard" => handle_social_draft_discard(req, gw).await,
         "social.draft.submit_for_approval" => handle_social_draft_submit(req, gw).await,
         "issues.list" => handle_issues_list(req, gw),
         "issues.ignore" => handle_issues_ignore(req, gw).await,
@@ -1108,6 +1112,93 @@ fn handle_mcp_env_remove(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse
     WsResponse::ok(req.id, json!({"server": server, "key": key}))
 }
 
+// ── Subprocess env handlers ──
+
+fn handle_env_list(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let config = gw.config.read().unwrap();
+    let masked: serde_json::Map<String, Value> = config.env
+        .iter()
+        .map(|(k, v)| (k.clone(), json!(mask_value(v))))
+        .collect();
+    WsResponse::ok(req.id, json!(masked))
+}
+
+fn handle_env_get(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let key = match req.params.get("key").and_then(|v| v.as_str()) {
+        Some(k) => k,
+        None => return WsResponse::err(req.id, -32602, "missing param: key"),
+    };
+    let config = gw.config.read().unwrap();
+    let value = config.env.get(key).map(|v| mask_value(v)).unwrap_or_default();
+    WsResponse::ok(req.id, json!({"key": key, "value": value}))
+}
+
+fn handle_env_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let key = match req.params.get("key").and_then(|v| v.as_str()) {
+        Some(k) => k.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: key"),
+    };
+    let value = match req.params.get("value").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: value"),
+    };
+
+    let serialized = {
+        let config = gw.config.read().unwrap();
+        let mut full = config.clone();
+        full.env.insert(key.clone(), value);
+        match toml::to_string_pretty(&full) {
+            Ok(s) => s,
+            Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+        }
+    };
+
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+
+    {
+        let mut config = gw.config.write().unwrap();
+        if let Ok(new_config) = toml::from_str::<crate::config::Config>(&serialized) {
+            config.env = new_config.env;
+        }
+    }
+
+    info!(key = %key, "env set");
+    WsResponse::ok(req.id, json!({"key": key}))
+}
+
+fn handle_env_remove(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let key = match req.params.get("key").and_then(|v| v.as_str()) {
+        Some(k) => k.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: key"),
+    };
+
+    let serialized = {
+        let config = gw.config.read().unwrap();
+        let mut full = config.clone();
+        full.env.remove(&key);
+        match toml::to_string_pretty(&full) {
+            Ok(s) => s,
+            Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+        }
+    };
+
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+
+    {
+        let mut config = gw.config.write().unwrap();
+        if let Ok(new_config) = toml::from_str::<crate::config::Config>(&serialized) {
+            config.env = new_config.env;
+        }
+    }
+
+    info!(key = %key, "env removed");
+    WsResponse::ok(req.id, json!({"key": key}))
+}
+
 // ── MCP Tools handler ──
 
 fn handle_mcp_tools(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
@@ -1454,18 +1545,46 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
     }
 }
 
-fn handle_social_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+async fn handle_social_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
     let id = match req.params.get("id").and_then(|v| v.as_i64()) {
         Some(id) => id,
         None => return WsResponse::err(req.id, -32602, "missing param: id"),
     };
-    // Clean up media file if present
-    if let Ok(Some(draft)) = gw.state_db.get_social_draft(id) {
-        let workspace = gw.config.read().unwrap().general.workspace.clone();
-        crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
+    let draft = match gw.state_db.get_social_draft(id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return WsResponse::err(req.id, -32602, format!("draft {} not found", id)),
+        Err(e) => return WsResponse::err(req.id, -1, format!("db error: {}", e)),
+    };
+
+    // Only unsent drafts can be discarded
+    if draft.status == "sent" {
+        return WsResponse::err(req.id, -32602, format!("draft {} already sent, cannot discard", id));
     }
-    match gw.state_db.update_social_draft_status(id, "ignored") {
-        Ok(_) => WsResponse::ok(req.id, json!({ "status": "ignored" })),
+
+    // Clean up media file if present
+    let workspace = gw.config.read().unwrap().general.workspace.clone();
+    crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
+
+    // Update forward card in admin channel (remove buttons, show "已捨棄")
+    let cfg = gw.config.read().unwrap().clone();
+    let admin_channel = match draft.platform.as_str() {
+        "instagram" => cfg.social.instagram.as_ref().map(|c| c.admin_channel.clone()),
+        "threads" => cfg.social.threads.as_ref().map(|c| c.admin_channel.clone()),
+        _ => None,
+    }.unwrap_or_default();
+    if let Some(ref fwd_ref) = draft.forward_ref {
+        if !admin_channel.is_empty() {
+            let base = crate::social::forward::build_social_draft_card(&draft);
+            let resolved = crate::social::forward::build_resolved_card(&base, "已捨棄");
+            crate::social::forward::update_forward_card(
+                resolved, fwd_ref, &admin_channel, &gw.adapters_list,
+            ).await;
+        }
+    }
+
+    // Delete from DB
+    match gw.state_db.delete_social_draft(id) {
+        Ok(_) => WsResponse::ok(req.id, json!({ "status": "deleted" })),
         Err(e) => WsResponse::err(req.id, -1, format!("db error: {}", e)),
     }
 }

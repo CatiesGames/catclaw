@@ -18,6 +18,8 @@ enum ConfigMode {
     Editing,
     /// Multi-step input for adding a new MCP env var: server → key → value
     AddingMcpEnv { step: McpEnvStep },
+    /// Two-step input for adding a new subprocess env var: key → value
+    AddingEnv { step: EnvStep },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +27,12 @@ enum McpEnvStep {
     Server,
     Key { server: String },
     Value { server: String, key: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum EnvStep {
+    Key,
+    Value { key: String },
 }
 
 struct ConfigEntry {
@@ -284,7 +292,7 @@ impl ConfigPanel {
             entries.push(ConfigEntry { key: "social.instagram.token_env".to_string(), value: ig.token_env.clone(), section: sec.to_string(), editable: true });
             // token_value: display masked current value from env
             let tok_masked = std::env::var(&ig.token_env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
-            let expires = std::env::var("CATCLAW_INSTAGRAM_TOKEN_EXPIRES_AT").ok();
+            let expires = Self::read_token_expiry(&config.general.state_db, "instagram");
             let tok_display = if let Some(exp) = expires {
                 format!("{} — expires: {}", tok_masked, exp)
             } else { tok_masked };
@@ -331,7 +339,7 @@ impl ConfigPanel {
             entries.push(ConfigEntry { key: "social.threads.webhook_url".to_string(), value: format!("{}/webhook/threads", base), section: sec.to_string(), editable: false });
             entries.push(ConfigEntry { key: "social.threads.token_env".to_string(), value: th.token_env.clone(), section: sec.to_string(), editable: true });
             let tok_masked = std::env::var(&th.token_env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
-            let expires = std::env::var("CATCLAW_THREADS_TOKEN_EXPIRES_AT").ok();
+            let expires = Self::read_token_expiry(&config.general.state_db, "threads");
             let tok_display = if let Some(exp) = expires {
                 format!("{} — expires: {}", tok_masked, exp)
             } else { tok_masked };
@@ -386,6 +394,17 @@ impl ConfigPanel {
             }
         }
 
+        // Subprocess Env
+        for (k, v) in &config.env {
+            let masked = Self::mask_value(v);
+            entries.push(ConfigEntry {
+                key: format!("env.{}", k),
+                value: masked,
+                section: "Subprocess Env".to_string(),
+                editable: true,
+            });
+        }
+
         entries
     }
 
@@ -397,6 +416,29 @@ impl ConfigPanel {
             let prefix: String = chars[..3].iter().collect();
             let suffix: String = chars[chars.len()-3..].iter().collect();
             format!("{}...{}", prefix, suffix)
+        }
+    }
+
+    /// Read token expiry from SQLite social_cursors (read-only).
+    /// Returns a human-readable string like "2026-05-25 (59d left)" or "permanent".
+    fn read_token_expiry(db_path: &std::path::Path, platform: &str) -> Option<String> {
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ).ok()?;
+        let val: String = conn.query_row(
+            "SELECT cursor_val FROM social_cursors WHERE platform=?1 AND feed='token_expires_at'",
+            rusqlite::params![platform],
+            |row| row.get(0),
+        ).ok()?;
+        if val == "permanent" {
+            return Some("permanent".to_string());
+        }
+        if let Ok(dt) = val.parse::<chrono::DateTime<chrono::Utc>>() {
+            let days = (dt - chrono::Utc::now()).num_days();
+            Some(format!("{} ({}d left)", dt.format("%Y-%m-%d"), days))
+        } else {
+            Some(val)
         }
     }
 
@@ -547,6 +589,25 @@ impl ConfigPanel {
             return;
         }
 
+        if let Some(env_key) = key.strip_prefix("env.") {
+            let env_key = env_key.to_string();
+            tokio::spawn(async move {
+                match client.request("env.set", json!({"key": env_key, "value": value_clone})).await {
+                    Ok(_) => {
+                        let _ = tx.send(ConfigEvent::SetResult {
+                            key: key_clone,
+                            value: "(updated)".to_string(),
+                            needs_restart: false,
+                        });
+                    }
+                    Err(e) => { let _ = tx.send(ConfigEvent::SetError(e)); }
+                }
+            });
+            self.status_msg = Some(format!("Setting {} ...", key));
+            self.mode = ConfigMode::Normal;
+            return;
+        }
+
         // Route social mode changes to social.mode (returns webhook_url in response)
         if key == "social.instagram.mode" || key == "social.threads.mode" {
             let platform = if key.contains("instagram") { "instagram" } else { "threads" }.to_string();
@@ -641,6 +702,7 @@ impl Component for ConfigPanel {
                         if entry.editable {
                             // Secret fields display masked values — start with empty buffer
                             let is_secret = entry.key.starts_with("mcp_env.") ||
+                                entry.key.starts_with("env.") ||
                                 entry.key.ends_with("_value") && entry.key.starts_with("social.");
                             if is_secret {
                                 self.edit_buffer.clear();
@@ -662,16 +724,24 @@ impl Component for ConfigPanel {
                     Action::None
                 }
                 KeyCode::Char('a') => {
-                    // Start adding a new MCP env var
+                    // Start adding a new env var — detect section from current selection
                     self.edit_buffer.clear();
-                    self.mode = ConfigMode::AddingMcpEnv {
-                        step: McpEnvStep::Server,
-                    };
+                    let in_env_section = self.entries.get(self.selected)
+                        .is_some_and(|e| e.section == "Subprocess Env");
+                    if in_env_section {
+                        self.mode = ConfigMode::AddingEnv {
+                            step: EnvStep::Key,
+                        };
+                    } else {
+                        self.mode = ConfigMode::AddingMcpEnv {
+                            step: McpEnvStep::Server,
+                        };
+                    }
                     self.status_msg = None;
                     Action::None
                 }
                 KeyCode::Char('d') => {
-                    // Delete selected MCP env entry
+                    // Delete selected env entry (MCP env or subprocess env)
                     if let Some(entry) = self.entries.get(self.selected) {
                         if let Some(rest) = entry.key.strip_prefix("mcp_env.") {
                             if let Some((server, env_key)) = rest.split_once('.') {
@@ -694,6 +764,24 @@ impl Component for ConfigPanel {
                                 });
                                 self.status_msg = Some("Removing...".to_string());
                             }
+                        } else if let Some(env_key) = entry.key.strip_prefix("env.") {
+                            let client = self.client.clone();
+                            let tx = self.event_tx.clone();
+                            let env_key = env_key.to_string();
+                            let key_full = entry.key.clone();
+                            tokio::spawn(async move {
+                                match client.request("env.remove", json!({"key": env_key})).await {
+                                    Ok(_) => {
+                                        let _ = tx.send(ConfigEvent::SetResult {
+                                            key: key_full,
+                                            value: "(removed)".to_string(),
+                                            needs_restart: false,
+                                        });
+                                    }
+                                    Err(e) => { let _ = tx.send(ConfigEvent::SetError(e)); }
+                                }
+                            });
+                            self.status_msg = Some("Removing...".to_string());
                         }
                     }
                     Action::None
@@ -810,6 +898,65 @@ impl Component for ConfigPanel {
                     _ => Action::None,
                 }
             }
+
+            ConfigMode::AddingEnv { step } => {
+                let step = step.clone();
+                match event.code {
+                    KeyCode::Enter => {
+                        let input = self.edit_buffer.trim().to_string();
+                        if input.is_empty() {
+                            self.status_msg = Some("Cannot be empty".to_string());
+                            self.mode = ConfigMode::Normal;
+                        } else {
+                            match step {
+                                EnvStep::Key => {
+                                    self.edit_buffer.clear();
+                                    self.mode = ConfigMode::AddingEnv {
+                                        step: EnvStep::Value { key: input },
+                                    };
+                                }
+                                EnvStep::Value { key } => {
+                                    let client = self.client.clone();
+                                    let tx = self.event_tx.clone();
+                                    let value = input;
+                                    let key_display = format!("env.{}", key);
+                                    let k = key.clone();
+                                    let v = value.clone();
+                                    tokio::spawn(async move {
+                                        match client.request("env.set", json!({"key": k, "value": v})).await {
+                                            Ok(_) => {
+                                                let _ = tx.send(ConfigEvent::SetResult {
+                                                    key: key_display,
+                                                    value: "(set)".to_string(),
+                                                    needs_restart: false,
+                                                });
+                                            }
+                                            Err(e) => { let _ = tx.send(ConfigEvent::SetError(e)); }
+                                        }
+                                    });
+                                    self.status_msg = Some(format!("Setting {} ...", key));
+                                    self.mode = ConfigMode::Normal;
+                                }
+                            }
+                        }
+                        Action::None
+                    }
+                    KeyCode::Esc => {
+                        self.mode = ConfigMode::Normal;
+                        self.status_msg = Some("Cancelled".to_string());
+                        Action::None
+                    }
+                    KeyCode::Backspace => {
+                        self.edit_buffer.pop();
+                        Action::None
+                    }
+                    KeyCode::Char(c) => {
+                        self.edit_buffer.push(c);
+                        Action::None
+                    }
+                    _ => Action::None,
+                }
+            }
         };
 
         // Drain async events; if a pending action was set, return it instead
@@ -821,7 +968,7 @@ impl Component for ConfigPanel {
     }
 
     fn captures_input(&self) -> bool {
-        matches!(self.mode, ConfigMode::Editing | ConfigMode::AddingMcpEnv { .. })
+        matches!(self.mode, ConfigMode::Editing | ConfigMode::AddingMcpEnv { .. } | ConfigMode::AddingEnv { .. })
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -996,6 +1143,25 @@ impl Component for ConfigPanel {
                 ]))
                 .style(Style::default().bg(Theme::SURFACE0))
             }
+            ConfigMode::AddingEnv { step } => {
+                let label = match step {
+                    EnvStep::Key => "Env var name",
+                    EnvStep::Value { .. } => "Env var value",
+                };
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {}: ", label),
+                        Style::default()
+                            .fg(Theme::MAUVE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{}▌", self.edit_buffer),
+                        Style::default().fg(Theme::TEXT),
+                    ),
+                ]))
+                .style(Style::default().bg(Theme::SURFACE0))
+            }
             ConfigMode::Normal => {
                 if let Some(msg) = &self.status_msg {
                     Paragraph::new(format!(" {}", msg))
@@ -1014,8 +1180,8 @@ impl Component for ConfigPanel {
             } else {
                 " Enter Save  Esc Cancel"
             },
-            ConfigMode::AddingMcpEnv { .. } => " Enter Next  Esc Cancel",
-            ConfigMode::Normal => " j/k Navigate  Enter Edit  a Add MCP Env  d Delete MCP Env  r Reload",
+            ConfigMode::AddingMcpEnv { .. } | ConfigMode::AddingEnv { .. } => " Enter Next  Esc Cancel",
+            ConfigMode::Normal => " j/k Navigate  Enter Edit  a Add Env  d Delete Env  r Reload",
         };
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(Theme::OVERLAY0).bg(Theme::MANTLE));
