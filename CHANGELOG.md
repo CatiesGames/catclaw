@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.0](https://github.com/CatiesGames/catclaw/compare/v0.21.0...v0.22.0) (2026-03-26)
+
+
+### Features
+
+* social_drafts 系統 + 核准流程改造 + TUI Drafts 面板 ([b889ba9](https://github.com/CatiesGames/catclaw/commit/b889ba9d8b595da432a1811ebbe3c8ab8ebf3363))
+* 社群卡片按鈕互動全面優化 + 建議 AI 回覆 ([7ea612e](https://github.com/CatiesGames/catclaw/commit/7ea612e34653c42a9fa13023bfba8745f2244e7c))
+
 ## [0.21.0](https://github.com/CatiesGames/catclaw/compare/v0.20.2...v0.21.0) (2026-03-26)
 
 
