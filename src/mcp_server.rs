@@ -182,6 +182,8 @@ fn instagram_tools() -> Vec<Value> {
         social_tool("instagram_delete_comment", "Delete an Instagram comment (requires approval)", serde_json::json!({"type":"object","properties":{"comment_id":{"type":"string","description":"Comment ID to delete"}},"required":["comment_id"]})),
         social_tool("instagram_get_insights", "Get Instagram account insights/analytics", serde_json::json!({"type":"object","properties":{"metric":{"type":"string","description":"Comma-separated metrics (e.g. impressions,reach)"},"period":{"type":"string","description":"Period: day, week, month"}},"required":["metric","period"]})),
         social_tool("instagram_get_inbox", "Query the Social Inbox for Instagram events", serde_json::json!({"type":"object","properties":{"status":{"type":"string","description":"Filter by status: pending, forwarded, draft_ready, sent, ignored, failed"},"limit":{"type":"integer","description":"Max rows to return (default 20)"}},"required":[]})),
+        social_tool("instagram_create_post", "Create a new Instagram image post (requires approval)", serde_json::json!({"type":"object","properties":{"image_url":{"type":"string","description":"Public URL of the image to post (JPEG, max 8MB)"},"caption":{"type":"string","description":"Post caption (max 2200 characters)"}},"required":["image_url","caption"]})),
+        social_tool("instagram_send_dm", "Send a direct message to an Instagram user (requires approval)", serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Instagram-scoped user ID of the recipient"},"text":{"type":"string","description":"Message text (max 1000 characters)"}},"required":["recipient_id","text"]})),
     ]
 }
 
@@ -197,6 +199,7 @@ fn threads_tools() -> Vec<Value> {
         social_tool("threads_delete_post", "Delete a Threads post (requires approval)", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID to delete"}},"required":["post_id"]})),
         social_tool("threads_get_insights", "Get Threads account insights/analytics", serde_json::json!({"type":"object","properties":{"metric":{"type":"string","description":"Comma-separated metrics"}},"required":["metric"]})),
         social_tool("threads_get_inbox", "Query the Social Inbox for Threads events", serde_json::json!({"type":"object","properties":{"status":{"type":"string","description":"Filter by status: pending, forwarded, draft_ready, sent, ignored, failed"},"limit":{"type":"integer","description":"Max rows to return (default 20)"}},"required":[]})),
+        social_tool("threads_keyword_search", "Search Threads posts by keyword", serde_json::json!({"type":"object","properties":{"q":{"type":"string","description":"Keyword to search for"},"search_type":{"type":"string","description":"TOP (default) or RECENT"},"limit":{"type":"integer","description":"Max results (default 25, max 100)"}},"required":["q"]})),
     ]
 }
 
@@ -277,6 +280,18 @@ async fn execute_social_tool(
             let rows = gw.state_db.list_social_inbox(Some("instagram"), status, limit)?;
             Ok(serde_json::to_value(&rows).unwrap_or(serde_json::json!([])))
         }
+        "instagram_create_post" => {
+            let (token, uid) = ig_creds(&cfg)?;
+            let image_url = str_arg(&args, "image_url")?;
+            let caption = str_arg(&args, "caption")?;
+            InstagramClient::new(token, uid).create_image_post(image_url, caption).await
+        }
+        "instagram_send_dm" => {
+            let (token, uid) = ig_creds(&cfg)?;
+            let recipient_id = str_arg(&args, "recipient_id")?;
+            let text = str_arg(&args, "text")?;
+            InstagramClient::new(token, uid).send_dm(recipient_id, text).await
+        }
 
         // ── Threads ──────────────────────────────────────────────────────────
         "threads_get_profile" => {
@@ -337,6 +352,13 @@ async fn execute_social_tool(
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
             let rows = gw.state_db.list_social_inbox(Some("threads"), status, limit)?;
             Ok(serde_json::to_value(&rows).unwrap_or(serde_json::json!([])))
+        }
+        "threads_keyword_search" => {
+            let (token, uid) = th_creds(&cfg)?;
+            let q = str_arg(&args, "q")?;
+            let search_type = args.get("search_type").and_then(|v| v.as_str());
+            let limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+            ThreadsClient::new(token, uid).keyword_search(q, search_type, limit).await
         }
 
         other => Err(CatClawError::Social(format!("unknown social tool '{}'", other))),

@@ -92,6 +92,23 @@ impl ThreadsClient {
         self.post_form(&publish_url, &[("creation_id", &container_id)]).await
     }
 
+    /// Search Threads posts by keyword.
+    pub async fn keyword_search(&self, q: &str, search_type: Option<&str>, limit: Option<u32>) -> Result<Value> {
+        let resp = self.http.get("https://graph.threads.net/v1.0/keyword_search")
+            .bearer_auth(&self.token)
+            .query(&[
+                ("q", q),
+                ("search_type", search_type.unwrap_or("TOP")),
+                ("fields", "id,text,media_type,timestamp,permalink,username"),
+            ])
+            .query(&[("limit", limit.unwrap_or(25))])
+            .send().await
+            .map_err(|e| CatClawError::Social(format!("threads http error: {e}")))?;
+        let val: Value = resp.json().await
+            .map_err(|e| CatClawError::Social(format!("threads json error: {e}")))?;
+        check_error(val)
+    }
+
     pub async fn delete_post(&self, post_id: &str) -> Result<Value> {
         let url = format!("{}/{}", self.base(), post_id);
         self.delete_req(&url).await

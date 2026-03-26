@@ -395,6 +395,11 @@ enum TaskCommands {
         /// Task ID or name
         id_or_name: String,
     },
+    /// Show full details of a task (including prompt)
+    Get {
+        /// Task ID or name
+        id_or_name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1105,6 +1110,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     let id = resolve_task_id(&state_db, &id_or_name)?;
                     state_db.delete_task(id)?;
                     println!("Task {} deleted.", id);
+                }
+                TaskCommands::Get { id_or_name } => {
+                    let id = resolve_task_id(&state_db, &id_or_name)?;
+                    match state_db.get_task(id)? {
+                        Some(t) => cmd_task_get(&t),
+                        None => println!("Task {} not found.", id),
+                    }
                 }
             }
         }
@@ -2892,6 +2904,33 @@ fn cmd_task_list(state_db: &StateDb) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn cmd_task_get(t: &crate::state::ScheduledTaskRow) {
+    let status = if t.enabled { "enabled" } else { "disabled" };
+    let schedule = if let Some(ref cron) = t.cron_expr {
+        format!("cron: {} (UTC)", cron)
+    } else if let Some(mins) = t.interval_mins {
+        if mins >= 1440 {
+            format!("every {}d", mins / 1440)
+        } else if mins >= 60 {
+            format!("every {}h", mins / 60)
+        } else {
+            format!("every {}m", mins)
+        }
+    } else {
+        "one-shot".to_string()
+    };
+    println!("ID:       {}", t.id);
+    println!("Name:     {}", t.name);
+    println!("Agent:    {}", t.agent_id);
+    println!("Status:   {}", status);
+    println!("Schedule: {}", schedule);
+    println!("Next run: {}", format_utc_to_local(&t.next_run_at));
+    if let Some(ref last) = t.last_run_at {
+        println!("Last run: {}", format_utc_to_local(last));
+    }
+    println!("Prompt:\n{}", t.payload.as_deref().unwrap_or("(none)"));
 }
 
 /// Resolve a task ID from either a numeric ID or a task name.

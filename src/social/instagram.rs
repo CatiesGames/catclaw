@@ -21,7 +21,7 @@ impl InstagramClient {
     }
 
     fn base(&self) -> &'static str {
-        "https://graph.facebook.com/v21.0"
+        "https://graph.facebook.com/v25.0"
     }
 
     pub async fn get_profile(&self) -> Result<Value> {
@@ -68,6 +68,42 @@ impl InstagramClient {
     pub async fn delete_comment(&self, comment_id: &str) -> Result<Value> {
         let url = format!("{}/{}", self.base(), comment_id);
         self.delete(&url).await
+    }
+
+    /// Create a new image post (two-step: create container → publish).
+    pub async fn create_image_post(&self, image_url: &str, caption: &str) -> Result<Value> {
+        // Step 1: create media container
+        let container_url = format!("{}/{}/media", self.base(), self.user_id);
+        let container: Value = self
+            .post_form(&container_url, &[("image_url", image_url), ("caption", caption)])
+            .await?;
+        let container_id = container
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CatClawError::Social("instagram: no container id in response".into()))?
+            .to_string();
+
+        // Step 2: wait for container processing, then publish.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let publish_url = format!("{}/{}/media_publish", self.base(), self.user_id);
+        self.post_form(&publish_url, &[("creation_id", &container_id)]).await
+    }
+
+    /// Send a direct message to a user.
+    pub async fn send_dm(&self, recipient_id: &str, text: &str) -> Result<Value> {
+        let url = format!("{}/me/messages", self.base());
+        let body = serde_json::json!({
+            "recipient": { "id": recipient_id },
+            "message": { "text": text }
+        });
+        let resp = self.http.post(&url)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send().await
+            .map_err(|e| CatClawError::Social(format!("instagram http error: {e}")))?;
+        let val: Value = resp.json().await
+            .map_err(|e| CatClawError::Social(format!("instagram json error: {e}")))?;
+        check_error(val)
     }
 
     pub async fn get_insights(&self, metric: &str, period: &str) -> Result<Value> {

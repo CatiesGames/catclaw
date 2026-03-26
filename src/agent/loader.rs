@@ -1516,6 +1516,7 @@ catclaw task add <name> --agent <id> --prompt "..." --at "17:00"
 catclaw task add <name> --agent <id> --prompt "..." --at "2026-03-20T09:00:00"
 catclaw task add <name> --agent <id> --prompt "..." --cron "0 9 * * *"
 catclaw task add <name> --agent <id> --prompt "..." --every 30
+catclaw task get <id|name>               # Show full details including prompt
 catclaw task enable <id|name>             # Enable a task (by ID or name)
 catclaw task disable <id|name>            # Disable a task
 catclaw task delete <id|name>             # Remove a task
@@ -1737,6 +1738,8 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 | `instagram_delete_comment` | Delete (requires approval) |
 | `instagram_get_insights` | Insights data |
 | `instagram_get_inbox` | Query social_inbox table |
+| `instagram_create_post` | Create image post (requires approval) |
+| `instagram_send_dm` | Send DM to a user (requires approval) |
 | `threads_get_profile` | Account info |
 | `threads_get_timeline` | List posts |
 | `threads_get_replies` | Fetch replies |
@@ -1747,6 +1750,7 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 | `threads_delete_post` | Delete post (requires approval) |
 | `threads_get_insights` | Insights data |
 | `threads_get_inbox` | Query social_inbox table |
+| `threads_keyword_search` | Search posts by keyword |
 
 For full setup guidance, load the `instagram` or `threads` skill.
 "#;
@@ -2025,6 +2029,8 @@ Statuses: `pending` → `forwarded` / `auto_replying` / `template_sent` / `ignor
 | `instagram_delete_comment` | required | Delete a comment |
 | `instagram_get_insights` | none | Reach, impressions, engagement |
 | `instagram_get_inbox` | none | Query social_inbox table |
+| `instagram_create_post` | required | Publish an image post (image_url + caption, two-step container→publish) |
+| `instagram_send_dm` | required | Send a DM to a user (recipient_id + text) |
 
 **Auto-reply flow:** Agent receives context → calls `instagram_stage_reply` → draft stored → admin reviews draft card → approves → gateway sends via Graph API.
 
@@ -2135,6 +2141,7 @@ The `threads_reply` and `threads_create_post` MCP tools handle both steps transp
 | `threads_delete_post` | required | Delete a post |
 | `threads_get_insights` | none | Views, likes, replies, reposts |
 | `threads_get_inbox` | none | Query social_inbox table |
+| `threads_keyword_search` | none | Search posts by keyword (q, search_type: TOP/RECENT, limit) |
 
 ## Inbox Management
 

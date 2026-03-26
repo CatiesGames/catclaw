@@ -297,6 +297,8 @@ fn parse_threads_events(payload: &Value) -> Vec<SocialItem> {
                 "replies" => "reply",
                 "mentions" => "mention",
                 "quotes" => "quote",
+                "publish" => "publish",
+                "delete" => "delete",
                 _ => field,
             };
             let platform_id = value

@@ -494,6 +494,7 @@ impl AgentsPanel {
                 "instagram_get_profile", "instagram_get_media", "instagram_get_comments",
                 "instagram_reply_comment", "instagram_stage_reply", "instagram_reply_template",
                 "instagram_delete_comment", "instagram_get_insights", "instagram_get_inbox",
+                "instagram_create_post", "instagram_send_dm",
             ] {
                 tools.push(format!("mcp__catclaw__{}", name));
             }
@@ -503,7 +504,7 @@ impl AgentsPanel {
                 "threads_get_profile", "threads_get_timeline", "threads_get_replies",
                 "threads_create_post", "threads_reply", "threads_stage_reply",
                 "threads_reply_template", "threads_delete_post", "threads_get_insights",
-                "threads_get_inbox",
+                "threads_get_inbox", "threads_keyword_search",
             ] {
                 tools.push(format!("mcp__catclaw__{}", name));
             }
