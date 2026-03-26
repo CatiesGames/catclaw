@@ -3059,8 +3059,8 @@ fn cmd_task_add(
 
     if let Some(ref cron_expr) = cron {
         println!("  Schedule: cron {} (UTC — cron expressions are always evaluated in UTC)", cron_expr);
-    } else if every.is_some() {
-        println!("  Schedule: every {} min", every.unwrap());
+    } else if let Some(every_mins) = every {
+        println!("  Schedule: every {} min", every_mins);
     } else {
         println!("  Schedule: one-shot");
     }
