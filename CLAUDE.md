@@ -126,6 +126,7 @@ Each tool exists in exactly one list: `allowed` (directly usable), `denied` (una
 | `src/tui/agents.rs` | TUI Agents panel: tools 3-state toggle (allowed/approval/denied) |
 | `src/tui/config_panel.rs` | TUI Config panel: editable settings including `approval.timeout_secs` |
 | `src/tui/social_inbox.rs` | TUI Social Inbox panel: list/filter/approve/discard inbox items |
+| `src/tui/social_drafts.rs` | TUI Social Drafts panel: outgoing draft queue, filter by status, approve/discard |
 | `src/scheduler.rs` | Heartbeat, cron, archive cleanup, diary extraction, memory distillation, social polling |
 | `src/social/mod.rs` | Social Inbox core types (`SocialItem`, `ResolvedAction`), action router, `run_ingest()` orchestrator |
 | `src/social/instagram.rs` | Instagram Graph API client (`InstagramClient`) — profile, media, comments, insights |
@@ -197,6 +198,10 @@ JSON-RPC methods supported by the gateway WS server (`/ws`):
 | `social.inbox.reprocess` | Reset item to pending, re-run action router | — |
 | `social.poll` | Trigger manual poll for instagram / threads | — |
 | `social.mode` | Hot-reload platform mode (polling/webhook/off) | YES |
+| `social.draft.list` | Query social_drafts (supports `platform`, `status`, `limit` filters) | — |
+| `social.draft.approve` | Approve draft → call Meta API → status=sent | — |
+| `social.draft.discard` | Discard draft → status=ignored | — |
+| `social.draft.submit_for_approval` | Called by hook: find latest draft, send review card, set status=awaiting_approval | — |
 
 When adding a new WS method, update this table and the `dispatch()` function in `src/ws_server.rs`.
 

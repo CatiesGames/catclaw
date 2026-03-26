@@ -355,6 +355,92 @@ async fn send_template_reply(
     }
 }
 
+/// Publish a staged draft via the appropriate Meta API.
+/// Returns the platform reply/post ID on success.
+pub async fn execute_draft_publish(
+    draft: &crate::state::SocialDraftRow,
+    config: &crate::config::Config,
+) -> Result<String> {
+    let reply_to = draft.reply_to_id.as_deref().unwrap_or("");
+    match (draft.platform.as_str(), draft.draft_type.as_str()) {
+        ("instagram", "reply") => {
+            let ig = config.social.instagram.as_ref()
+                .ok_or_else(|| crate::error::CatClawError::Social("no instagram config".into()))?;
+            let token = std::env::var(&ig.token_env)
+                .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", ig.token_env)))?;
+            let resp = instagram::InstagramClient::new(token, ig.user_id.clone())
+                .reply_comment(reply_to, &draft.content)
+                .await?;
+            Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+        }
+        ("instagram", "post") => {
+            let ig = config.social.instagram.as_ref()
+                .ok_or_else(|| crate::error::CatClawError::Social("no instagram config".into()))?;
+            let token = std::env::var(&ig.token_env)
+                .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", ig.token_env)))?;
+            let client = instagram::InstagramClient::new(token, ig.user_id.clone());
+            let image_url = draft.media_url.as_deref()
+                .ok_or_else(|| crate::error::CatClawError::Social(
+                    "instagram post requires media_url — use instagram_upload_media first".into()
+                ))?;
+            let resp = client.create_image_post(image_url, &draft.content).await?;
+            Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+        }
+        ("instagram", "dm") => {
+            let ig = config.social.instagram.as_ref()
+                .ok_or_else(|| crate::error::CatClawError::Social("no instagram config".into()))?;
+            let token = std::env::var(&ig.token_env)
+                .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", ig.token_env)))?;
+            let resp = instagram::InstagramClient::new(token, ig.user_id.clone())
+                .send_dm(reply_to, &draft.content)
+                .await?;
+            Ok(resp.get("message_id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+        }
+        ("threads", "reply") => {
+            let th = config.social.threads.as_ref()
+                .ok_or_else(|| crate::error::CatClawError::Social("no threads config".into()))?;
+            let token = std::env::var(&th.token_env)
+                .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", th.token_env)))?;
+            let resp = threads::ThreadsClient::new(token, th.user_id.clone())
+                .reply(reply_to, &draft.content)
+                .await?;
+            Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+        }
+        ("threads", "post") => {
+            let th = config.social.threads.as_ref()
+                .ok_or_else(|| crate::error::CatClawError::Social("no threads config".into()))?;
+            let token = std::env::var(&th.token_env)
+                .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", th.token_env)))?;
+            let client = threads::ThreadsClient::new(token, th.user_id.clone());
+            let resp = if let Some(ref url) = draft.media_url {
+                client.create_image_post(url, &draft.content).await?
+            } else {
+                client.create_post(&draft.content).await?
+            };
+            Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+        }
+        ("threads", "dm") => Err(crate::error::CatClawError::Social(
+            "Threads does not support DMs via the public API".to_string()
+        )),
+        (p, t) => Err(crate::error::CatClawError::Social(format!(
+            "execute_draft_publish: unsupported platform='{}' draft_type='{}'", p, t
+        ))),
+    }
+}
+
+/// Delete the local media_tmp file referenced by a draft's media_url, if any.
+pub fn cleanup_draft_media(workspace: &std::path::Path, media_url: Option<&str>) {
+    if let Some(url) = media_url {
+        if let Some(filename) = url.rsplit('/').next() {
+            // Safety: only delete from media_tmp, validate filename
+            if !filename.contains("..") && !filename.contains('/') {
+                let path = workspace.join("media_tmp").join(filename);
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
 /// Spawn a claude session that generates a reply draft via `instagram_stage_reply`
 /// or `threads_stage_reply` MCP tool, then store draft in DB and send draft review card.
 #[allow(clippy::too_many_arguments)]
@@ -379,33 +465,42 @@ async fn execute_auto_reply(
 
     let inbox_id = row.id;
     let platform_str = item.platform.to_string();
-    let stage_tool = match item.platform {
-        SocialPlatform::Instagram => "instagram_stage_reply",
-        SocialPlatform::Threads => "threads_stage_reply",
+    let (stage_tool, publish_tool, reply_id_param) = match item.platform {
+        SocialPlatform::Instagram => ("instagram_stage_reply", "instagram_reply_comment", "comment_id"),
+        SocialPlatform::Threads => ("threads_stage_reply", "threads_reply", "post_id"),
     };
     let author = row.author_name.as_deref().unwrap_or("someone");
     let original_text = row.text.as_deref().unwrap_or("(no text)");
+    let reply_to_id = &item.platform_id;
 
     // Mark as auto_replying.
     db.update_social_inbox_session(inbox_id, &format!("social:{}", inbox_id))?;
 
-    // Build system prompt that guides agent to call stage_reply.
+    // Build system prompt: guide agent to stage draft first, then publish.
     let system_prompt = format!(
         "You are handling a social media reply task.\n\
          Platform: {platform}\n\
          Event type: {event_type}\n\
          From: @{author}\n\
          Content: {text}\n\n\
-         Please compose a helpful, on-brand reply and call `{tool}` with:\n\
-         - inbox_id: {id}\n\
-         - reply_text: <your reply>\n\n\
-         Do NOT publish directly. Use `{tool}` to stage the reply for human review.",
+         Step 1: Call `{stage_tool}` to stage your reply draft:\n\
+         - reply_to_id: {reply_to_id}\n\
+         - content: <your reply text>\n\
+         - original_text: {text}\n\
+         - original_author: {author}\n\n\
+         Step 2: Call `{publish_tool}` to publish:\n\
+         - {reply_id_param}: {reply_to_id}\n\
+         - message: <same reply text>\n\n\
+         The publish tool may be auto-approved or may require human review depending on configuration.\n\
+         If it requires human review, you will receive a block signal — do NOT retry.",
         platform = platform_str,
         event_type = item.event_type,
         author = author,
         text = original_text,
-        tool = stage_tool,
-        id = inbox_id,
+        stage_tool = stage_tool,
+        publish_tool = publish_tool,
+        reply_to_id = reply_to_id,
+        reply_id_param = reply_id_param,
     );
 
     // Look up agent.

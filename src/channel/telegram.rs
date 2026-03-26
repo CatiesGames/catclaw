@@ -324,12 +324,25 @@ impl ChannelAdapter for TelegramAdapter {
                 let social_action_tx = social_action_tx.clone();
                 async move {
                     if let Some(data) = &q.data {
-                        // Social inbox button: social:{action}:{inbox_id}
+                        // Social draft button: social_draft:{action}:{draft_id}
+                        if let Some(rest) = data.strip_prefix("social_draft:") {
+                            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                            if parts.len() == 2 {
+                                if let Ok(draft_id) = parts[1].parse::<i64>() {
+                                    let action = format!("draft_{}", parts[0]);
+                                    let _ = social_action_tx.send((draft_id, action, None));
+                                }
+                            }
+                            let _ = bot.answer_callback_query(&q.id).await;
+                            return Ok(());
+                        }
+
+                        // Social inbox button: social:{action}:{card_id}
                         if let Some(rest) = data.strip_prefix("social:") {
                             let parts: Vec<&str> = rest.splitn(2, ':').collect();
                             if parts.len() == 2 {
-                                if let Ok(inbox_id) = parts[1].parse::<i64>() {
-                                    let _ = social_action_tx.send((inbox_id, parts[0].to_string(), None));
+                                if let Ok(card_id) = parts[1].parse::<i64>() {
+                                    let _ = social_action_tx.send((card_id, parts[0].to_string(), None));
                                 }
                             }
                             let _ = bot.answer_callback_query(&q.id).await;

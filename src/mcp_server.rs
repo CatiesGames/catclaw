@@ -177,13 +177,16 @@ fn instagram_tools() -> Vec<Value> {
         social_tool("instagram_get_media", "List recent Instagram posts", serde_json::json!({"type":"object","properties":{"limit":{"type":"integer","description":"Number of posts to fetch (default 10)"}},"required":[]})),
         social_tool("instagram_get_comments", "Get comments on an Instagram post", serde_json::json!({"type":"object","properties":{"media_id":{"type":"string","description":"Instagram media/post ID"}},"required":["media_id"]})),
         social_tool("instagram_reply_comment", "Reply to an Instagram comment (requires approval)", serde_json::json!({"type":"object","properties":{"comment_id":{"type":"string","description":"Comment ID to reply to"},"message":{"type":"string","description":"Reply text"}},"required":["comment_id","message"]})),
-        social_tool("instagram_stage_reply", "Stage a reply draft for human review (use instead of instagram_reply_comment for auto_reply flow)", serde_json::json!({"type":"object","properties":{"inbox_id":{"type":"integer","description":"Social inbox row ID"},"reply_text":{"type":"string","description":"Draft reply text"}},"required":["inbox_id","reply_text"]})),
+        social_tool("instagram_stage_reply", "Stage a reply draft in social_drafts table. Call BEFORE instagram_reply_comment.", serde_json::json!({"type":"object","properties":{"reply_to_id":{"type":"string","description":"Comment ID to reply to"},"content":{"type":"string","description":"Draft reply text"},"original_text":{"type":"string","description":"Original comment text"},"original_author":{"type":"string","description":"Original commenter username"}},"required":["reply_to_id","content"]})),
+        social_tool("instagram_stage_post", "Stage a post draft in social_drafts table. Call BEFORE instagram_create_post.", serde_json::json!({"type":"object","properties":{"content":{"type":"string","description":"Post caption text"},"media_url":{"type":"string","description":"Public image URL (use instagram_upload_media first)"}},"required":["content"]})),
+        social_tool("instagram_stage_dm", "Stage a DM draft in social_drafts table. Call BEFORE instagram_send_dm.", serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Instagram-scoped user ID of the recipient"},"content":{"type":"string","description":"DM text"},"original_text":{"type":"string"},"original_author":{"type":"string"}},"required":["recipient_id","content"]})),
+        social_tool("instagram_upload_media", "Copy a local image file to the gateway media_tmp dir and return a public URL for use with instagram_create_post.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Absolute local path to the image file (jpg, png, gif, webp)"}},"required":["file_path"]})),
         social_tool("instagram_reply_template", "Send a template reply to an Instagram comment", serde_json::json!({"type":"object","properties":{"comment_id":{"type":"string","description":"Comment ID"},"template_name":{"type":"string","description":"Template name from catclaw.toml"}},"required":["comment_id","template_name"]})),
         social_tool("instagram_delete_comment", "Delete an Instagram comment (requires approval)", serde_json::json!({"type":"object","properties":{"comment_id":{"type":"string","description":"Comment ID to delete"}},"required":["comment_id"]})),
         social_tool("instagram_get_insights", "Get Instagram account insights/analytics", serde_json::json!({"type":"object","properties":{"metric":{"type":"string","description":"Comma-separated metrics (e.g. impressions,reach)"},"period":{"type":"string","description":"Period: day, week, month"}},"required":["metric","period"]})),
         social_tool("instagram_get_inbox", "Query the Social Inbox for Instagram events", serde_json::json!({"type":"object","properties":{"status":{"type":"string","description":"Filter by status: pending, forwarded, draft_ready, sent, ignored, failed"},"limit":{"type":"integer","description":"Max rows to return (default 20)"}},"required":[]})),
-        social_tool("instagram_create_post", "Create a new Instagram image post (requires approval)", serde_json::json!({"type":"object","properties":{"image_url":{"type":"string","description":"Public URL of the image to post (JPEG, max 8MB)"},"caption":{"type":"string","description":"Post caption (max 2200 characters)"}},"required":["image_url","caption"]})),
-        social_tool("instagram_send_dm", "Send a direct message to an Instagram user (requires approval)", serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Instagram-scoped user ID of the recipient"},"text":{"type":"string","description":"Message text (max 1000 characters)"}},"required":["recipient_id","text"]})),
+        social_tool("instagram_create_post", "Create a new Instagram image post (requires approval). Stage with instagram_stage_post first.", serde_json::json!({"type":"object","properties":{"image_url":{"type":"string","description":"Public URL of the image to post (JPEG, max 8MB)"},"caption":{"type":"string","description":"Post caption (max 2200 characters)"}},"required":["image_url","caption"]})),
+        social_tool("instagram_send_dm", "Send a direct message to an Instagram user (requires approval). Stage with instagram_stage_dm first.", serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Instagram-scoped user ID of the recipient"},"text":{"type":"string","description":"Message text (max 1000 characters)"}},"required":["recipient_id","text"]})),
     ]
 }
 
@@ -194,7 +197,9 @@ fn threads_tools() -> Vec<Value> {
         social_tool("threads_get_replies", "Get replies on a Threads post", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Threads post ID"}},"required":["post_id"]})),
         social_tool("threads_create_post", "Create a new Threads post (requires approval)", serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"Post text content"}},"required":["text"]})),
         social_tool("threads_reply", "Reply to a Threads post (requires approval)", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID to reply to"},"text":{"type":"string","description":"Reply text"}},"required":["post_id","text"]})),
-        social_tool("threads_stage_reply", "Stage a reply draft for human review (use instead of threads_reply for auto_reply flow)", serde_json::json!({"type":"object","properties":{"inbox_id":{"type":"integer","description":"Social inbox row ID"},"reply_text":{"type":"string","description":"Draft reply text"}},"required":["inbox_id","reply_text"]})),
+        social_tool("threads_stage_reply", "Stage a reply draft in social_drafts table. Call BEFORE threads_reply.", serde_json::json!({"type":"object","properties":{"reply_to_id":{"type":"string","description":"Post ID to reply to"},"content":{"type":"string","description":"Draft reply text"},"original_text":{"type":"string","description":"Original post text"},"original_author":{"type":"string","description":"Original poster username"}},"required":["reply_to_id","content"]})),
+        social_tool("threads_stage_post", "Stage a post draft in social_drafts table. Call BEFORE threads_create_post.", serde_json::json!({"type":"object","properties":{"content":{"type":"string","description":"Post text"},"media_url":{"type":"string","description":"Public image URL (use threads_upload_media first)"}},"required":["content"]})),
+        social_tool("threads_upload_media", "Copy a local image file to the gateway media_tmp dir and return a public URL for use with threads_create_post.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Absolute local path to the image file (jpg, png, gif, webp)"}},"required":["file_path"]})),
         social_tool("threads_reply_template", "Send a template reply to a Threads post", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID"},"template_name":{"type":"string","description":"Template name from catclaw.toml"}},"required":["post_id","template_name"]})),
         social_tool("threads_delete_post", "Delete a Threads post (requires approval)", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID to delete"}},"required":["post_id"]})),
         social_tool("threads_get_insights", "Get Threads account insights/analytics", serde_json::json!({"type":"object","properties":{"metric":{"type":"string","description":"Comma-separated metrics"}},"required":["metric"]})),
@@ -242,15 +247,56 @@ async fn execute_social_tool(
         "instagram_reply_comment" => {
             let (token, uid) = ig_creds(&cfg)?;
             let comment_id = str_arg(&args, "comment_id")?;
-            let message = str_arg(&args, "message")?;
-            InstagramClient::new(token, uid).reply_comment(comment_id, message).await
+            let agent_message = str_arg(&args, "message")?;
+            // Use staged draft content if available (authoritative source)
+            let draft = gw.state_db.find_latest_draft_for_tool("instagram", "reply", Some(comment_id)).ok().flatten();
+            let message = draft.as_ref().map(|d| d.content.as_str()).unwrap_or(agent_message);
+            let result = InstagramClient::new(token, uid).reply_comment(comment_id, message).await?;
+            if let Some(reply_id) = result.get("id").and_then(|v| v.as_str()) {
+                if let Some(ref d) = draft {
+                    let _ = gw.state_db.update_social_draft_sent(d.id, reply_id);
+                }
+            }
+            Ok(result)
         }
         "instagram_stage_reply" => {
-            let inbox_id = args.get("inbox_id").and_then(|v| v.as_i64())
-                .ok_or_else(|| CatClawError::Social("missing inbox_id".into()))?;
-            let reply_text = str_arg(&args, "reply_text")?;
-            gw.state_db.update_social_inbox_draft(inbox_id, reply_text, "draft_ready")?;
-            Ok(serde_json::json!({ "status": "staged", "inbox_id": inbox_id }))
+            let reply_to_id = str_arg(&args, "reply_to_id")?;
+            let content = str_arg(&args, "content")?;
+            let original_text = args.get("original_text").and_then(|v| v.as_str()).map(str::to_string);
+            let original_author = args.get("original_author").and_then(|v| v.as_str()).map(str::to_string);
+            let mut row = crate::state::SocialDraftRow::new("instagram", "reply", content);
+            row.reply_to_id = Some(reply_to_id.to_string());
+            row.original_text = original_text;
+            row.original_author = original_author;
+            let draft_id = gw.state_db.insert_social_draft(&row)?;
+            Ok(serde_json::json!({ "status": "staged", "draft_id": draft_id }))
+        }
+        "instagram_stage_post" => {
+            let content = str_arg(&args, "content")?;
+            let media_url = args.get("media_url").and_then(|v| v.as_str()).map(str::to_string);
+            let mut row = crate::state::SocialDraftRow::new("instagram", "post", content);
+            row.media_url = media_url;
+            let draft_id = gw.state_db.insert_social_draft(&row)?;
+            Ok(serde_json::json!({ "status": "staged", "draft_id": draft_id }))
+        }
+        "instagram_stage_dm" => {
+            let recipient_id = str_arg(&args, "recipient_id")?;
+            let content = str_arg(&args, "content")?;
+            let original_text = args.get("original_text").and_then(|v| v.as_str()).map(str::to_string);
+            let original_author = args.get("original_author").and_then(|v| v.as_str()).map(str::to_string);
+            let mut row = crate::state::SocialDraftRow::new("instagram", "dm", content);
+            // DMs store recipient_id in reply_to_id (reused field — execute_draft_publish reads it as the recipient)
+            row.reply_to_id = Some(recipient_id.to_string());
+            row.original_text = original_text;
+            row.original_author = original_author;
+            let draft_id = gw.state_db.insert_social_draft(&row)?;
+            Ok(serde_json::json!({ "status": "staged", "draft_id": draft_id }))
+        }
+        "instagram_upload_media" => {
+            let file_path = str_arg(&args, "file_path")?;
+            let base_url = cfg.general.webhook_base_url.as_deref()
+                .ok_or_else(|| CatClawError::Social("webhook_base_url not configured".into()))?;
+            upload_media_file(file_path, base_url, &cfg.general.workspace)
         }
         "instagram_reply_template" => {
             let (token, uid) = ig_creds(&cfg)?;
@@ -283,14 +329,31 @@ async fn execute_social_tool(
         "instagram_create_post" => {
             let (token, uid) = ig_creds(&cfg)?;
             let image_url = str_arg(&args, "image_url")?;
-            let caption = str_arg(&args, "caption")?;
-            InstagramClient::new(token, uid).create_image_post(image_url, caption).await
+            let agent_caption = str_arg(&args, "caption")?;
+            let draft = gw.state_db.find_latest_draft_for_tool("instagram", "post", None).ok().flatten();
+            let caption = draft.as_ref().map(|d| d.content.as_str()).unwrap_or(agent_caption);
+            let result = InstagramClient::new(token, uid).create_image_post(image_url, caption).await?;
+            if let Some(post_id) = result.get("id").and_then(|v| v.as_str()) {
+                if let Some(ref d) = draft {
+                    let _ = gw.state_db.update_social_draft_sent(d.id, post_id);
+                }
+            }
+            Ok(result)
         }
         "instagram_send_dm" => {
             let (token, uid) = ig_creds(&cfg)?;
             let recipient_id = str_arg(&args, "recipient_id")?;
-            let text = str_arg(&args, "text")?;
-            InstagramClient::new(token, uid).send_dm(recipient_id, text).await
+            let agent_text = str_arg(&args, "text")?;
+            // recipient_id is stored in reply_to_id for DMs (see staging tool)
+            let draft = gw.state_db.find_latest_draft_for_tool("instagram", "dm", Some(recipient_id)).ok().flatten();
+            let text = draft.as_ref().map(|d| d.content.as_str()).unwrap_or(agent_text);
+            let result = InstagramClient::new(token, uid).send_dm(recipient_id, text).await?;
+            if let Some(msg_id) = result.get("message_id").and_then(|v| v.as_str()) {
+                if let Some(ref d) = draft {
+                    let _ = gw.state_db.update_social_draft_sent(d.id, msg_id);
+                }
+            }
+            Ok(result)
         }
 
         // ── Threads ──────────────────────────────────────────────────────────
@@ -310,21 +373,62 @@ async fn execute_social_tool(
         }
         "threads_create_post" => {
             let (token, uid) = th_creds(&cfg)?;
-            let text = str_arg(&args, "text")?;
-            ThreadsClient::new(token, uid).create_post(text).await
+            let agent_text = str_arg(&args, "text")?;
+            let draft = gw.state_db.find_latest_draft_for_tool("threads", "post", None).ok().flatten();
+            let text = draft.as_ref().map(|d| d.content.as_str()).unwrap_or(agent_text);
+            let client = ThreadsClient::new(token, uid);
+            // Use image post if staged draft has media_url
+            let result = if let Some(ref url) = draft.as_ref().and_then(|d| d.media_url.clone()) {
+                client.create_image_post(url, text).await?
+            } else {
+                client.create_post(text).await?
+            };
+            if let Some(post_id) = result.get("id").and_then(|v| v.as_str()) {
+                if let Some(ref d) = draft {
+                    let _ = gw.state_db.update_social_draft_sent(d.id, post_id);
+                }
+            }
+            Ok(result)
         }
         "threads_reply" => {
             let (token, uid) = th_creds(&cfg)?;
             let post_id = str_arg(&args, "post_id")?;
-            let text = str_arg(&args, "text")?;
-            ThreadsClient::new(token, uid).reply(post_id, text).await
+            let agent_text = str_arg(&args, "text")?;
+            let draft = gw.state_db.find_latest_draft_for_tool("threads", "reply", Some(post_id)).ok().flatten();
+            let text = draft.as_ref().map(|d| d.content.as_str()).unwrap_or(agent_text);
+            let result = ThreadsClient::new(token, uid).reply(post_id, text).await?;
+            if let Some(reply_id) = result.get("id").and_then(|v| v.as_str()) {
+                if let Some(ref d) = draft {
+                    let _ = gw.state_db.update_social_draft_sent(d.id, reply_id);
+                }
+            }
+            Ok(result)
         }
         "threads_stage_reply" => {
-            let inbox_id = args.get("inbox_id").and_then(|v| v.as_i64())
-                .ok_or_else(|| CatClawError::Social("missing inbox_id".into()))?;
-            let reply_text = str_arg(&args, "reply_text")?;
-            gw.state_db.update_social_inbox_draft(inbox_id, reply_text, "draft_ready")?;
-            Ok(serde_json::json!({ "status": "staged", "inbox_id": inbox_id }))
+            let reply_to_id = str_arg(&args, "reply_to_id")?;
+            let content = str_arg(&args, "content")?;
+            let original_text = args.get("original_text").and_then(|v| v.as_str()).map(str::to_string);
+            let original_author = args.get("original_author").and_then(|v| v.as_str()).map(str::to_string);
+            let mut row = crate::state::SocialDraftRow::new("threads", "reply", content);
+            row.reply_to_id = Some(reply_to_id.to_string());
+            row.original_text = original_text;
+            row.original_author = original_author;
+            let draft_id = gw.state_db.insert_social_draft(&row)?;
+            Ok(serde_json::json!({ "status": "staged", "draft_id": draft_id }))
+        }
+        "threads_stage_post" => {
+            let content = str_arg(&args, "content")?;
+            let media_url = args.get("media_url").and_then(|v| v.as_str()).map(str::to_string);
+            let mut row = crate::state::SocialDraftRow::new("threads", "post", content);
+            row.media_url = media_url;
+            let draft_id = gw.state_db.insert_social_draft(&row)?;
+            Ok(serde_json::json!({ "status": "staged", "draft_id": draft_id }))
+        }
+        "threads_upload_media" => {
+            let file_path = str_arg(&args, "file_path")?;
+            let base_url = cfg.general.webhook_base_url.as_deref()
+                .ok_or_else(|| CatClawError::Social("webhook_base_url not configured".into()))?;
+            upload_media_file(file_path, base_url, &cfg.general.workspace)
         }
         "threads_reply_template" => {
             let (token, uid) = th_creds(&cfg)?;
@@ -366,6 +470,52 @@ async fn execute_social_tool(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Copy a local file into `{workspace}/media_tmp/` and return a public URL.
+/// Validates the file exists and the extension is an image type.
+fn upload_media_file(
+    file_path: &str,
+    base_url: &str,
+    workspace: &std::path::Path,
+) -> crate::error::Result<Value> {
+    use std::path::Path;
+
+    let src = Path::new(file_path);
+    if !src.exists() {
+        return Err(crate::error::CatClawError::Social(format!(
+            "file not found: {}", file_path
+        )));
+    }
+
+    let ext = src.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp") {
+        return Err(crate::error::CatClawError::Social(format!(
+            "unsupported file type '.{}' — must be jpg, png, gif, or webp", ext
+        )));
+    }
+
+    let media_dir = workspace.join("media_tmp");
+    std::fs::create_dir_all(&media_dir).map_err(|e| {
+        crate::error::CatClawError::Social(format!("failed to create media_tmp dir: {e}"))
+    })?;
+
+    let filename = format!("{}.{}", uuid_v4(), ext);
+    let dest = media_dir.join(&filename);
+    std::fs::copy(src, &dest).map_err(|e| {
+        crate::error::CatClawError::Social(format!("failed to copy file: {e}"))
+    })?;
+
+    let url = format!("{}/media/{}", base_url.trim_end_matches('/'), filename);
+    Ok(serde_json::json!({ "url": url, "filename": filename }))
+}
+
+fn uuid_v4() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
 
 fn ig_creds(cfg: &crate::config::Config) -> crate::error::Result<(String, String)> {
     let ig = cfg.social.instagram.as_ref()

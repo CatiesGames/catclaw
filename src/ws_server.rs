@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
@@ -29,6 +29,7 @@ pub fn spawn(addr: String, gw: GatewayHandle) -> tokio::task::JoinHandle<()> {
         let app = Router::new()
             .route("/ws", get(ws_handler))
             .route("/health", get(|| async { "ok" }))
+            .route("/media/{filename}", get(serve_media))
             .merge(mcp_server::router())
             .merge(webhook_router)
             .with_state(gw);
@@ -54,6 +55,61 @@ async fn ws_handler(
     State(gw): State<Arc<GatewayHandle>>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_connection(socket, gw))
+}
+
+/// Serve a file from `{workspace}/media_tmp/{filename}`.
+/// Filename must match strict UUID+extension pattern to prevent path traversal.
+///
+/// **Security note**: This endpoint has no authentication. The Meta Graph API
+/// must be able to fetch the URL directly to create media containers.
+/// Access control relies on UUID v4 entropy (122 bits) making filenames unguessable.
+/// URLs appear in MCP tool responses and session transcripts — treat as sensitive.
+async fn serve_media(
+    Path(filename): Path<String>,
+    State(gw): State<Arc<GatewayHandle>>,
+) -> impl IntoResponse {
+    use axum::http::{header, StatusCode};
+    use axum::response::Response;
+    use axum::body::Body;
+
+    // Validate filename: strict UUID + extension pattern (e.g. "a1b2c3d4-...-1234.png")
+    // Must have exactly one dot, no ".." sequences, no path separators.
+    let valid = filename.len() < 100
+        && !filename.contains("..")
+        && !filename.contains('/')
+        && !filename.contains('\\')
+        && filename.matches('.').count() == 1
+        && filename.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+    if !valid {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::empty())
+            .unwrap();
+    }
+
+    let workspace = gw.config.read().unwrap().general.workspace.clone();
+    let path = workspace.join("media_tmp").join(&filename);
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let content_type = match filename.rsplit('.').next().unwrap_or("") {
+                "jpg" | "jpeg" => "image/jpeg",
+                "png" => "image/png",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                _ => "application/octet-stream",
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(bytes))
+                .unwrap()
+        }
+        Err(_) => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap(),
+    }
 }
 
 async fn handle_connection(socket: WebSocket, gw: Arc<GatewayHandle>) {
@@ -176,6 +232,10 @@ async fn dispatch(
         "social.inbox.reprocess" => handle_social_inbox_reprocess(req, gw),
         "social.poll" => handle_social_poll(req, gw),
         "social.mode" => handle_social_mode(req, gw),
+        "social.draft.list" => handle_social_draft_list(req, gw),
+        "social.draft.approve" => handle_social_draft_approve(req, gw).await,
+        "social.draft.discard" => handle_social_draft_discard(req, gw),
+        "social.draft.submit_for_approval" => handle_social_draft_submit(req, gw).await,
         "issues.list" => handle_issues_list(req, gw),
         "issues.ignore" => handle_issues_ignore(req, gw).await,
         "issues.resolve" => handle_issues_resolve(req, gw).await,
@@ -1320,6 +1380,158 @@ fn handle_social_mode(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         result["webhook_url"] = json!(url);
     }
     WsResponse::ok(req.id, result)
+}
+
+// ── Social Draft handlers ──
+
+fn handle_social_draft_list(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let platform = req.params.get("platform").and_then(|v| v.as_str());
+    let status = req.params.get("status").and_then(|v| v.as_str());
+    let limit = req.params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+    match gw.state_db.list_social_drafts(platform, status, limit) {
+        Ok(rows) => WsResponse::ok(req.id, serde_json::to_value(&rows).unwrap_or(json!([]))),
+        Err(e) => WsResponse::err(req.id, -1, format!("db error: {}", e)),
+    }
+}
+
+async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return WsResponse::err(req.id, -32602, "missing param: id"),
+    };
+    let draft = match gw.state_db.get_social_draft(id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return WsResponse::err(req.id, -32602, format!("draft {} not found", id)),
+        Err(e) => return WsResponse::err(req.id, -1, format!("db error: {}", e)),
+    };
+
+    // Idempotency guard: only awaiting_approval or draft can be approved
+    if draft.status != "awaiting_approval" && draft.status != "draft" {
+        return WsResponse::err(
+            req.id, -32602,
+            format!("draft {} cannot be approved (status={})", id, draft.status),
+        );
+    }
+
+    let cfg = gw.config.read().unwrap().clone();
+    let workspace = cfg.general.workspace.clone();
+    match crate::social::execute_draft_publish(&draft, &cfg).await {
+        Ok(reply_id) => {
+            let _ = gw.state_db.update_social_draft_sent(id, &reply_id);
+            crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
+
+            // Update forward card if present
+            let admin_channel = match draft.platform.as_str() {
+                "instagram" => cfg.social.instagram.as_ref().map(|c| c.admin_channel.clone()),
+                "threads" => cfg.social.threads.as_ref().map(|c| c.admin_channel.clone()),
+                _ => None,
+            }.unwrap_or_default();
+            if let Some(ref fwd_ref) = draft.forward_ref {
+                if !admin_channel.is_empty() {
+                    let base = crate::social::forward::build_social_draft_card(&draft);
+                    let resolved = crate::social::forward::build_resolved_card(&base, "已發送");
+                    crate::social::forward::update_forward_card(
+                        resolved, fwd_ref, &admin_channel, &gw.adapters_list,
+                    ).await;
+                }
+            }
+            WsResponse::ok(req.id, json!({ "status": "sent", "reply_id": reply_id }))
+        }
+        Err(e) => {
+            let _ = gw.state_db.update_social_draft_status(id, "failed");
+            WsResponse::err(req.id, -1, format!("publish failed: {}", e))
+        }
+    }
+}
+
+fn handle_social_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return WsResponse::err(req.id, -32602, "missing param: id"),
+    };
+    // Clean up media file if present
+    if let Ok(Some(draft)) = gw.state_db.get_social_draft(id) {
+        let workspace = gw.config.read().unwrap().general.workspace.clone();
+        crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
+    }
+    match gw.state_db.update_social_draft_status(id, "ignored") {
+        Ok(_) => WsResponse::ok(req.id, json!({ "status": "ignored" })),
+        Err(e) => WsResponse::err(req.id, -1, format!("db error: {}", e)),
+    }
+}
+
+/// Called by the cmd_hook when a social publish tool hits require_approval.
+/// Looks up the latest staged draft, sends approval card, stores forward_ref.
+async fn handle_social_draft_submit(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let tool_name = match req.params.get("tool_name").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return WsResponse::err(req.id, -32602, "missing param: tool_name"),
+    };
+    let tool_input = req.params.get("tool_input").cloned().unwrap_or(json!({}));
+
+    // Infer platform + draft_type + reply_to_id from tool_name.
+    let (platform, draft_type, reply_to_id) = match tool_name.as_str() {
+        "mcp__catclaw__instagram_reply_comment" => {
+            let rid = tool_input.get("comment_id").and_then(|v| v.as_str()).map(str::to_string);
+            ("instagram", "reply", rid)
+        }
+        "mcp__catclaw__instagram_create_post" => ("instagram", "post", None),
+        "mcp__catclaw__instagram_send_dm" => {
+            let rid = tool_input.get("recipient_id").and_then(|v| v.as_str()).map(str::to_string);
+            ("instagram", "dm", rid)
+        }
+        "mcp__catclaw__threads_reply" => {
+            let rid = tool_input.get("post_id").and_then(|v| v.as_str()).map(str::to_string);
+            ("threads", "reply", rid)
+        }
+        "mcp__catclaw__threads_create_post" => ("threads", "post", None),
+        other => return WsResponse::err(req.id, -32602, format!("unrecognized social tool '{}'", other)),
+    };
+
+    let draft = match gw.state_db.find_latest_draft_for_tool(platform, draft_type, reply_to_id.as_deref()) {
+        Ok(Some(d)) => d,
+        Ok(None) => return WsResponse::err(req.id, -32602, "no staged draft found for this tool call"),
+        Err(e) => return WsResponse::err(req.id, -1, format!("db error: {}", e)),
+    };
+
+    // Set status to awaiting_approval.
+    let _ = gw.state_db.update_social_draft_status(draft.id, "awaiting_approval");
+
+    // Determine admin_channel.
+    let admin_channel = {
+        let cfg = gw.config.read().unwrap();
+        match platform {
+            "instagram" => cfg.social.instagram.as_ref().map(|c| c.admin_channel.clone()),
+            "threads" => cfg.social.threads.as_ref().map(|c| c.admin_channel.clone()),
+            _ => None,
+        }.unwrap_or_default()
+    };
+
+    if admin_channel.is_empty() {
+        let _ = gw.state_db.update_social_draft_status(draft.id, "failed");
+        return WsResponse::err(
+            req.id, -1,
+            format!(
+                "admin_channel not configured for platform '{}' — draft {} set to failed. \
+                 Configure social.{}.admin_channel in catclaw.toml.",
+                platform, draft.id, platform,
+            ),
+        );
+    }
+
+    // Build and send draft approval card.
+    let card = crate::social::forward::build_social_draft_card(&draft);
+    match crate::social::forward::send_forward_card(card, &admin_channel, &gw.adapters_list).await {
+        Ok(Some(msg_id)) => {
+            let _ = gw.state_db.update_social_draft_forward_ref(draft.id, &msg_id);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!(error = %e, "social.draft.submit_for_approval: failed to send card");
+        }
+    }
+
+    WsResponse::ok(req.id, json!({ "draft_id": draft.id, "status": "awaiting_approval" }))
 }
 
 // ── Issues handlers ──

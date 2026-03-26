@@ -92,6 +92,20 @@ pub async fn run_pre_tool(config_path: &Path, session_key: &str) -> ! {
         std::process::exit(0);
     }
 
+    // Social publish tools: submit draft for human review then exit immediately
+    // so the agent session is released (no blocking wait).
+    const SOCIAL_PUBLISH_TOOLS: &[&str] = &[
+        "mcp__catclaw__instagram_reply_comment",
+        "mcp__catclaw__instagram_create_post",
+        "mcp__catclaw__instagram_send_dm",
+        "mcp__catclaw__threads_reply",
+        "mcp__catclaw__threads_create_post",
+    ];
+    if SOCIAL_PUBLISH_TOOLS.contains(&tool.as_str()) {
+        submit_draft_for_approval(&config, session_key, &hook_input).await;
+        // never returns
+    }
+
     // Tool requires approval — connect to gateway and wait
     let approved = request_approval(&config, session_key, &hook_input, approval.timeout_secs).await;
 
@@ -130,6 +144,71 @@ pub async fn run_pre_tool(config_path: &Path, session_key: &str) -> ! {
         );
         std::process::exit(0);
     }
+}
+
+/// Submit a social draft for human approval, then exit(0) with a structured deny.
+///
+/// Uses `permissionDecision: "deny"` so Claude Code respects the decision at the
+/// runtime level and does not retry. `exit(2)` would discard stdout and only feed
+/// stderr as a raw error string — Claude may treat that as a transient failure.
+async fn submit_draft_for_approval(
+    config: &Config,
+    session_key: &str,
+    input: &HookInput,
+) -> ! {
+    let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+    let token = &config.general.ws_token;
+
+    let draft_id = match GatewayClient::connect(&ws_url, token).await {
+        Ok((client, _rx)) => {
+            let params = serde_json::json!({
+                "tool_name": input.tool_name,
+                "tool_input": input.tool_input,
+                "session_key": session_key,
+            });
+            match client.request("social.draft.submit_for_approval", params).await {
+                Ok(resp) => resp.get("draft_id").and_then(|v| v.as_i64()),
+                Err(e) => {
+                    eprintln!("catclaw hook: social.draft.submit_for_approval failed: {}", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("catclaw hook: could not connect to gateway ({})", e);
+            None
+        }
+    };
+
+    let reason = if let Some(id) = draft_id {
+        format!(
+            "This social publish tool call has been intercepted by CatClaw. \
+             Your draft (draft_id: {}) is now queued for human approval. \
+             A human will review and publish it via the admin channel. \
+             Do NOT retry this tool call or call any further publish tools for this content. \
+             The task is complete — move on to the next task.",
+            id
+        )
+    } else {
+        "This social publish tool call has been intercepted by CatClaw. \
+         Your draft is now queued for human approval. \
+         A human will review and publish it via the admin channel. \
+         Do NOT retry this tool call or call any further publish tools for this content. \
+         The task is complete — move on to the next task."
+            .to_string()
+    };
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason
+            }
+        })
+    );
+    std::process::exit(0);
 }
 
 async fn request_approval(

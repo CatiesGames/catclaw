@@ -370,18 +370,36 @@ impl EventHandler for Handler {
             Interaction::Component(comp) => {
                 let custom_id = comp.data.custom_id.clone();
 
-                // Social inbox button: social:{action}:{inbox_id}
+                // Social draft button: social_draft:{action}:{draft_id}
+                if let Some(rest) = custom_id.strip_prefix("social_draft:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        if let Ok(draft_id) = parts[1].parse::<i64>() {
+                            // map "approve" → "draft_approve", "discard" → "draft_discard"
+                            let action = format!("draft_{}", parts[0]);
+                            let _ = self.social_action_tx.send((draft_id, action, None));
+                        } else {
+                            tracing::warn!(custom_id = %custom_id, "discord: malformed social_draft button ID");
+                        }
+                    } else {
+                        tracing::warn!(custom_id = %custom_id, "discord: malformed social_draft button ID");
+                    }
+                    let _ = comp.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await;
+                    return;
+                }
+
+                // Social inbox button: social:{action}:{card_id}
                 if let Some(rest) = custom_id.strip_prefix("social:") {
                     let parts: Vec<&str> = rest.splitn(2, ':').collect();
                     if parts.len() == 2 {
-                        if let Ok(inbox_id) = parts[1].parse::<i64>() {
+                        if let Ok(card_id) = parts[1].parse::<i64>() {
                             let action = parts[0];
                             // ai_reply_hint opens a modal to collect the hint text.
                             if action == "ai_reply_hint" {
                                 use serenity::all::{
                                     CreateInputText, CreateModal, InputTextStyle,
                                 };
-                                let modal_id = format!("social:ai_reply_hint_submit:{}", inbox_id);
+                                let modal_id = format!("social:ai_reply_hint_submit:{}", card_id);
                                 let input = CreateInputText::new(InputTextStyle::Paragraph, "回覆建議", "hint")
                                     .placeholder("請輸入 AI 回覆的方向或建議…")
                                     .required(true)
@@ -394,7 +412,7 @@ impl EventHandler for Handler {
                                 ).await;
                                 return;
                             }
-                            let _ = self.social_action_tx.send((inbox_id, action.to_string(), None));
+                            let _ = self.social_action_tx.send((card_id, action.to_string(), None));
                         }
                     }
                     // Acknowledge without modifying the message
@@ -441,9 +459,9 @@ impl EventHandler for Handler {
                 }
             }
             Interaction::Modal(modal) => {
-                // ai_reply_hint modal submission: social:ai_reply_hint_submit:{inbox_id}
+                // ai_reply_hint modal submission: social:ai_reply_hint_submit:{card_id}
                 if let Some(rest) = modal.data.custom_id.strip_prefix("social:ai_reply_hint_submit:") {
-                    if let Ok(inbox_id) = rest.parse::<i64>() {
+                    if let Ok(card_id) = rest.parse::<i64>() {
                         let hint = modal.data.components.iter()
                             .flat_map(|row| row.components.iter())
                             .find_map(|c| {
@@ -454,7 +472,7 @@ impl EventHandler for Handler {
                                 }
                                 None
                             });
-                        let _ = self.social_action_tx.send((inbox_id, "ai_reply".to_string(), hint));
+                        let _ = self.social_action_tx.send((card_id, "ai_reply".to_string(), hint));
                     }
                     let _ = modal.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await;
                 }
@@ -1193,12 +1211,14 @@ impl ChannelAdapter for DiscordAdapter {
         } else {
             card.text.clone()
         };
+        let pfx = &card.button_prefix;
+        let cid = card.card_id;
         let mut embed = CreateEmbed::new()
             .title(&card.title)
             .description(description)
             .color(color)
             .field("From", format!("@{}", card.author), true)
-            .footer(serenity::all::CreateEmbedFooter::new(format!("inbox_id: {}", card.inbox_id)));
+            .footer(serenity::all::CreateEmbedFooter::new(format!("id: {}", cid)));
 
         if let Some(ref url) = card.permalink {
             embed = embed.field("Post", url, false);
@@ -1206,24 +1226,24 @@ impl ChannelAdapter for DiscordAdapter {
 
         let buttons: Vec<CreateButton> = match &card.card_type {
             ForwardCardType::Incoming => vec![
-                CreateButton::new(format!("social:ai_reply:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:ai_reply:{cid}"))
                     .label("AI 回覆")
                     .style(ButtonStyle::Primary),
-                CreateButton::new(format!("social:ai_reply_hint:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:ai_reply_hint:{cid}"))
                     .label("建議 AI 回覆")
                     .style(ButtonStyle::Secondary),
-                CreateButton::new(format!("social:manual_reply:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:manual_reply:{cid}"))
                     .label("手動回覆")
                     .style(ButtonStyle::Secondary),
-                CreateButton::new(format!("social:ignore:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:ignore:{cid}"))
                     .label("忽略")
                     .style(ButtonStyle::Danger),
             ],
             ForwardCardType::DraftReview => vec![
-                CreateButton::new(format!("social:approve_draft:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:approve:{cid}"))
                     .label("核准發送")
                     .style(ButtonStyle::Success),
-                CreateButton::new(format!("social:discard_draft:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:discard:{cid}"))
                     .label("捨棄")
                     .style(ButtonStyle::Danger),
             ],
@@ -1276,12 +1296,14 @@ impl ChannelAdapter for DiscordAdapter {
             card.text.clone()
         };
 
+        let pfx = &card.button_prefix;
+        let cid = card.card_id;
         let mut embed = CreateEmbed::new()
             .title(&card.title)
             .description(description)
             .color(color)
             .field("From", format!("@{}", card.author), true)
-            .footer(serenity::all::CreateEmbedFooter::new(format!("inbox_id: {}", card.inbox_id)));
+            .footer(serenity::all::CreateEmbedFooter::new(format!("id: {}", cid)));
 
         if let Some(ref url) = card.permalink {
             embed = embed.field("Post", url, false);
@@ -1289,24 +1311,24 @@ impl ChannelAdapter for DiscordAdapter {
 
         let buttons: Vec<CreateButton> = match &card.card_type {
             ForwardCardType::Incoming => vec![
-                CreateButton::new(format!("social:ai_reply:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:ai_reply:{cid}"))
                     .label("AI 回覆")
                     .style(ButtonStyle::Primary),
-                CreateButton::new(format!("social:ai_reply_hint:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:ai_reply_hint:{cid}"))
                     .label("建議 AI 回覆")
                     .style(ButtonStyle::Secondary),
-                CreateButton::new(format!("social:manual_reply:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:manual_reply:{cid}"))
                     .label("手動回覆")
                     .style(ButtonStyle::Secondary),
-                CreateButton::new(format!("social:ignore:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:ignore:{cid}"))
                     .label("忽略")
                     .style(ButtonStyle::Danger),
             ],
             ForwardCardType::DraftReview => vec![
-                CreateButton::new(format!("social:approve_draft:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:approve:{cid}"))
                     .label("核准發送")
                     .style(ButtonStyle::Success),
-                CreateButton::new(format!("social:discard_draft:{}", card.inbox_id))
+                CreateButton::new(format!("{pfx}:discard:{cid}"))
                     .label("捨棄")
                     .style(ButtonStyle::Danger),
             ],

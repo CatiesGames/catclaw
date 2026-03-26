@@ -1734,25 +1734,32 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 | `instagram_get_profile` | Account info |
 | `instagram_get_media` | List posts |
 | `instagram_get_comments` | Fetch comments |
-| `instagram_reply_comment` | Reply (requires approval) |
-| `instagram_stage_reply` | Store a draft reply for admin review |
+| `instagram_reply_comment` | Publish reply (requires approval or auto if allowed) |
+| `instagram_stage_reply` | Stage a reply draft in social_drafts |
+| `instagram_stage_post` | Stage a post draft in social_drafts |
+| `instagram_stage_dm` | Stage a DM draft in social_drafts |
+| `instagram_upload_media` | Copy local image to media_tmp and return public URL |
 | `instagram_reply_template` | Send a template reply |
 | `instagram_delete_comment` | Delete (requires approval) |
 | `instagram_get_insights` | Insights data |
 | `instagram_get_inbox` | Query social_inbox table |
-| `instagram_create_post` | Create image post (requires approval) |
-| `instagram_send_dm` | Send DM to a user (requires approval) |
+| `instagram_create_post` | Publish image post (requires approval or auto if allowed) |
+| `instagram_send_dm` | Send DM to a user (requires approval or auto if allowed) |
 | `threads_get_profile` | Account info |
 | `threads_get_timeline` | List posts |
 | `threads_get_replies` | Fetch replies |
-| `threads_create_post` | Create post (requires approval) |
-| `threads_reply` | Reply to a post (requires approval) |
-| `threads_stage_reply` | Store a draft reply for admin review |
+| `threads_create_post` | Publish post (requires approval or auto if allowed) |
+| `threads_reply` | Publish reply (requires approval or auto if allowed) |
+| `threads_stage_reply` | Stage a reply draft in social_drafts |
+| `threads_stage_post` | Stage a post draft in social_drafts |
+| `threads_upload_media` | Copy local image to media_tmp and return public URL |
 | `threads_reply_template` | Send template reply |
 | `threads_delete_post` | Delete post (requires approval) |
 | `threads_get_insights` | Insights data |
 | `threads_get_inbox` | Query social_inbox table |
 | `threads_keyword_search` | Search posts by keyword |
+
+**Two-step publish flow:** Stage draft → publish tool. When `require_approval` is set, the hook immediately exits and a review card is sent to the admin channel. The agent is released — a human reviews and approves via the admin channel or TUI Drafts panel.
 
 For full setup guidance, load the `instagram` or `threads` skill.
 "#;
@@ -2027,20 +2034,29 @@ Statuses: `pending` → `forwarded` / `auto_replying` / `template_sent` / `ignor
 | `instagram_get_profile` | none | Account name, followers, etc. |
 | `instagram_get_media` | none | List recent posts |
 | `instagram_get_comments` | none | Fetch comments on a post |
-| `instagram_reply_comment` | required | Post a comment reply |
-| `instagram_stage_reply` | none | Store draft — triggers admin review card |
+| `instagram_reply_comment` | approval/auto | Publish a comment reply |
+| `instagram_stage_reply` | none | Store reply draft in social_drafts |
+| `instagram_stage_post` | none | Store post draft in social_drafts (requires media_url) |
+| `instagram_stage_dm` | none | Store DM draft in social_drafts |
+| `instagram_upload_media` | none | Copy local image to media_tmp, return public URL |
 | `instagram_reply_template` | none | Send a named template reply |
 | `instagram_delete_comment` | required | Delete a comment |
 | `instagram_get_insights` | none | Reach, impressions, engagement |
 | `instagram_get_inbox` | none | Query social_inbox table |
-| `instagram_create_post` | required | Publish an image post (image_url + caption, two-step container→publish) |
-| `instagram_send_dm` | required | Send a DM to a user (recipient_id + text) |
+| `instagram_create_post` | approval/auto | Publish an image post (image_url + caption) |
+| `instagram_send_dm` | approval/auto | Send a DM to a user (recipient_id + text) |
 
-**Auto-reply flow:** Agent receives context → calls `instagram_stage_reply` → draft stored → admin reviews draft card → approves → gateway sends via Graph API.
+**Two-step publish flow:**
+1. Call `instagram_stage_reply` / `instagram_stage_post` / `instagram_stage_dm` to store the draft
+2. Call the publish tool (`instagram_reply_comment` / `instagram_create_post` / `instagram_send_dm`)
+
+If `require_approval` is set: hook immediately exits (agent released), admin reviews via the Drafts panel (Alt+0) or admin channel card, then approves → gateway publishes.
+If `allowed`: publish tool executes directly and updates draft status to sent.
 
 ## TUI
 
-Switch to the Social Inbox tab (Alt+9) to see items, filter by status, approve/discard drafts.
+- **Social tab (Alt+9):** Social Inbox — incoming events, filter by status, approve/discard inbox items.
+- **Drafts tab (Alt+0):** Social Drafts — outgoing draft queue, filter by status, approve/discard drafts.
 "#;
 
 const SKILL_THREADS: &str = r#"---
@@ -2138,23 +2154,31 @@ The `threads_reply` and `threads_create_post` MCP tools handle both steps transp
 | `threads_get_profile` | none | Account info |
 | `threads_get_timeline` | none | List posts |
 | `threads_get_replies` | none | Fetch replies to a post |
-| `threads_create_post` | required | Two-step post creation |
-| `threads_reply` | required | Two-step reply to a post |
-| `threads_stage_reply` | none | Store draft — triggers admin review card |
+| `threads_create_post` | approval/auto | Two-step post creation |
+| `threads_reply` | approval/auto | Two-step reply to a post |
+| `threads_stage_reply` | none | Store reply draft in social_drafts |
+| `threads_stage_post` | none | Store post draft in social_drafts |
+| `threads_upload_media` | none | Copy local image to media_tmp, return public URL |
 | `threads_reply_template` | none | Send a named template reply |
 | `threads_delete_post` | required | Delete a post |
 | `threads_get_insights` | none | Views, likes, replies, reposts |
 | `threads_get_inbox` | none | Query social_inbox table |
 | `threads_keyword_search` | none | Search posts by keyword (q, search_type: TOP/RECENT, limit) |
 
+**Two-step publish flow:**
+1. Call `threads_stage_reply` / `threads_stage_post` to store the draft
+2. Call the publish tool (`threads_reply` / `threads_create_post`)
+
+If `require_approval` is set: hook immediately exits (agent released), admin reviews via the Drafts panel or admin channel card, then approves → gateway publishes.
+
 ## Inbox Management
 
 ```bash
 catclaw social inbox --platform threads --status pending
-catclaw social inbox --platform threads --status draft_ready
 ```
 
 ## TUI
 
-Switch to the Social Inbox tab (Alt+9) to manage Threads events alongside Instagram.
+- **Social tab (Alt+9):** Social Inbox — incoming events, filter by status, approve/discard inbox items.
+- **Drafts tab (Alt+0):** Social Drafts — outgoing draft queue, filter by status, approve/discard drafts.
 "#;

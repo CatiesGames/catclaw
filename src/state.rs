@@ -298,6 +298,25 @@ impl StateDb {
                 updated_at  TEXT NOT NULL,
                 PRIMARY KEY (platform, feed)
             );
+
+            CREATE TABLE IF NOT EXISTS social_drafts (
+                id              INTEGER PRIMARY KEY,
+                platform        TEXT NOT NULL,
+                draft_type      TEXT NOT NULL,
+                content         TEXT NOT NULL,
+                media_url       TEXT,
+                reply_to_id     TEXT,
+                original_text   TEXT,
+                original_author TEXT,
+                status          TEXT NOT NULL DEFAULT 'draft',
+                reply_id        TEXT,
+                forward_ref     TEXT,
+                agent_id        TEXT,
+                session_key     TEXT,
+                metadata        TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
             ",
         )?;
 
@@ -795,6 +814,130 @@ impl StateDb {
         Ok(())
     }
 
+    // --- Social Drafts ---
+
+    pub fn insert_social_draft(&self, row: &SocialDraftRow) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO social_drafts
+             (platform, draft_type, content, media_url, reply_to_id, original_text, original_author,
+              status, reply_id, forward_ref, agent_id, session_key, metadata, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            params![
+                row.platform, row.draft_type, row.content, row.media_url,
+                row.reply_to_id, row.original_text, row.original_author,
+                row.status, row.reply_id, row.forward_ref, row.agent_id,
+                row.session_key, row.metadata, row.created_at, row.updated_at,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_social_draft(&self, id: i64) -> Result<Option<SocialDraftRow>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT id,platform,draft_type,content,media_url,reply_to_id,original_text,original_author,
+                    status,reply_id,forward_ref,agent_id,session_key,metadata,created_at,updated_at
+             FROM social_drafts WHERE id=?1",
+            params![id],
+            social_draft_row_mapper,
+        ).optional()?;
+        Ok(row)
+    }
+
+    pub fn list_social_drafts(
+        &self,
+        platform_filter: Option<&str>,
+        status_filter: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SocialDraftRow>> {
+        const COLS: &str = "id,platform,draft_type,content,media_url,reply_to_id,original_text,\
+                            original_author,status,reply_id,forward_ref,agent_id,session_key,\
+                            metadata,created_at,updated_at";
+        let conn = self.conn.lock().unwrap();
+        let rows: Vec<SocialDraftRow> = match (platform_filter, status_filter) {
+            (Some(p), Some(s)) => {
+                let sql = format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND status=?2 ORDER BY created_at DESC LIMIT ?3");
+                conn.prepare(&sql)?.query_map(params![p, s, limit], social_draft_row_mapper)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            }
+            (Some(p), None) => {
+                let sql = format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 ORDER BY created_at DESC LIMIT ?2");
+                conn.prepare(&sql)?.query_map(params![p, limit], social_draft_row_mapper)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            }
+            (None, Some(s)) => {
+                let sql = format!("SELECT {COLS} FROM social_drafts WHERE status=?1 ORDER BY created_at DESC LIMIT ?2");
+                conn.prepare(&sql)?.query_map(params![s, limit], social_draft_row_mapper)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            }
+            (None, None) => {
+                let sql = format!("SELECT {COLS} FROM social_drafts ORDER BY created_at DESC LIMIT ?1");
+                conn.prepare(&sql)?.query_map(params![limit], social_draft_row_mapper)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            }
+        };
+        Ok(rows)
+    }
+
+    pub fn update_social_draft_status(&self, id: i64, status: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_drafts SET status=?1, updated_at=?2 WHERE id=?3",
+            params![status, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_social_draft_sent(&self, id: i64, reply_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_drafts SET reply_id=?1, status='sent', updated_at=?2 WHERE id=?3",
+            params![reply_id, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_social_draft_forward_ref(&self, id: i64, forward_ref: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_drafts SET forward_ref=?1, updated_at=?2 WHERE id=?3",
+            params![forward_ref, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Find the latest staged draft matching platform + draft_type (+ optional reply_to_id).
+    /// Used after a publish tool call to associate the draft.
+    pub fn find_latest_draft_for_tool(
+        &self,
+        platform: &str,
+        draft_type: &str,
+        reply_to_id: Option<&str>,
+    ) -> Result<Option<SocialDraftRow>> {
+        const COLS: &str = "id,platform,draft_type,content,media_url,reply_to_id,original_text,\
+                            original_author,status,reply_id,forward_ref,agent_id,session_key,\
+                            metadata,created_at,updated_at";
+        let conn = self.conn.lock().unwrap();
+        let row = if let Some(rid) = reply_to_id {
+            conn.query_row(
+                &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND reply_to_id=?3 AND status='draft' ORDER BY created_at DESC LIMIT 1"),
+                params![platform, draft_type, rid],
+                social_draft_row_mapper,
+            ).optional()?
+        } else {
+            conn.query_row(
+                &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND status='draft' ORDER BY created_at DESC LIMIT 1"),
+                params![platform, draft_type],
+                social_draft_row_mapper,
+            ).optional()?
+        };
+        Ok(row)
+    }
+
     // --- Social Cursors ---
 
     pub fn get_social_cursor(&self, platform: &str, feed: &str) -> Result<Option<String>> {
@@ -889,5 +1032,75 @@ fn social_inbox_row_mapper(row: &rusqlite::Row) -> rusqlite::Result<SocialInboxR
         metadata: row.get(14)?,
         created_at: row.get(15)?,
         updated_at: row.get(16)?,
+    })
+}
+
+// --- Social Draft Row ---
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[allow(dead_code)]
+pub struct SocialDraftRow {
+    pub id: i64,
+    pub platform: String,
+    /// "reply" | "post" | "dm"
+    pub draft_type: String,
+    pub content: String,
+    pub media_url: Option<String>,
+    pub reply_to_id: Option<String>,
+    pub original_text: Option<String>,
+    pub original_author: Option<String>,
+    /// "draft" | "awaiting_approval" | "sent" | "failed" | "ignored"
+    pub status: String,
+    pub reply_id: Option<String>,
+    pub forward_ref: Option<String>,
+    pub agent_id: Option<String>,
+    pub session_key: Option<String>,
+    pub metadata: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl SocialDraftRow {
+    pub fn new(platform: &str, draft_type: &str, content: &str) -> Self {
+        let now = Utc::now().to_rfc3339();
+        SocialDraftRow {
+            id: 0,
+            platform: platform.to_string(),
+            draft_type: draft_type.to_string(),
+            content: content.to_string(),
+            media_url: None,
+            reply_to_id: None,
+            original_text: None,
+            original_author: None,
+            status: "draft".to_string(),
+            reply_id: None,
+            forward_ref: None,
+            agent_id: None,
+            session_key: None,
+            metadata: None,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+}
+
+fn social_draft_row_mapper(row: &rusqlite::Row) -> rusqlite::Result<SocialDraftRow> {
+    Ok(SocialDraftRow {
+        id: row.get(0)?,
+        platform: row.get(1)?,
+        draft_type: row.get(2)?,
+        content: row.get(3)?,
+        media_url: row.get(4)?,
+        reply_to_id: row.get(5)?,
+        original_text: row.get(6)?,
+        original_author: row.get(7)?,
+        status: row.get(8)?,
+        reply_id: row.get(9)?,
+        forward_ref: row.get(10)?,
+        agent_id: row.get(11)?,
+        session_key: row.get(12)?,
+        metadata: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }

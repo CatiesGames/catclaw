@@ -358,6 +358,24 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         info!("social ingest pipeline started");
     }
 
+    // Startup: clear media_tmp dir (temp files don't survive restarts).
+    {
+        let media_dir = config.general.workspace.join("media_tmp");
+        if media_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&media_dir) {
+                let mut count = 0usize;
+                for entry in entries.flatten() {
+                    if std::fs::remove_file(entry.path()).is_ok() {
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    info!(count, "startup: cleared media_tmp files");
+                }
+            }
+        }
+    }
+
     // Startup token check: exchange short-lived tokens for long-lived ones.
     {
         let token_config = gw_config.clone();
@@ -498,12 +516,13 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
 
 // ── Social button action dispatcher ──────────────────────────────────────────
 
-/// Handle a social inbox button press from any adapter.
-/// `action` is one of: "ai_reply", "manual_reply", "ignore", "approve_draft", "discard_draft".
+/// Handle a social button press from any adapter.
+/// For inbox actions, `card_id` is the social_inbox.id.
+/// For draft actions (prefix "draft_"), `card_id` is the social_drafts.id.
 /// `hint` is an optional user-provided hint string for ai_reply_hint flows.
 #[allow(clippy::too_many_arguments)]
 async fn handle_social_button_action(
-    inbox_id: i64,
+    card_id: i64,
     action: &str,
     hint: Option<&str>,
     db: &Arc<StateDb>,
@@ -514,14 +533,92 @@ async fn handle_social_button_action(
 ) {
     use crate::social::{dispatch_action, forward, ResolvedAction, SocialItem, SocialPlatform};
 
-    let row = match db.get_social_inbox(inbox_id) {
+    // ── Draft button actions (social_draft: prefix → "draft_approve" / "draft_discard") ──
+    if action == "draft_approve" || action == "draft_discard" {
+        let draft = match db.get_social_draft(card_id) {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                warn!(card_id, action, "social draft button: draft not found");
+                return;
+            }
+            Err(e) => {
+                error!(card_id, error = %e, "social draft button: db error");
+                return;
+            }
+        };
+
+        // Resolve admin_channel
+        let admin_channel = {
+            let cfg = config.read().unwrap();
+            match draft.platform.as_str() {
+                "instagram" => cfg.social.instagram.as_ref().map(|c| c.admin_channel.clone()),
+                "threads" => cfg.social.threads.as_ref().map(|c| c.admin_channel.clone()),
+                _ => None,
+            }.unwrap_or_default()
+        };
+
+        let try_update_draft_card = |card: forward::ForwardCard| {
+            let fwd_ref = draft.forward_ref.clone();
+            let ch = admin_channel.clone();
+            let ads = adapters.clone();
+            async move {
+                if let (Some(msg_ref), false) = (fwd_ref, ch.is_empty()) {
+                    forward::update_forward_card(card, &msg_ref, &ch, &ads).await;
+                }
+            }
+        };
+
+        if action == "draft_discard" {
+            if draft.status != "awaiting_approval" && draft.status != "draft" {
+                warn!(card_id, status = %draft.status, "social draft_discard: already resolved");
+                return;
+            }
+            let _ = db.update_social_draft_status(card_id, "ignored");
+            let workspace = config.read().unwrap().general.workspace.clone();
+            crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
+            let base = forward::build_social_draft_card(&draft);
+            let resolved = forward::build_resolved_card(&base, "已捨棄");
+            try_update_draft_card(resolved).await;
+            return;
+        }
+
+        // draft_approve: idempotency guard — only allow from awaiting_approval/draft
+        if draft.status != "awaiting_approval" && draft.status != "draft" {
+            warn!(card_id, status = %draft.status, "social draft_approve: already resolved");
+            return;
+        }
+
+        // Publish via Meta API
+        let cfg = config.read().unwrap().clone();
+        let workspace = cfg.general.workspace.clone();
+        let result = crate::social::execute_draft_publish(&draft, &cfg).await;
+        let status_label = if result.is_ok() { "已發送" } else { "發送失敗" };
+        let base = forward::build_social_draft_card(&draft);
+        let resolved = forward::build_resolved_card(&base, status_label);
+        try_update_draft_card(resolved).await;
+        match result {
+            Ok(reply_id) => {
+                let _ = db.update_social_draft_sent(card_id, &reply_id);
+                crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
+            }
+            Err(e) => {
+                error!(card_id, error = %e, "social draft_approve: send failed");
+                let _ = db.update_social_draft_status(card_id, "failed");
+            }
+        }
+        return;
+    }
+
+    // ── Inbox button actions ──────────────────────────────────────────────────
+
+    let row = match db.get_social_inbox(card_id) {
         Ok(Some(r)) => r,
         Ok(None) => {
-            warn!(inbox_id, "social button action: inbox item not found");
+            warn!(card_id, "social button action: inbox item not found");
             return;
         }
         Err(e) => {
-            error!(inbox_id, error = %e, "social button action: db error");
+            error!(card_id, error = %e, "social button action: db error");
             return;
         }
     };
@@ -550,25 +647,25 @@ async fn handle_social_button_action(
 
     match action {
         "ignore" => {
-            let _ = db.update_social_inbox_status(inbox_id, "ignored");
+            let _ = db.update_social_inbox_status(card_id, "ignored");
             let base = forward::build_forward_card(&row);
             let resolved = forward::build_resolved_card(&base, "已忽略");
             try_update_card(resolved).await;
         }
-        "discard_draft" => {
-            let _ = db.update_social_inbox_status(inbox_id, "ignored");
+        "discard" | "discard_draft" => {
+            let _ = db.update_social_inbox_status(card_id, "ignored");
             if let Some(ref draft) = row.draft {
                 let base = forward::build_draft_card(&row, draft);
                 let resolved = forward::build_resolved_card(&base, "已捨棄");
                 try_update_card(resolved).await;
             }
         }
-        "approve_draft" => {
-            // Same as WS social.inbox.approve — send draft via Meta API.
+        "approve" | "approve_draft" => {
+            // Send draft via Meta API (inbox-based legacy approve path).
             let draft = match &row.draft {
                 Some(d) => d.clone(),
                 None => {
-                    warn!(inbox_id, "social approve_draft: no draft");
+                    warn!(card_id, "social approve: no draft");
                     return;
                 }
             };
@@ -612,10 +709,10 @@ async fn handle_social_button_action(
                 try_update_card(resolved).await;
             }
             match result {
-                Ok(reply_id) => { let _ = db.update_social_inbox_sent(inbox_id, &reply_id); }
+                Ok(reply_id) => { let _ = db.update_social_inbox_sent(card_id, &reply_id); }
                 Err(e) => {
-                    error!(inbox_id, error = %e, "social approve_draft: send failed");
-                    let _ = db.update_social_inbox_status(inbox_id, "failed");
+                    error!(card_id, error = %e, "social approve: send failed");
+                    let _ = db.update_social_inbox_status(card_id, "failed");
                 }
             }
         }
@@ -624,7 +721,7 @@ async fn handle_social_button_action(
             let base = forward::build_forward_card(&row);
             let resolved = forward::build_resolved_card(&base, "等待手動回覆");
             try_update_card(resolved).await;
-            let _ = db.update_social_inbox_status(inbox_id, "manual");
+            let _ = db.update_social_inbox_status(card_id, "manual");
         }
         "ai_reply" => {
             // Update card to "AI 回覆中…" processing state, then dispatch.
@@ -672,7 +769,7 @@ async fn handle_social_button_action(
             ).await;
         }
         unknown => {
-            warn!(inbox_id, action = unknown, "social button action: unknown action");
+            warn!(card_id, action = unknown, "social button action: unknown action");
         }
     }
 }

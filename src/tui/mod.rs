@@ -9,6 +9,7 @@ mod sessions;
 mod skills;
 pub(crate) mod splash;
 mod issues;
+mod social_drafts;
 mod social_inbox;
 mod tasks;
 mod theme;
@@ -102,6 +103,7 @@ pub enum Tab {
     Config,
     Logs,
     Social,
+    Drafts,
     Issues,
 }
 
@@ -117,6 +119,7 @@ impl Tab {
             Tab::Config,
             Tab::Logs,
             Tab::Social,
+            Tab::Drafts,
             Tab::Issues,
         ]
     }
@@ -132,6 +135,7 @@ impl Tab {
             Tab::Config => "Config",
             Tab::Logs => "Logs",
             Tab::Social => "Social",
+            Tab::Drafts => "Drafts",
             Tab::Issues => "Issues",
         }
     }
@@ -147,6 +151,7 @@ impl Tab {
             Tab::Config => "⚙️",
             Tab::Logs => "📜",
             Tab::Social => "📥",
+            Tab::Drafts => "📝",
             Tab::Issues => "🔥",
         }
     }
@@ -200,6 +205,7 @@ struct App {
     config_panel: config_panel::ConfigPanel,
     logs_panel: logs::LogsPanel,
     social_panel: social_inbox::SocialInboxPanel,
+    drafts_panel: social_drafts::SocialDraftsPanel,
     issues_panel: issues::IssuesPanel,
     should_quit: bool,
     agent_count: usize,
@@ -245,6 +251,7 @@ impl App {
                 panel
             },
             social_panel: social_inbox::SocialInboxPanel::new(client.clone()),
+            drafts_panel: social_drafts::SocialDraftsPanel::new(client.clone()),
             issues_panel: issues::IssuesPanel::new(client.clone()),
             should_quit: false,
             agent_count: config.agents.len(),
@@ -270,6 +277,7 @@ impl App {
             Tab::Config => self.config_panel.captures_input(),
             Tab::Logs => self.logs_panel.captures_input(),
             Tab::Social => self.social_panel.captures_input(),
+            Tab::Drafts => self.drafts_panel.captures_input(),
             Tab::Issues => self.issues_panel.captures_input(),
         };
 
@@ -332,7 +340,7 @@ impl App {
                     return Action::Refresh;
                 }
                 (_, KeyCode::Char('0')) if event.modifiers.contains(KeyModifiers::ALT) => {
-                    self.active_tab = Tab::Issues;
+                    self.active_tab = Tab::Drafts;
                     return Action::Refresh;
                 }
                 _ => {}
@@ -355,6 +363,7 @@ impl App {
             Tab::Config => self.config_panel.handle_event(event),
             Tab::Logs => self.logs_panel.handle_event(event),
             Tab::Social => self.social_panel.handle_event(event),
+            Tab::Drafts => self.drafts_panel.handle_event(event),
             Tab::Issues => self.issues_panel.handle_event(event),
         };
 
@@ -436,6 +445,7 @@ impl App {
             Tab::Config => self.config_panel.render(frame, chunks[1]),
             Tab::Logs => self.logs_panel.render(frame, chunks[1]),
             Tab::Social => self.social_panel.render(frame, chunks[1]),
+            Tab::Drafts => self.drafts_panel.render(frame, chunks[1]),
             Tab::Issues => self.issues_panel.render(frame, chunks[1]),
         }
 

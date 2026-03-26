@@ -71,6 +71,29 @@ impl ThreadsClient {
         self.post_form(&publish_url, &[("creation_id", &container_id)]).await
     }
 
+    /// Create a new image post (two-step: create container → publish).
+    /// `image_url` must be a publicly accessible HTTPS URL.
+    pub async fn create_image_post(&self, image_url: &str, text: &str) -> Result<Value> {
+        // Step 1: create container with media_type=IMAGE
+        let container_url = format!("{}/{}/threads", self.base(), self.user_id);
+        let container: Value = self
+            .post_form(
+                &container_url,
+                &[("text", text), ("media_type", "IMAGE"), ("image_url", image_url)],
+            )
+            .await?;
+        let container_id = container
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CatClawError::Social("threads: no container id in response".into()))?
+            .to_string();
+
+        // Step 2: wait for container to finish processing, then publish.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let publish_url = format!("{}/{}/threads_publish", self.base(), self.user_id);
+        self.post_form(&publish_url, &[("creation_id", &container_id)]).await
+    }
+
     /// Reply to a post (two-step: create reply container → publish).
     pub async fn reply(&self, post_id: &str, text: &str) -> Result<Value> {
         let container_url = format!("{}/{}/threads", self.base(), self.user_id);
