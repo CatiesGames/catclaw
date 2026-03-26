@@ -4,11 +4,18 @@ use reqwest::Client;
 use serde_json::Value;
 use crate::error::{CatClawError, Result};
 
-/// Instagram Graph API client using a System User Token (never expires).
+/// Instagram Graph API client.
+/// Supports both Facebook Login tokens (EAA... → graph.facebook.com)
+/// and Instagram Login tokens (IG... → graph.instagram.com).
 pub struct InstagramClient {
     token: String,
     user_id: String,
     http: Client,
+}
+
+/// Detect whether a token was issued via Instagram Login (prefix IG) vs Facebook Login (prefix EAA).
+fn is_ig_login_token(token: &str) -> bool {
+    token.starts_with("IG")
 }
 
 impl InstagramClient {
@@ -21,7 +28,11 @@ impl InstagramClient {
     }
 
     fn base(&self) -> &'static str {
-        "https://graph.facebook.com/v25.0"
+        if is_ig_login_token(&self.token) {
+            "https://graph.instagram.com/v25.0"
+        } else {
+            "https://graph.facebook.com/v25.0"
+        }
     }
 
     pub async fn get_profile(&self) -> Result<Value> {
@@ -109,41 +120,71 @@ impl InstagramClient {
     // ── Token management ──────────────────────────────────────────────────────
 
     /// Check how many seconds until the token expires.
-    /// Returns 0 if the token never expires (System User Token).
+    ///
+    /// - Facebook Login tokens: uses `debug_token` endpoint (returns exact expiry).
+    /// - Instagram Login tokens: no debug_token support; returns 60*86400 (assumed 60-day lifetime).
+    /// - Returns 0 if the token never expires (System User Token).
     pub async fn check_token_expiry(token: &str) -> Result<i64> {
         let http = Client::new();
-        let resp = http.get("https://graph.facebook.com/v25.0/debug_token")
-            .query(&[("input_token", token), ("access_token", token)])
-            .send().await
-            .map_err(|e| CatClawError::Social(format!("instagram http error: {e}")))?;
-        let val: Value = resp.json().await
-            .map_err(|e| CatClawError::Social(format!("instagram json error: {e}")))?;
-        let val = check_error(val)?;
-        let expires_in = val
-            .get("data")
-            .and_then(|d| d.get("expires_at"))
-            .and_then(|v| v.as_i64())
-            .map(|expires_at| {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                expires_at - now
-            })
-            .unwrap_or(0);
-        Ok(expires_in)
+
+        if is_ig_login_token(token) {
+            // IG Login tokens don't support debug_token.
+            // Verify the token is valid by calling /me, then assume 60-day lifetime.
+            let resp = http.get("https://graph.instagram.com/me")
+                .query(&[("fields", "id"), ("access_token", token)])
+                .send().await
+                .map_err(|e| CatClawError::Social(format!("instagram http error: {e}")))?;
+            let val: Value = resp.json().await
+                .map_err(|e| CatClawError::Social(format!("instagram json error: {e}")))?;
+            check_error(val)?;
+            // Token is valid — no exact expiry available, return 60 days as estimate.
+            // The scheduler's 30-day refresh cadence ensures renewal well before expiry.
+            Ok(60 * 86400)
+        } else {
+            // Facebook Login tokens: use debug_token for exact expiry.
+            let resp = http.get("https://graph.facebook.com/v25.0/debug_token")
+                .query(&[("input_token", token), ("access_token", token)])
+                .send().await
+                .map_err(|e| CatClawError::Social(format!("instagram http error: {e}")))?;
+            let val: Value = resp.json().await
+                .map_err(|e| CatClawError::Social(format!("instagram json error: {e}")))?;
+            let val = check_error(val)?;
+            let expires_in = val
+                .get("data")
+                .and_then(|d| d.get("expires_at"))
+                .and_then(|v| v.as_i64())
+                .map(|expires_at| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    expires_at - now
+                })
+                .unwrap_or(0);
+            Ok(expires_in)
+        }
     }
 
     /// Exchange a short-lived token for a long-lived token (60 days).
+    /// Detects token type and uses the correct endpoint/grant_type.
     pub async fn exchange_token(app_id: &str, app_secret: &str, short_token: &str) -> Result<String> {
         let http = Client::new();
-        let resp = http.get("https://graph.facebook.com/v25.0/oauth/access_token")
-            .query(&[
+        let (url, params): (&str, Vec<(&str, &str)>) = if is_ig_login_token(short_token) {
+            ("https://graph.instagram.com/access_token", vec![
+                ("grant_type", "ig_exchange_token"),
+                ("client_secret", app_secret),
+                ("access_token", short_token),
+            ])
+        } else {
+            ("https://graph.facebook.com/v25.0/oauth/access_token", vec![
                 ("grant_type", "fb_exchange_token"),
                 ("client_id", app_id),
                 ("client_secret", app_secret),
                 ("fb_exchange_token", short_token),
             ])
+        };
+        let resp = http.get(url)
+            .query(&params)
             .send().await
             .map_err(|e| CatClawError::Social(format!("instagram http error: {e}")))?;
         let val: Value = resp.json().await
@@ -158,7 +199,12 @@ impl InstagramClient {
     /// Refresh a long-lived token before it expires (returns a new long-lived token).
     pub async fn refresh_token(token: &str) -> Result<String> {
         let http = Client::new();
-        let resp = http.get("https://graph.facebook.com/v25.0/oauth/access_token")
+        let url = if is_ig_login_token(token) {
+            "https://graph.instagram.com/refresh_access_token"
+        } else {
+            "https://graph.facebook.com/v25.0/oauth/access_token"
+        };
+        let resp = http.get(url)
             .query(&[
                 ("grant_type", "ig_refresh_token"),
                 ("access_token", token),
