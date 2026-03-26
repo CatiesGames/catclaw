@@ -78,6 +78,8 @@ pub fn build_draft_card(row: &SocialInboxRow, draft: &str) -> ForwardCard {
 pub enum ForwardCardType {
     Incoming,
     DraftReview,
+    /// Terminal state — show status text, remove all buttons.
+    Resolved(String),
 }
 
 #[derive(Debug, Clone)]
@@ -91,16 +93,31 @@ pub struct ForwardCard {
     pub card_type: ForwardCardType,
 }
 
+/// Build a resolved card (terminal state, no buttons) from an existing card.
+pub fn build_resolved_card(card: &ForwardCard, status: &str) -> ForwardCard {
+    ForwardCard {
+        inbox_id: card.inbox_id,
+        title: card.title.clone(),
+        author: card.author.clone(),
+        text: card.text.clone(),
+        permalink: card.permalink.clone(),
+        created_at: card.created_at.clone(),
+        card_type: ForwardCardType::Resolved(status.to_string()),
+    }
+}
+
 impl ForwardCard {
     /// Render as a Discord embed JSON blob.
     pub fn to_discord_payload(&self) -> Value {
-        let color = match self.card_type {
+        let color = match &self.card_type {
             ForwardCardType::Incoming => 0x5865F2u64,    // blurple
             ForwardCardType::DraftReview => 0xFEE75Cu64, // yellow
+            ForwardCardType::Resolved(_) => 0x57F287u64, // green
         };
-        let buttons: Vec<Value> = match self.card_type {
+        let buttons: Vec<Value> = match &self.card_type {
             ForwardCardType::Incoming => vec![
                 discord_button(&format!("social:ai_reply:{}", self.inbox_id), "AI 回覆", 1),
+                discord_button(&format!("social:ai_reply_hint:{}", self.inbox_id), "建議 AI 回覆", 2),
                 discord_button(&format!("social:manual_reply:{}", self.inbox_id), "手動回覆", 2),
                 discord_button(&format!("social:ignore:{}", self.inbox_id), "忽略", 4),
             ],
@@ -108,6 +125,7 @@ impl ForwardCard {
                 discord_button(&format!("social:approve_draft:{}", self.inbox_id), "核准發送", 3),
                 discord_button(&format!("social:discard_draft:{}", self.inbox_id), "捨棄", 4),
             ],
+            ForwardCardType::Resolved(_) => vec![],
         };
         let mut fields = vec![
             json!({"name": "From", "value": format!("@{}", self.author), "inline": true}),
@@ -119,19 +137,28 @@ impl ForwardCard {
             .map(|d| d.with_timezone(&Utc).to_rfc3339())
             .unwrap_or_else(|_| self.created_at.clone());
 
+        let description = if let ForwardCardType::Resolved(ref s) = self.card_type {
+            format!("{}\n\n_{}_", self.text, s)
+        } else {
+            self.text.clone()
+        };
+
+        let components: Value = if buttons.is_empty() {
+            json!([])
+        } else {
+            json!([{ "type": 1, "components": buttons }])
+        };
+
         json!({
             "embeds": [{
                 "title": self.title,
-                "description": self.text,
+                "description": description,
                 "color": color,
                 "fields": fields,
                 "footer": { "text": format!("inbox_id: {}", self.inbox_id) },
                 "timestamp": ts
             }],
-            "components": [{
-                "type": 1,
-                "components": buttons
-            }]
+            "components": components
         })
     }
 
@@ -147,16 +174,22 @@ impl ForwardCard {
                 .map(|u| format!("\n[Post]({})", u))
                 .unwrap_or_default()
         );
-        let keyboard: Vec<Vec<Value>> = match self.card_type {
-            ForwardCardType::Incoming => vec![vec![
-                tg_button("AI 回覆", &format!("social:ai_reply:{}", self.inbox_id)),
-                tg_button("手動回覆", &format!("social:manual_reply:{}", self.inbox_id)),
-                tg_button("忽略", &format!("social:ignore:{}", self.inbox_id)),
-            ]],
+        let keyboard: Vec<Vec<Value>> = match &self.card_type {
+            ForwardCardType::Incoming => vec![
+                vec![
+                    tg_button("AI 回覆", &format!("social:ai_reply:{}", self.inbox_id)),
+                    tg_button("建議 AI 回覆", &format!("social:ai_reply_hint:{}", self.inbox_id)),
+                ],
+                vec![
+                    tg_button("手動回覆", &format!("social:manual_reply:{}", self.inbox_id)),
+                    tg_button("忽略", &format!("social:ignore:{}", self.inbox_id)),
+                ],
+            ],
             ForwardCardType::DraftReview => vec![vec![
                 tg_button("核准發送", &format!("social:approve_draft:{}", self.inbox_id)),
                 tg_button("捨棄", &format!("social:discard_draft:{}", self.inbox_id)),
             ]],
+            ForwardCardType::Resolved(_) => vec![],
         };
         (text, json!({ "inline_keyboard": keyboard }))
     }
@@ -171,9 +204,10 @@ impl ForwardCard {
             "type": "section",
             "text": { "type": "mrkdwn", "text": format!("*From:* @{}\n{}", self.author, self.text) }
         });
-        let actions: Vec<Value> = match self.card_type {
+        let actions: Vec<Value> = match &self.card_type {
             ForwardCardType::Incoming => vec![
                 slack_button(&format!("social:ai_reply:{}", self.inbox_id), "AI 回覆", "primary"),
+                slack_button(&format!("social:ai_reply_hint:{}", self.inbox_id), "建議 AI 回覆", "default"),
                 slack_button(&format!("social:manual_reply:{}", self.inbox_id), "手動回覆", "default"),
                 slack_button(&format!("social:ignore:{}", self.inbox_id), "忽略", "danger"),
             ],
@@ -181,6 +215,14 @@ impl ForwardCard {
                 slack_button(&format!("social:approve_draft:{}", self.inbox_id), "核准發送", "primary"),
                 slack_button(&format!("social:discard_draft:{}", self.inbox_id), "捨棄", "danger"),
             ],
+            ForwardCardType::Resolved(s) => {
+                return json!({
+                    "blocks": [header, body, json!({
+                        "type": "context",
+                        "elements": [{ "type": "mrkdwn", "text": s }]
+                    })]
+                });
+            }
         };
         json!({
             "blocks": [header, body, { "type": "actions", "elements": actions }]
@@ -212,6 +254,28 @@ pub async fn send_forward_card(
         platform, admin_channel
     );
     Ok(None)
+}
+
+/// Update an existing forward card in-place (e.g., after a button action).
+/// `message_id` is the platform message ID stored in `forward_ref`.
+pub async fn update_forward_card(
+    card: ForwardCard,
+    message_id: &str,
+    admin_channel: &str,
+    adapters: &[Arc<dyn ChannelAdapter>],
+) {
+    let (platform, channel_id) = match parse_admin_channel(admin_channel) {
+        Some(pc) => pc,
+        None => return,
+    };
+    for adapter in adapters {
+        if adapter.platform_name() == platform {
+            if let Err(e) = adapter.update_social_card(&channel_id, message_id, &card).await {
+                warn!(error = %e, "update_forward_card: failed to edit card");
+            }
+            return;
+        }
+    }
 }
 
 // ── Button helpers ────────────────────────────────────────────────────────────

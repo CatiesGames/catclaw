@@ -112,7 +112,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     // Collect approval_rx receivers from adapters to wire later
     let mut approval_receivers: Vec<tokio_mpsc::UnboundedReceiver<(String, bool)>> = Vec::new();
     // Collect social_action_rx receivers from adapters
-    let mut social_action_receivers: Vec<tokio_mpsc::UnboundedReceiver<(i64, String)>> = Vec::new();
+    let mut social_action_receivers: Vec<tokio_mpsc::UnboundedReceiver<(i64, String, Option<String>)>> = Vec::new();
 
     // 7. Start channel adapters
     let mut adapters: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
@@ -408,9 +408,9 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         let sa_sm = session_manager.clone();
         let sa_ar = agent_registry.clone();
         tokio::spawn(async move {
-            while let Some((inbox_id, action)) = rx.recv().await {
+            while let Some((inbox_id, action, hint)) = rx.recv().await {
                 handle_social_button_action(
-                    inbox_id, &action, &sa_db, &sa_config, &sa_adapters, &sa_sm, &sa_ar,
+                    inbox_id, &action, hint.as_deref(), &sa_db, &sa_config, &sa_adapters, &sa_sm, &sa_ar,
                 ).await;
             }
         });
@@ -500,17 +500,19 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
 
 /// Handle a social inbox button press from any adapter.
 /// `action` is one of: "ai_reply", "manual_reply", "ignore", "approve_draft", "discard_draft".
+/// `hint` is an optional user-provided hint string for ai_reply_hint flows.
 #[allow(clippy::too_many_arguments)]
 async fn handle_social_button_action(
     inbox_id: i64,
     action: &str,
+    hint: Option<&str>,
     db: &Arc<StateDb>,
     config: &Arc<std::sync::RwLock<Config>>,
     adapters: &Arc<Vec<Arc<dyn ChannelAdapter>>>,
     session_manager: &Arc<SessionManager>,
     agent_registry: &Arc<std::sync::RwLock<crate::agent::AgentRegistry>>,
 ) {
-    use crate::social::{dispatch_action, ResolvedAction, SocialItem, SocialPlatform};
+    use crate::social::{dispatch_action, forward, ResolvedAction, SocialItem, SocialPlatform};
 
     let row = match db.get_social_inbox(inbox_id) {
         Ok(Some(r)) => r,
@@ -524,12 +526,42 @@ async fn handle_social_button_action(
         }
     };
 
+    // Resolve admin_channel for card updates (used by multiple branches below).
+    let admin_channel = {
+        let cfg = config.read().unwrap();
+        match row.platform.as_str() {
+            "instagram" => cfg.social.instagram.as_ref().map(|c| c.admin_channel.clone()),
+            "threads" => cfg.social.threads.as_ref().map(|c| c.admin_channel.clone()),
+            _ => None,
+        }.unwrap_or_default()
+    };
+
+    // Helper: update the forward card if we have a forward_ref and admin_channel.
+    let try_update_card = |card: forward::ForwardCard| {
+        let fwd_ref = row.forward_ref.clone();
+        let ch = admin_channel.clone();
+        let ads = adapters.clone();
+        async move {
+            if let (Some(msg_ref), false) = (fwd_ref, ch.is_empty()) {
+                forward::update_forward_card(card, &msg_ref, &ch, &ads).await;
+            }
+        }
+    };
+
     match action {
         "ignore" => {
             let _ = db.update_social_inbox_status(inbox_id, "ignored");
+            let base = forward::build_forward_card(&row);
+            let resolved = forward::build_resolved_card(&base, "已忽略");
+            try_update_card(resolved).await;
         }
         "discard_draft" => {
             let _ = db.update_social_inbox_status(inbox_id, "ignored");
+            if let Some(ref draft) = row.draft {
+                let base = forward::build_draft_card(&row, draft);
+                let resolved = forward::build_resolved_card(&base, "已捨棄");
+                try_update_card(resolved).await;
+            }
         }
         "approve_draft" => {
             // Same as WS social.inbox.approve — send draft via Meta API.
@@ -570,6 +602,15 @@ async fn handle_social_button_action(
                 }
                 p => Err(crate::error::CatClawError::Social(format!("unknown platform '{}'", p))),
             };
+            let status_label = match &result {
+                Ok(_) => "已發送",
+                Err(_) => "發送失敗",
+            };
+            if let Some(ref draft) = row.draft {
+                let base = forward::build_draft_card(&row, draft);
+                let resolved = forward::build_resolved_card(&base, status_label);
+                try_update_card(resolved).await;
+            }
             match result {
                 Ok(reply_id) => { let _ = db.update_social_inbox_sent(inbox_id, &reply_id); }
                 Err(e) => {
@@ -578,17 +619,29 @@ async fn handle_social_button_action(
                 }
             }
         }
-        "ai_reply" | "manual_reply" => {
-            // Resolve admin_channel and agent from config.
-            let (agent_id, admin_channel) = {
+        "manual_reply" => {
+            // Update card to "等待手動回覆" state and remove buttons — admin will reply manually.
+            let base = forward::build_forward_card(&row);
+            let resolved = forward::build_resolved_card(&base, "等待手動回覆");
+            try_update_card(resolved).await;
+            let _ = db.update_social_inbox_status(inbox_id, "manual");
+        }
+        "ai_reply" => {
+            // Update card to "AI 回覆中…" processing state, then dispatch.
+            let base = forward::build_forward_card(&row);
+            let processing = forward::build_resolved_card(&base, "AI 回覆中…");
+            try_update_card(processing).await;
+
+            if admin_channel.is_empty() { return; }
+
+            let agent_id = {
                 let cfg = config.read().unwrap();
                 match row.platform.as_str() {
-                    "instagram" => cfg.social.instagram.as_ref().map(|c| (c.agent.clone(), c.admin_channel.clone())),
-                    "threads" => cfg.social.threads.as_ref().map(|c| (c.agent.clone(), c.admin_channel.clone())),
+                    "instagram" => cfg.social.instagram.as_ref().map(|c| c.agent.clone()),
+                    "threads" => cfg.social.threads.as_ref().map(|c| c.agent.clone()),
                     _ => None,
-                }.unwrap_or_else(|| ("main".to_string(), String::new()))
+                }.unwrap_or_else(|| "main".to_string())
             };
-            if admin_channel.is_empty() { return; }
 
             let platform = match row.platform.as_str() {
                 "instagram" => SocialPlatform::Instagram,
@@ -602,20 +655,21 @@ async fn handle_social_button_action(
                 author_id: row.author_id.clone(),
                 author_name: row.author_name.clone(),
                 media_id: row.media_id.clone(),
-                text: row.text.clone(),
+                text: if let Some(h) = hint {
+                    let base = row.text.as_deref().unwrap_or("");
+                    Some(format!("{}\n\n[Admin hint: {}]", base, h))
+                } else {
+                    row.text.clone()
+                },
                 metadata: row.metadata.as_deref()
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or(serde_json::json!({})),
             };
 
-            let resolved = if action == "ai_reply" {
-                ResolvedAction::AutoReply { agent: agent_id }
-            } else {
-                // manual_reply: re-send as Forward so admin can type a reply via the card
-                ResolvedAction::Forward
-            };
-
-            dispatch_action(resolved, item, db, config, adapters, session_manager, agent_registry, &admin_channel).await;
+            dispatch_action(
+                ResolvedAction::AutoReply { agent: agent_id },
+                item, db, config, adapters, session_manager, agent_registry, &admin_channel,
+            ).await;
         }
         unknown => {
             warn!(inbox_id, action = unknown, "social button action: unknown action");

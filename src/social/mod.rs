@@ -258,16 +258,24 @@ pub async fn dispatch_action(
                 &item.platform_id,
             ) {
                 Ok(Some(row)) => {
+                    let inbox_id = row.id;
                     let card = forward::build_forward_card(&row);
                     let adapters_ref: &[Arc<dyn crate::channel::ChannelAdapter>] = adapters;
-                    if let Err(e) = forward::send_forward_card(card, admin_channel, adapters_ref).await {
-                        error!(error = %e, "social: failed to send forward card");
+                    match forward::send_forward_card(card, admin_channel, adapters_ref).await {
+                        Ok(Some(msg_ref)) => {
+                            let _ = db.update_social_inbox_forward_ref(inbox_id, &msg_ref);
+                        }
+                        Ok(None) => {
+                            let _ = db.set_inbox_status(
+                                &item.platform.to_string(),
+                                &item.platform_id,
+                                "forwarded",
+                            );
+                        }
+                        Err(e) => {
+                            error!(error = %e, "social: failed to send forward card");
+                        }
                     }
-                    let _ = db.set_inbox_status(
-                        &item.platform.to_string(),
-                        &item.platform_id,
-                        "forwarded",
-                    );
                 }
                 Ok(None) => error!("social: inbox row not found after insert"),
                 Err(e) => error!(error = %e, "social: failed to fetch inbox row"),

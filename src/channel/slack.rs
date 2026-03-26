@@ -26,10 +26,11 @@ pub struct SlackAdapter {
     approval_tx: mpsc::UnboundedSender<(String, bool)>,
     /// Receiver half — taken once by gateway.
     approval_rx: Mutex<Option<mpsc::UnboundedReceiver<(String, bool)>>>,
-    /// Sender half for social inbox button actions (inbox_id, action) → gateway.
-    social_action_tx: mpsc::UnboundedSender<(i64, String)>,
+    /// Sender half for social inbox button actions (inbox_id, action, hint) → gateway.
+    social_action_tx: mpsc::UnboundedSender<(i64, String, Option<String>)>,
     /// Receiver half — taken once by gateway.
-    social_action_rx: Mutex<Option<mpsc::UnboundedReceiver<(i64, String)>>>,
+    #[allow(clippy::type_complexity)]
+    social_action_rx: Mutex<Option<mpsc::UnboundedReceiver<(i64, String, Option<String>)>>>,
     /// User display name cache: user_id → display_name
     user_cache: DashMap<String, String>,
     /// Channel name cache: channel_id → channel_name
@@ -65,7 +66,7 @@ impl SlackAdapter {
     }
 
     /// Take the social action receiver (called once by gateway).
-    pub async fn take_social_action_rx(&self) -> Option<mpsc::UnboundedReceiver<(i64, String)>> {
+    pub async fn take_social_action_rx(&self) -> Option<mpsc::UnboundedReceiver<(i64, String, Option<String>)>> {
         self.social_action_rx.lock().await.take()
     }
 
@@ -554,7 +555,7 @@ impl ChannelAdapter for SlackAdapter {
                                 let parts: Vec<&str> = rest.splitn(2, ':').collect();
                                 if parts.len() == 2 {
                                     if let Ok(inbox_id) = parts[1].parse::<i64>() {
-                                        let _ = social_action_tx.send((inbox_id, parts[0].to_string()));
+                                        let _ = social_action_tx.send((inbox_id, parts[0].to_string(), None));
                                     }
                                 }
                                 continue;

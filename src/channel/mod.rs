@@ -236,6 +236,17 @@ pub trait ChannelAdapter: Send + Sync {
         self.name()
     }
 
+    /// Edit an existing Social Inbox card (e.g., update buttons/status after action).
+    /// Default implementation is a no-op (unsupported).
+    async fn update_social_card(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+        _card: &crate::social::forward::ForwardCard,
+    ) -> crate::error::Result<()> {
+        Ok(())
+    }
+
     /// Send a Social Inbox forward/draft card with action buttons.
     /// Returns the platform message ID (for tracking button responses), or None if unsupported.
     async fn send_social_card(
