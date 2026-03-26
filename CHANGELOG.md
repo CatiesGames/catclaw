@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.21.0](https://github.com/CatiesGames/catclaw/compare/v0.20.2...v0.21.0) (2026-03-26)
+
+
+### Features
+
+* IG 發文/私訊、Threads 關鍵字搜尋、webhook 補齊、task get、config 預設值 ([751863a](https://github.com/CatiesGames/catclaw/commit/751863ab49a2b3848d9d6e98f1c9c1834298d9f4))
+* IG/Threads token 自動換長效 + 定期續期，修正 Issues panel，改善 debug 日誌 ([f2f9845](https://github.com/CatiesGames/catclaw/commit/f2f98456fe1903e57c403250a30e411f63a42f31))
+
 ## [0.20.2](https://github.com/CatiesGames/catclaw/compare/v0.20.1...v0.20.2) (2026-03-26)
 
 
