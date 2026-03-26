@@ -290,14 +290,16 @@ impl ConfigPanel {
             entries.push(ConfigEntry { key: "social.instagram.admin_channel".to_string(), value: ig.admin_channel.clone(), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.instagram.subscribe".to_string(), value: ig.subscribe.join(","), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.instagram.agent".to_string(), value: ig.agent.clone(), section: sec.to_string(), editable: true });
-            if let Some(ref env) = ig.app_secret_env {
-                let sec_val = std::env::var(env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
-                entries.push(ConfigEntry { key: "social.instagram.app_secret_env".to_string(), value: env.clone(), section: sec.to_string(), editable: true });
+            {
+                let env = ig.app_secret_env.clone().unwrap_or_default();
+                let sec_val = if env.is_empty() { "(not set)".to_string() } else { std::env::var(&env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string()) };
+                entries.push(ConfigEntry { key: "social.instagram.app_secret_env".to_string(), value: env, section: sec.to_string(), editable: true });
                 entries.push(ConfigEntry { key: "social.instagram.app_secret_value".to_string(), value: sec_val, section: sec.to_string(), editable: true });
             }
-            if let Some(ref env) = ig.webhook_verify_token_env {
-                let sec_val = std::env::var(env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
-                entries.push(ConfigEntry { key: "social.instagram.webhook_verify_token_env".to_string(), value: env.clone(), section: sec.to_string(), editable: true });
+            {
+                let env = ig.webhook_verify_token_env.clone().unwrap_or_default();
+                let sec_val = if env.is_empty() { "(not set)".to_string() } else { std::env::var(&env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string()) };
+                entries.push(ConfigEntry { key: "social.instagram.webhook_verify_token_env".to_string(), value: env, section: sec.to_string(), editable: true });
                 entries.push(ConfigEntry { key: "social.instagram.webhook_verify_token_value".to_string(), value: sec_val, section: sec.to_string(), editable: true });
             }
             // Rules
@@ -330,14 +332,16 @@ impl ConfigPanel {
             entries.push(ConfigEntry { key: "social.threads.admin_channel".to_string(), value: th.admin_channel.clone(), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.threads.subscribe".to_string(), value: th.subscribe.join(","), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.threads.agent".to_string(), value: th.agent.clone(), section: sec.to_string(), editable: true });
-            if let Some(ref env) = th.app_secret_env {
-                let sec_val = std::env::var(env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
-                entries.push(ConfigEntry { key: "social.threads.app_secret_env".to_string(), value: env.clone(), section: sec.to_string(), editable: true });
+            {
+                let env = th.app_secret_env.clone().unwrap_or_default();
+                let sec_val = if env.is_empty() { "(not set)".to_string() } else { std::env::var(&env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string()) };
+                entries.push(ConfigEntry { key: "social.threads.app_secret_env".to_string(), value: env, section: sec.to_string(), editable: true });
                 entries.push(ConfigEntry { key: "social.threads.app_secret_value".to_string(), value: sec_val, section: sec.to_string(), editable: true });
             }
-            if let Some(ref env) = th.webhook_verify_token_env {
-                let sec_val = std::env::var(env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
-                entries.push(ConfigEntry { key: "social.threads.webhook_verify_token_env".to_string(), value: env.clone(), section: sec.to_string(), editable: true });
+            {
+                let env = th.webhook_verify_token_env.clone().unwrap_or_default();
+                let sec_val = if env.is_empty() { "(not set)".to_string() } else { std::env::var(&env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string()) };
+                entries.push(ConfigEntry { key: "social.threads.webhook_verify_token_env".to_string(), value: env, section: sec.to_string(), editable: true });
                 entries.push(ConfigEntry { key: "social.threads.webhook_verify_token_value".to_string(), value: sec_val, section: sec.to_string(), editable: true });
             }
             // Rules
