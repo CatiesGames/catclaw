@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.20.1](https://github.com/CatiesGames/catclaw/compare/v0.20.0...v0.20.1) (2026-03-26)
+
+
+### Bug Fixes
+
+* clippy unnecessary_unwrap in task add schedule display ([3bfc1e1](https://github.com/CatiesGames/catclaw/commit/3bfc1e19a935e6a06bfce8d92e1bc5f587ed3ea0))
+* cron 任務明確標示 UTC，避免 agent 時區誤解 ([46bd1cf](https://github.com/CatiesGames/catclaw/commit/46bd1cfde4be6fa4f548bfe8b1e6db8a5a369160))
+
 ## [0.20.0](https://github.com/CatiesGames/catclaw/compare/v0.19.0...v0.20.0) (2026-03-25)
 
 
