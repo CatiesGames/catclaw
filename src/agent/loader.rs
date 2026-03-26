@@ -1661,9 +1661,10 @@ TUI: **Issues** tab (Alt+0) — `i` ignore, `d`/`x` resolve, `r` reload.
 | `social.instagram.mode` | `webhook` / `polling` / `off` (default: `off`). CLI: `catclaw social mode instagram webhook` — prints the webhook URL. TUI: Config panel, also shows URL. |
 | `social.instagram.poll_interval_mins` | Polling interval (default 5, only when mode=polling) |
 | `social.instagram.admin_channel` | Forward card destination. Format: `discord:channel:<id>` / `telegram:chat:<id>` / `slack:channel:<id>` |
-| `social.instagram.token_env` | Env var name for the System User Token (e.g. `CATCLAW_INSTAGRAM_TOKEN`) |
+| `social.instagram.token_env` | Env var name for the Instagram access token (e.g. `CATCLAW_INSTAGRAM_TOKEN`). Catclaw auto-exchanges short-lived tokens for long-lived and auto-refreshes before expiry. |
 | `social.instagram.token_value` | Actual token value — writes to `~/.catclaw/.env`, NOT TOML (masked in TUI) |
-| `social.instagram.app_secret_env` | Env var name for app secret (HMAC verification, webhook mode only) |
+| `social.instagram.app_id` | App ID (client_id) — required for short-lived → long-lived token exchange |
+| `social.instagram.app_secret_env` | Env var name for app secret (HMAC webhook verification + token exchange) |
 | `social.instagram.app_secret_value` | Actual app secret value — writes to `~/.catclaw/.env` (masked) |
 | `social.instagram.webhook_verify_token_env` | Env var name for hub verify token (webhook mode only) |
 | `social.instagram.webhook_verify_token_value` | Actual verify token — writes to `~/.catclaw/.env` (masked) |
@@ -1682,9 +1683,10 @@ TUI: **Issues** tab (Alt+0) — `i` ignore, `d`/`x` resolve, `r` reload.
 | `social.threads.mode` | `webhook` / `polling` / `off` (default: `off`). CLI: `catclaw social mode threads webhook` — prints the webhook URL. TUI: Config panel, also shows URL. |
 | `social.threads.poll_interval_mins` | Polling interval (default 5, only when mode=polling) |
 | `social.threads.admin_channel` | Forward card destination |
-| `social.threads.token_env` | Env var name for OAuth token (60-day, needs periodic refresh) |
+| `social.threads.token_env` | Env var name for Threads OAuth token (60-day). Catclaw auto-exchanges short-lived tokens and auto-refreshes long-lived tokens daily. |
 | `social.threads.token_value` | Actual token value — writes to `~/.catclaw/.env` (masked) |
-| `social.threads.app_secret_env` | App secret env var name |
+| `social.threads.app_id` | App ID (client_id) — required for short-lived → long-lived token exchange |
+| `social.threads.app_secret_env` | App secret env var name (token exchange) |
 | `social.threads.app_secret_value` | Actual app secret value — writes to `~/.catclaw/.env` (masked) |
 | `social.threads.webhook_verify_token_env` | Hub verify token env var name |
 | `social.threads.webhook_verify_token_value` | Actual verify token — writes to `~/.catclaw/.env` (masked) |
@@ -1917,8 +1919,9 @@ CatClaw integrates Instagram via the Social Inbox subsystem — a separate pipel
 
 ## Prerequisites
 
-- **System User Token** (never expires) from Meta Business Suite → Settings → System Users
-- **App Secret** from Meta Developer Console (for HMAC webhook verification)
+- **Access Token** — short-lived (~1h) or long-lived (60-day). CatClaw **auto-exchanges short-lived tokens for long-lived ones** at startup if `app_id` + `app_secret_env` are set, and auto-refreshes before expiry.
+- **App ID** from Meta Developer Console (required for token exchange)
+- **App Secret** from Meta Developer Console (for HMAC webhook verification + token exchange)
 - Instagram User ID (`catclaw social inbox --platform instagram` or Graph API call)
 
 ## Config (catclaw.toml)
@@ -1928,6 +1931,7 @@ CatClaw integrates Instagram via the Social Inbox subsystem — a separate pipel
 mode = "polling"                           # "polling" | "webhook" | "off"
 poll_interval_mins = 5
 token_env = "INSTAGRAM_TOKEN"              # env var name (not the value)
+app_id = "123456789"                       # App ID for token exchange (optional but recommended)
 app_secret_env = "INSTAGRAM_APP_SECRET"
 user_id = "17841412345678"
 admin_channel = "discord:channel:123456"  # forward cards destination
@@ -2050,8 +2054,9 @@ CatClaw integrates Threads via the Social Inbox subsystem. Events (replies, ment
 
 ## Prerequisites
 
-- **Threads OAuth Token** from Meta Developer Console (expires every 60 days — refresh before expiry)
-- **App Secret** for HMAC webhook verification
+- **Threads OAuth Token** — short-lived (~1h) or long-lived (60-day). CatClaw **auto-exchanges short-lived tokens for long-lived ones** at startup if `app_id` + `app_secret_env` are set, and auto-refreshes daily.
+- **App ID** from Meta Developer Console (required for short-lived → long-lived exchange)
+- **App Secret** for HMAC webhook verification + token exchange
 - Threads User ID
 
 ## Config (catclaw.toml)
@@ -2061,6 +2066,7 @@ CatClaw integrates Threads via the Social Inbox subsystem. Events (replies, ment
 mode = "polling"                           # "polling" | "webhook" | "off"
 poll_interval_mins = 3
 token_env = "THREADS_TOKEN"
+app_id = "123456789"                       # App ID for token exchange (optional but recommended)
 app_secret_env = "THREADS_APP_SECRET"
 user_id = "12345678"
 admin_channel = "slack:channel:C0A9FFY7QAZ"
@@ -2082,15 +2088,13 @@ action = "ignore"
 thanks = "Thank you for your reply!"
 ```
 
-## Token Refresh
+## Token Management (Automatic)
 
-Threads tokens expire every 60 days. Refresh with:
+CatClaw automatically manages Threads tokens:
+- **Short-lived → long-lived exchange**: On gateway startup, if a short-lived token is detected and `app_id` + `app_secret_env` are set, the token is exchanged automatically and saved to `~/.catclaw/.env`.
+- **Daily refresh**: The scheduler runs a token check every 24 hours and refreshes before expiry.
 
-```bash
-curl -s "https://graph.threads.net/refresh_access_token?grant_type=th_refresh_token&access_token=$THREADS_TOKEN"
-```
-
-Update your env var before expiry to avoid polling failures.
+No manual curl refresh needed as long as `app_id` and `app_secret_env` are configured.
 
 ## Mode: Polling
 

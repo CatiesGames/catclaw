@@ -196,7 +196,7 @@ fn parse_event(value: &serde_json::Value) -> ClaudeEvent {
 
             // If result is empty, log the raw JSON for debugging
             if result.is_empty() {
-                warn!("claude result event has empty result, raw JSON: {}", value);
+                warn!(raw_json = %value, "claude result event has empty result");
             }
             if is_error {
                 // Extract error details — result field contains the error message
@@ -327,7 +327,7 @@ impl ClaudeHandle {
             while let Ok(Some(line)) = lines.next_line().await {
                 let line = line.trim().to_string();
                 if !line.is_empty() {
-                    warn!("claude stderr: {}", line);
+                    warn!(line = %line, "claude stderr");
                 }
             }
             info!("claude stderr reader ended");
@@ -423,7 +423,7 @@ impl ClaudeHandle {
             while let Ok(Some(line)) = lines.next_line().await {
                 let line = line.trim().to_string();
                 if !line.is_empty() {
-                    warn!("claude stderr: {}", line);
+                    warn!(line = %line, "claude stderr");
                 }
             }
             info!("claude stderr reader ended");

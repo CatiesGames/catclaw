@@ -1235,7 +1235,7 @@ fn handle_social_poll(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
                 tokio::spawn(async move {
                     match crate::social::poller::poll_instagram(&ig, &db2).await {
                         Ok(items) => { for item in items { let _ = tx2.send(item); } }
-                        Err(e) => warn!("manual poll instagram failed: {}", e),
+                        Err(e) => warn!(error = %e, "manual poll instagram failed"),
                     }
                 });
             }
@@ -1248,7 +1248,7 @@ fn handle_social_poll(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
                 tokio::spawn(async move {
                     match crate::social::poller::poll_threads(&th, &db).await {
                         Ok(items) => { for item in items { let _ = tx.send(item); } }
-                        Err(e) => warn!("manual poll threads failed: {}", e),
+                        Err(e) => warn!(error = %e, "manual poll threads failed"),
                     }
                 });
             }

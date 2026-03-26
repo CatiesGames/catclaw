@@ -114,7 +114,7 @@ pub fn resolve_action(
                 return ResolvedAction::AutoReplyTemplate { template_name, text };
             }
             unknown => {
-                warn!("unknown social rule action '{}', skipping", unknown);
+                warn!(action = unknown, "unknown social rule action, skipping");
             }
         }
     }

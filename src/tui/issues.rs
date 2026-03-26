@@ -32,6 +32,7 @@ pub struct IssuesPanel {
     client: Arc<GatewayClient>,
     items: Vec<IssueItem>,
     selected: usize,
+    table_state: TableState,
     event_rx: mpsc::UnboundedReceiver<IssuesEvent>,
     event_tx: mpsc::UnboundedSender<IssuesEvent>,
     loaded: bool,
@@ -45,6 +46,7 @@ impl IssuesPanel {
             client,
             items: Vec::new(),
             selected: 0,
+            table_state: TableState::default(),
             event_rx,
             event_tx,
             loaded: false,
@@ -123,6 +125,7 @@ impl IssuesPanel {
                     if self.selected >= self.items.len() && !self.items.is_empty() {
                         self.selected = self.items.len() - 1;
                     }
+                    self.table_state.select(if self.items.is_empty() { None } else { Some(self.selected) });
                     self.status_msg = None;
                 }
                 IssuesEvent::ActionDone(msg) => {
@@ -149,10 +152,12 @@ impl Component for IssuesPanel {
             KeyCode::Char('j') | KeyCode::Down => {
                 if !self.items.is_empty() {
                     self.selected = (self.selected + 1).min(self.items.len() - 1);
+                    self.table_state.select(Some(self.selected));
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
+                self.table_state.select(Some(self.selected));
             }
             KeyCode::Char('i') => self.action_ignore(),
             KeyCode::Char('d') | KeyCode::Char('x') => self.action_resolve(),
@@ -179,13 +184,8 @@ impl Component for IssuesPanel {
             .style(Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD))
             .bottom_margin(1);
 
-        let rows: Vec<Row> = self.items.iter().enumerate().map(|(i, item)| {
-            let is_sel = i == self.selected;
-            let row_style = if is_sel {
-                Style::default().fg(Theme::TEXT).bg(Theme::SURFACE0)
-            } else {
-                Style::default().fg(Theme::SUBTEXT0)
-            };
+        let rows: Vec<Row> = self.items.iter().map(|item| {
+            let row_style = Style::default().fg(Theme::SUBTEXT0);
             let level_style = match item.level.as_str() {
                 "ERROR" => Style::default().fg(Theme::RED),
                 "WARN" => Style::default().fg(Theme::YELLOW),
@@ -226,6 +226,7 @@ impl Component for IssuesPanel {
             ],
         )
         .header(header)
+        .row_highlight_style(Style::default().fg(Theme::TEXT).bg(Theme::SURFACE0))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -234,7 +235,7 @@ impl Component for IssuesPanel {
                 .title_style(Style::default().fg(Theme::RED)),
         );
 
-        frame.render_widget(table, chunks[0]);
+        frame.render_stateful_widget(table, chunks[0], &mut self.table_state);
 
         let status = if let Some(msg) = &self.status_msg {
             Paragraph::new(format!(" {}", msg))

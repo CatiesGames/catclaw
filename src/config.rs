@@ -39,6 +39,10 @@ pub struct InstagramConfig {
     /// Env var holding the Instagram System User Access Token
     pub token_env: String,
 
+    /// App ID (client_id) for short-lived → long-lived token exchange
+    #[serde(default)]
+    pub app_id: Option<String>,
+
     /// Env var holding the App Secret (for webhook HMAC-SHA256 signature verification)
     #[serde(default)]
     pub app_secret_env: Option<String>,
@@ -86,6 +90,10 @@ pub struct ThreadsConfig {
 
     /// Env var holding the Threads OAuth access token (60-day long-lived)
     pub token_env: String,
+
+    /// App ID (client_id) for short-lived → long-lived token exchange
+    #[serde(default)]
+    pub app_id: Option<String>,
 
     /// Env var holding the App Secret (for webhook HMAC-SHA256 signature verification)
     #[serde(default)]
@@ -613,6 +621,7 @@ impl Config {
             "social.instagram.user_id" => Ok(self.social.instagram.as_ref().map(|c| c.user_id.clone()).unwrap_or_default()),
             "social.instagram.admin_channel" => Ok(self.social.instagram.as_ref().map(|c| c.admin_channel.clone()).unwrap_or_default()),
             "social.instagram.token_env" => Ok(self.social.instagram.as_ref().map(|c| c.token_env.clone()).unwrap_or_default()),
+            "social.instagram.app_id" => Ok(self.social.instagram.as_ref().and_then(|c| c.app_id.clone()).unwrap_or_default()),
             "social.instagram.app_secret_env" => Ok(self.social.instagram.as_ref().and_then(|c| c.app_secret_env.clone()).unwrap_or_default()),
             "social.instagram.webhook_verify_token_env" => Ok(self.social.instagram.as_ref().and_then(|c| c.webhook_verify_token_env.clone()).unwrap_or_default()),
             "social.instagram.subscribe" => Ok(self.social.instagram.as_ref().map(|c| c.subscribe.join(",")).unwrap_or_default()),
@@ -623,6 +632,7 @@ impl Config {
             "social.threads.user_id" => Ok(self.social.threads.as_ref().map(|c| c.user_id.clone()).unwrap_or_default()),
             "social.threads.admin_channel" => Ok(self.social.threads.as_ref().map(|c| c.admin_channel.clone()).unwrap_or_default()),
             "social.threads.token_env" => Ok(self.social.threads.as_ref().map(|c| c.token_env.clone()).unwrap_or_default()),
+            "social.threads.app_id" => Ok(self.social.threads.as_ref().and_then(|c| c.app_id.clone()).unwrap_or_default()),
             "social.threads.app_secret_env" => Ok(self.social.threads.as_ref().and_then(|c| c.app_secret_env.clone()).unwrap_or_default()),
             "social.threads.webhook_verify_token_env" => Ok(self.social.threads.as_ref().and_then(|c| c.webhook_verify_token_env.clone()).unwrap_or_default()),
             "social.threads.subscribe" => Ok(self.social.threads.as_ref().map(|c| c.subscribe.join(",")).unwrap_or_default()),
@@ -849,6 +859,14 @@ impl Config {
                     Err(CatClawError::Config("social.instagram is not configured".into()))
                 }
             }
+            "social.instagram.app_id" => {
+                if let Some(ref mut ig) = self.social.instagram {
+                    ig.app_id = if value.is_empty() { None } else { Some(value.to_string()) };
+                    Ok(false)
+                } else {
+                    Err(CatClawError::Config("social.instagram is not configured".into()))
+                }
+            }
             "social.instagram.app_secret_env" => {
                 if let Some(ref mut ig) = self.social.instagram {
                     ig.app_secret_env = if value.is_empty() { None } else { Some(value.to_string()) };
@@ -915,6 +933,7 @@ impl Config {
                         mode: "off".to_string(),
                         poll_interval_mins: 5,
                         token_env: "CATCLAW_INSTAGRAM_TOKEN".to_string(),
+                        app_id: None,
                         app_secret_env: Some("CATCLAW_INSTAGRAM_APP_SECRET".to_string()),
                         webhook_verify_token_env: Some("CATCLAW_INSTAGRAM_WEBHOOK_VERIFY_TOKEN".to_string()),
                         user_id: String::new(),
@@ -937,6 +956,14 @@ impl Config {
                 if let Some(ref mut th) = self.social.threads {
                     th.token_env = value.to_string();
                     Ok(true)
+                } else {
+                    Err(CatClawError::Config("social.threads is not configured".into()))
+                }
+            }
+            "social.threads.app_id" => {
+                if let Some(ref mut th) = self.social.threads {
+                    th.app_id = if value.is_empty() { None } else { Some(value.to_string()) };
+                    Ok(false)
                 } else {
                     Err(CatClawError::Config("social.threads is not configured".into()))
                 }
@@ -1007,6 +1034,7 @@ impl Config {
                         mode: "off".to_string(),
                         poll_interval_mins: 5,
                         token_env: "CATCLAW_THREADS_TOKEN".to_string(),
+                        app_id: None,
                         app_secret_env: Some("CATCLAW_THREADS_APP_SECRET".to_string()),
                         webhook_verify_token_env: Some("CATCLAW_THREADS_WEBHOOK_VERIFY_TOKEN".to_string()),
                         user_id: String::new(),
@@ -1181,6 +1209,31 @@ fn parse_bool(value: &str) -> Result<bool> {
         "false" | "0" | "no" => Ok(false),
         _ => Err(CatClawError::Config("invalid boolean (use true/false)".into())),
     }
+}
+
+/// Write or update a single `KEY=value` line in `~/.catclaw/.env`.
+/// Also updates the current process environment.
+pub fn write_env_var(env_var: &str, value: &str) {
+    let env_path = {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(home).join(".catclaw").join(".env")
+    };
+    let mut lines: Vec<String> = if env_path.exists() {
+        std::fs::read_to_string(&env_path).unwrap_or_default().lines().map(String::from).collect()
+    } else {
+        Vec::new()
+    };
+    let prefix = format!("{}=", env_var);
+    if let Some(pos) = lines.iter().position(|l| l.starts_with(&prefix)) {
+        lines[pos] = format!("{}={}", env_var, value);
+    } else {
+        lines.push(format!("{}={}", env_var, value));
+    }
+    if let Some(parent) = env_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&env_path, lines.join("\n") + "\n");
+    std::env::set_var(env_var, value);
 }
 
 fn split_csv(value: &str) -> Vec<String> {

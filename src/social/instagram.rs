@@ -106,6 +106,74 @@ impl InstagramClient {
         check_error(val)
     }
 
+    // ── Token management ──────────────────────────────────────────────────────
+
+    /// Check how many seconds until the token expires.
+    /// Returns 0 if the token never expires (System User Token).
+    pub async fn check_token_expiry(token: &str) -> Result<i64> {
+        let http = Client::new();
+        let resp = http.get("https://graph.facebook.com/v25.0/debug_token")
+            .query(&[("input_token", token), ("access_token", token)])
+            .send().await
+            .map_err(|e| CatClawError::Social(format!("instagram http error: {e}")))?;
+        let val: Value = resp.json().await
+            .map_err(|e| CatClawError::Social(format!("instagram json error: {e}")))?;
+        let val = check_error(val)?;
+        let expires_in = val
+            .get("data")
+            .and_then(|d| d.get("expires_at"))
+            .and_then(|v| v.as_i64())
+            .map(|expires_at| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                expires_at - now
+            })
+            .unwrap_or(0);
+        Ok(expires_in)
+    }
+
+    /// Exchange a short-lived token for a long-lived token (60 days).
+    pub async fn exchange_token(app_id: &str, app_secret: &str, short_token: &str) -> Result<String> {
+        let http = Client::new();
+        let resp = http.get("https://graph.facebook.com/v25.0/oauth/access_token")
+            .query(&[
+                ("grant_type", "fb_exchange_token"),
+                ("client_id", app_id),
+                ("client_secret", app_secret),
+                ("fb_exchange_token", short_token),
+            ])
+            .send().await
+            .map_err(|e| CatClawError::Social(format!("instagram http error: {e}")))?;
+        let val: Value = resp.json().await
+            .map_err(|e| CatClawError::Social(format!("instagram json error: {e}")))?;
+        let val = check_error(val)?;
+        val.get("access_token")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| CatClawError::Social("instagram: no access_token in exchange response".into()))
+    }
+
+    /// Refresh a long-lived token before it expires (returns a new long-lived token).
+    pub async fn refresh_token(token: &str) -> Result<String> {
+        let http = Client::new();
+        let resp = http.get("https://graph.facebook.com/v25.0/oauth/access_token")
+            .query(&[
+                ("grant_type", "ig_refresh_token"),
+                ("access_token", token),
+            ])
+            .send().await
+            .map_err(|e| CatClawError::Social(format!("instagram http error: {e}")))?;
+        let val: Value = resp.json().await
+            .map_err(|e| CatClawError::Social(format!("instagram json error: {e}")))?;
+        let val = check_error(val)?;
+        val.get("access_token")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| CatClawError::Social("instagram: no access_token in refresh response".into()))
+    }
+
     pub async fn get_insights(&self, metric: &str, period: &str) -> Result<Value> {
         let url = format!(
             "{}/{}/insights?metric={}&period={}",

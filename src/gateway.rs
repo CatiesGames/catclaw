@@ -358,6 +358,15 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         info!("social ingest pipeline started");
     }
 
+    // Startup token check: exchange short-lived tokens for long-lived ones.
+    {
+        let token_config = gw_config.clone();
+        let token_db = state_db.clone();
+        tokio::spawn(async move {
+            crate::scheduler::startup_token_check(&token_config, &token_db).await;
+        });
+    }
+
     // Startup catchup poll: regardless of mode, run one poll on launch to recover
     // any events that arrived while the gateway was offline (webhook gap recovery).
     {

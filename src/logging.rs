@@ -109,7 +109,7 @@ pub fn init_logging(log_dir: &Path, level: &str) {
 
     // Build the filter from RUST_LOG env or config level, wrapped in reload layer
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+        .unwrap_or_else(|_| build_filter(level));
     let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(filter);
 
     tracing_subscriber::registry()
@@ -141,7 +141,7 @@ pub fn init_file_only_logging(log_dir: &Path, level: &str) {
         .with_ansi(false);
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+        .unwrap_or_else(|_| build_filter(level));
     let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(filter);
 
     tracing_subscriber::registry()
@@ -152,6 +152,23 @@ pub fn init_file_only_logging(log_dir: &Path, level: &str) {
     let _ = RELOAD_HANDLE.set(reload_handle);
 }
 
+/// Build an EnvFilter directive that applies `level` to catclaw code but suppresses
+/// verbose output from noisy third-party crates (serenity, hyper, reqwest, etc.).
+/// When RUST_LOG is set, it takes full precedence over this function.
+fn build_filter(level: &str) -> EnvFilter {
+    // At debug/trace, third-party crates produce enormous output (Discord gateway
+    // frames, HTTP internals, TLS handshakes). Cap them at warn.
+    let directive = match level.to_lowercase().as_str() {
+        "debug" | "trace" => format!(
+            "{level},serenity=warn,poise=warn,tracing=warn,hyper=warn,hyper_util=warn,\
+             reqwest=warn,h2=warn,rustls=warn,tokio_tungstenite=warn,tungstenite=warn,\
+             teloxide=warn,tower=warn"
+        ),
+        _ => level.to_string(),
+    };
+    EnvFilter::try_new(&directive).unwrap_or_else(|_| EnvFilter::new(level))
+}
+
 /// Change the active log level filter at runtime.
 /// Only works if `init_logging` or `init_file_only_logging` was called first.
 /// Returns Ok(()) on success, Err if the level string is invalid or no handle is available.
@@ -160,6 +177,7 @@ pub fn set_log_level(level: &str) -> std::result::Result<(), String> {
         .get()
         .ok_or_else(|| "logging not initialized with reload support".to_string())?;
     let new_filter = EnvFilter::try_new(level)
+        .map(|_| build_filter(level))
         .map_err(|e| format!("invalid log level '{}': {}", level, e))?;
     handle
         .reload(new_filter)

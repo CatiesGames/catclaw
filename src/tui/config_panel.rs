@@ -290,6 +290,7 @@ impl ConfigPanel {
             entries.push(ConfigEntry { key: "social.instagram.admin_channel".to_string(), value: ig.admin_channel.clone(), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.instagram.subscribe".to_string(), value: ig.subscribe.join(","), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.instagram.agent".to_string(), value: ig.agent.clone(), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.instagram.app_id".to_string(), value: ig.app_id.clone().unwrap_or_default(), section: sec.to_string(), editable: true });
             {
                 let env = ig.app_secret_env.clone().unwrap_or_default();
                 let sec_val = if env.is_empty() { "(not set)".to_string() } else { std::env::var(&env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string()) };
@@ -332,6 +333,7 @@ impl ConfigPanel {
             entries.push(ConfigEntry { key: "social.threads.admin_channel".to_string(), value: th.admin_channel.clone(), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.threads.subscribe".to_string(), value: th.subscribe.join(","), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.threads.agent".to_string(), value: th.agent.clone(), section: sec.to_string(), editable: true });
+            entries.push(ConfigEntry { key: "social.threads.app_id".to_string(), value: th.app_id.clone().unwrap_or_default(), section: sec.to_string(), editable: true });
             {
                 let env = th.app_secret_env.clone().unwrap_or_default();
                 let sec_val = if env.is_empty() { "(not set)".to_string() } else { std::env::var(&env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string()) };

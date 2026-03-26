@@ -103,6 +103,10 @@ pub async fn run(
     let mut next_th_poll = th_poll_interval
         .map(|m| now + chrono::Duration::minutes(m as i64))
         .unwrap_or(DateTime::<Utc>::MAX_UTC);
+    // Token refresh check runs once per day.
+    // Token check: run once at startup (exchange short-lived), then every 24h for IG expiry.
+    // Threads refresh cadence (30-day) is tracked in the DB via social_cursors.
+    let mut next_token_check = now;
 
     loop {
         interval.tick().await;
@@ -168,12 +172,162 @@ pub async fn run(
             }
         }
 
+        // ── System: Social token refresh ──
+        if now >= next_token_check {
+            if let Some(ref sc) = config.social_config {
+                check_token_refresh(sc, &state_db).await;
+            }
+            next_token_check = now + chrono::Duration::hours(24);
+        }
+
         // ── System: Diary extraction ──
         check_diary_extraction(&state_db, &agent_registry, &diary_in_flight).await;
 
         // ── User tasks from DB ──
         if let Err(e) = tick_user_tasks(&state_db, &agent_registry, &session_manager, &now).await {
             error!(error = %e, "scheduler: user task tick failed");
+        }
+    }
+}
+
+/// Called at gateway startup: exchange short-lived tokens for long-lived ones.
+/// Does NOT refresh Threads long-lived tokens (that's the 30-day scheduler job).
+pub async fn startup_token_check(
+    config: &std::sync::RwLock<crate::config::Config>,
+    state_db: &crate::state::StateDb,
+) {
+    let (ig_cfg, th_cfg) = {
+        let cfg = config.read().unwrap();
+        (cfg.social.instagram.clone(), cfg.social.threads.clone())
+    };
+
+    // Instagram: check expiry and exchange if short-lived.
+    if let Some(ig) = ig_cfg {
+        if let Ok(current_token) = std::env::var(&ig.token_env) {
+            match crate::social::instagram::InstagramClient::check_token_expiry(&current_token).await {
+                Ok(0) => debug!("instagram token: permanent, no action needed"),
+                Ok(expires_in) if expires_in < 86400 => {
+                    // Short-lived — exchange for long-lived
+                    if let (Some(app_id), Some(app_secret_env)) = (&ig.app_id, &ig.app_secret_env) {
+                        if let Ok(app_secret) = std::env::var(app_secret_env) {
+                            match crate::social::instagram::InstagramClient::exchange_token(app_id, &app_secret, &current_token).await {
+                                Ok(new_token) => {
+                                    crate::config::write_env_var(&ig.token_env, &new_token);
+                                    info!("instagram token: exchanged short-lived for long-lived");
+                                }
+                                Err(e) => warn!(error = %e, "instagram token exchange failed"),
+                            }
+                        } else {
+                            warn!("instagram token: short-lived but {} not set in env", app_secret_env);
+                        }
+                    } else {
+                        warn!("instagram token: short-lived but app_id/app_secret_env not configured, cannot exchange");
+                    }
+                }
+                Ok(_) => debug!("instagram token: long-lived, no startup action needed"),
+                Err(e) => warn!(error = %e, "instagram token expiry check failed"),
+            }
+        }
+    }
+
+    // Threads: only exchange if short-lived (identified by trying exchange and succeeding).
+    // Long-lived refresh is handled separately by the 30-day scheduler job.
+    if let Some(th) = th_cfg {
+        if let Ok(current_token) = std::env::var(&th.token_env) {
+            if let (Some(app_id), Some(app_secret_env)) = (&th.app_id, &th.app_secret_env) {
+                if let Ok(app_secret) = std::env::var(app_secret_env) {
+                    match crate::social::threads::ThreadsClient::exchange_token(app_id, &app_secret, &current_token).await {
+                        Ok(new_token) if new_token != current_token => {
+                            crate::config::write_env_var(&th.token_env, &new_token);
+                            // Record refresh time so the 30-day timer starts from now.
+                            let _ = state_db.upsert_social_cursor("threads", "token_refresh_at", &Utc::now().to_rfc3339());
+                            info!("threads token: exchanged short-lived for long-lived");
+                        }
+                        Ok(_) => debug!("threads token: exchange returned same token, already long-lived"),
+                        Err(e) => debug!(error = %e, "threads token exchange skipped (likely already long-lived)"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Periodic token refresh (called every 24h by the scheduler).
+/// - Instagram: check expiry via debug_token API, refresh if < 30 days remaining.
+/// - Threads: refresh every 30 days (tracked in social_cursors).
+pub async fn check_token_refresh(
+    config: &std::sync::RwLock<crate::config::Config>,
+    state_db: &crate::state::StateDb,
+) {
+    let (ig_cfg, th_cfg) = {
+        let cfg = config.read().unwrap();
+        (cfg.social.instagram.clone(), cfg.social.threads.clone())
+    };
+
+    // Instagram: use debug_token to check exact expiry.
+    if let Some(ig) = ig_cfg {
+        if let Ok(current_token) = std::env::var(&ig.token_env) {
+            match crate::social::instagram::InstagramClient::check_token_expiry(&current_token).await {
+                Ok(0) => debug!("instagram token: permanent, no refresh needed"),
+                Ok(expires_in) if expires_in < 86400 => {
+                    // Still short-lived (exchange hadn't happened yet or failed at startup)
+                    if let (Some(app_id), Some(app_secret_env)) = (&ig.app_id, &ig.app_secret_env) {
+                        if let Ok(app_secret) = std::env::var(app_secret_env) {
+                            match crate::social::instagram::InstagramClient::exchange_token(app_id, &app_secret, &current_token).await {
+                                Ok(new_token) => {
+                                    crate::config::write_env_var(&ig.token_env, &new_token);
+                                    info!("instagram token: exchanged short-lived for long-lived");
+                                }
+                                Err(e) => warn!(error = %e, "instagram token exchange failed"),
+                            }
+                        }
+                    }
+                }
+                Ok(expires_in) if expires_in < 30 * 86400 => {
+                    // Long-lived but < 30 days remaining — refresh now
+                    match crate::social::instagram::InstagramClient::refresh_token(&current_token).await {
+                        Ok(new_token) => {
+                            crate::config::write_env_var(&ig.token_env, &new_token);
+                            info!(expires_in, "instagram token: refreshed (expiring soon)");
+                        }
+                        Err(e) => warn!(error = %e, "instagram token refresh failed"),
+                    }
+                }
+                Ok(_) => debug!("instagram token: valid, no refresh needed"),
+                Err(e) => warn!(error = %e, "instagram token expiry check failed"),
+            }
+        }
+    }
+
+    // Threads: no expiry API — refresh every 30 days, tracked in social_cursors.
+    if let Some(th) = th_cfg {
+        if let Ok(current_token) = std::env::var(&th.token_env) {
+            let should_refresh = match state_db.get_social_cursor("threads", "token_refresh_at") {
+                Ok(Some(last_refresh_str)) => {
+                    match last_refresh_str.parse::<chrono::DateTime<Utc>>() {
+                        Ok(last_refresh) => Utc::now() - last_refresh >= chrono::Duration::days(30),
+                        Err(_) => true, // Corrupt timestamp — refresh to be safe
+                    }
+                }
+                Ok(None) => true, // Never refreshed — do it now
+                Err(e) => {
+                    warn!(error = %e, "threads token: could not read last refresh time");
+                    false
+                }
+            };
+
+            if should_refresh {
+                match crate::social::threads::ThreadsClient::refresh_token(&current_token).await {
+                    Ok(new_token) => {
+                        crate::config::write_env_var(&th.token_env, &new_token);
+                        let _ = state_db.upsert_social_cursor("threads", "token_refresh_at", &Utc::now().to_rfc3339());
+                        info!("threads token: refreshed (30-day renewal)");
+                    }
+                    Err(e) => warn!(error = %e, "threads token refresh failed"),
+                }
+            } else {
+                debug!("threads token: not yet due for refresh");
+            }
         }
     }
 }
@@ -812,10 +966,14 @@ impl LogIssue {
     fn key(level: &str, target: &str, msg: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
+        // All warn!/error! calls use structured fields for dynamic values, so msg
+        // should be fully static. As a safety net, strip everything after ": " in
+        // case any call site still embeds a dynamic value directly in the message.
+        let msg_prefix = msg.split_once(": ").map(|(p, _)| p).unwrap_or(msg);
         let mut h = DefaultHasher::new();
         level.hash(&mut h);
         target.hash(&mut h);
-        msg.hash(&mut h);
+        msg_prefix.hash(&mut h);
         format!("{:016x}", h.finish())[..8].to_string()
     }
 }

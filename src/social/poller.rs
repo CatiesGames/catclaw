@@ -29,7 +29,7 @@ pub async fn poll_instagram(cfg: &InstagramConfig, db: &StateDb) -> Result<Vec<S
                 items.extend(new_items);
             }
             unknown => {
-                warn!("instagram: unknown subscribe feed '{}', skipping", unknown);
+                warn!(feed = unknown, "instagram: unknown subscribe feed, skipping");
             }
         }
     }
@@ -53,7 +53,7 @@ pub async fn poll_threads(cfg: &ThreadsConfig, db: &StateDb) -> Result<Vec<Socia
                 items.extend(new_items);
             }
             unknown => {
-                warn!("threads: unknown subscribe feed '{}', skipping", unknown);
+                warn!(feed = unknown, "threads: unknown subscribe feed, skipping");
             }
         }
     }
