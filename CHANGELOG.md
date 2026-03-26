@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.23.1](https://github.com/CatiesGames/catclaw/compare/v0.23.0...v0.23.1) (2026-03-26)
+
+
+### Bug Fixes
+
+* Instagram Login token 支援（IG... 前綴 → graph.instagram.com） ([84e19f1](https://github.com/CatiesGames/catclaw/commit/84e19f18912b41b49f44f1333acc3b22a778f4d9))
+* TUI token 編輯後即時更新 + 到期日內嵌顯示 + config set 自動 exchange ([e13d1f4](https://github.com/CatiesGames/catclaw/commit/e13d1f46b76f461b935d20607e59c09a0a9eb2c9))
+
 ## [0.23.0](https://github.com/CatiesGames/catclaw/compare/v0.22.0...v0.23.0) (2026-03-26)
 
 
