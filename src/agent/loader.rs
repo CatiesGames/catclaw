@@ -1522,10 +1522,21 @@ catclaw task delete <id|name>             # Remove a task
 ```
 
 Scheduling options (pick one, mutually exclusive):
-- `--at "<time>"` — Run once at an absolute time. Times without timezone use the gateway's local timezone (ISO 8601: `2026-03-20T09:00:00`, RFC 3339, or `HH:MM` / `HH:MM:SS` for today)
+- `--at "<time>"` — Run once at an absolute time. Times without timezone use `config.general.timezone` (falls back to system local). (ISO 8601: `2026-03-20T09:00:00`, RFC 3339, or `HH:MM` / `HH:MM:SS` for today)
 - `--in-mins <N>` — Run once after N minutes
-- `--cron "<expr>"` — Cron expression (e.g. `"0 9 * * *"` = daily at 9am)
+- `--cron "<expr>"` — Cron expression. **Always evaluated in UTC.** (e.g. `"0 9 * * *"` = daily at 09:00 UTC)
 - `--every <N>` — Repeat every N minutes
+
+### Cron Timezone Conversion (IMPORTANT)
+
+**Cron expressions are always evaluated in UTC.** When a user asks for a cron task at a local time, you MUST convert to UTC first.
+
+Steps:
+1. Run `catclaw config get general.timezone` to get the configured timezone (e.g. `Asia/Taipei`).
+2. Convert the user's desired local time to UTC. Example: user wants 09:00 Asia/Taipei (UTC+8) → UTC 01:00 → cron `0 1 * * *`.
+3. Confirm to the user: "Scheduled at 09:00 Asia/Taipei (01:00 UTC), cron: `0 1 * * *`."
+
+If `general.timezone` is not set, ask the user for their timezone before creating a cron task.
 
 ### Scheduling Best Practices
 
@@ -1540,9 +1551,9 @@ Reminder:
 catclaw task add "提醒開會" --agent main --prompt "Send a reminder to the user: 下午三點有會議。Use the appropriate CatClaw MCP send tool to deliver the message."  --at "14:55"
 ```
 
-Daily digest:
+Daily digest (user timezone Asia/Taipei = UTC+8, 18:00 local = 10:00 UTC):
 ```bash
-catclaw task add "日報" --agent main --prompt "Summarize today's activity and post to the user via the appropriate CatClaw MCP send tool." --cron "0 18 * * *"
+catclaw task add "日報" --agent main --prompt "Summarize today's activity and post to the user via the appropriate CatClaw MCP send tool." --cron "0 10 * * *"
 ```
 
 **Prompt context:** The `--prompt` should contain the complete instruction — what to do, where to send it, and any relevant context. When the task triggers, a new independent session runs the prompt; it has no memory of the original conversation. The agent will automatically discover available channel tools from its MCP server.

@@ -114,7 +114,7 @@ impl TasksPanel {
 
     fn format_schedule(task: &TaskInfo) -> String {
         if let Some(ref cron) = task.cron_expr {
-            format!("cron: {}", cron)
+            format!("cron: {} (UTC)", cron)
         } else if let Some(mins) = task.interval_mins {
             if mins >= 1440 {
                 format!("every {}d", mins / 1440)

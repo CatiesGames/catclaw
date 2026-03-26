@@ -2864,7 +2864,7 @@ fn cmd_task_list(state_db: &StateDb) -> Result<()> {
     for t in &tasks {
         let status = if t.enabled { "on" } else { "off" };
         let schedule = if let Some(ref cron) = t.cron_expr {
-            format!("cron: {}", cron)
+            format!("cron: {} (UTC)", cron)
         } else if let Some(mins) = t.interval_mins {
             if mins >= 1440 {
                 format!("every {}d", mins / 1440)
@@ -3057,8 +3057,8 @@ fn cmd_task_add(
     println!("  Agent: {}", agent);
     println!("  Next run: {}", next_display);
 
-    if cron.is_some() {
-        println!("  Schedule: cron");
+    if let Some(ref cron_expr) = cron {
+        println!("  Schedule: cron {} (UTC — cron expressions are always evaluated in UTC)", cron_expr);
     } else if every.is_some() {
         println!("  Schedule: every {} min", every.unwrap());
     } else {
