@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/CatiesGames/catclaw/compare/v0.22.0...v0.23.0) (2026-03-26)
+
+
+### Features
+
+* config set token 後自動 exchange + TUI 顯示 token 到期日 ([73c9aeb](https://github.com/CatiesGames/catclaw/commit/73c9aebc80a8be11c5288dfdf18fcfb227ae0506))
+
 ## [0.22.0](https://github.com/CatiesGames/catclaw/compare/v0.21.0...v0.22.0) (2026-03-26)
 
 
