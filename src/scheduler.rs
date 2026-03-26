@@ -190,12 +190,35 @@ pub async fn run(
     }
 }
 
+/// Store token expiry in both DB (persists across restarts) and env var (TUI display).
+fn set_token_expiry(state_db: &crate::state::StateDb, platform: &str, value: &str) {
+    let _ = state_db.upsert_social_cursor(platform, "token_expires_at", value);
+    let env_key = format!("CATCLAW_{}_TOKEN_EXPIRES_AT", platform.to_uppercase());
+    // Format for human display: "2026-05-25" or "permanent"
+    let display = if value == "permanent" {
+        "permanent".to_string()
+    } else if let Ok(dt) = value.parse::<chrono::DateTime<Utc>>() {
+        let days = (dt - Utc::now()).num_days();
+        format!("{} ({}d left)", dt.format("%Y-%m-%d"), days)
+    } else {
+        value.to_string()
+    };
+    std::env::set_var(&env_key, &display);
+}
+
 /// Called at gateway startup: exchange short-lived tokens for long-lived ones.
 /// Does NOT refresh Threads long-lived tokens (that's the 30-day scheduler job).
 pub async fn startup_token_check(
     config: &std::sync::RwLock<crate::config::Config>,
     state_db: &crate::state::StateDb,
 ) {
+    // Restore cached expiry env vars from DB (so TUI shows them before first API check)
+    for platform in &["instagram", "threads"] {
+        if let Ok(Some(val)) = state_db.get_social_cursor(platform, "token_expires_at") {
+            set_token_expiry(state_db, platform, &val);
+        }
+    }
+
     let (ig_cfg, th_cfg) = {
         let cfg = config.read().unwrap();
         (cfg.social.instagram.clone(), cfg.social.threads.clone())
@@ -205,7 +228,10 @@ pub async fn startup_token_check(
     if let Some(ig) = ig_cfg {
         if let Ok(current_token) = std::env::var(&ig.token_env) {
             match crate::social::instagram::InstagramClient::check_token_expiry(&current_token).await {
-                Ok(0) => debug!("instagram token: permanent, no action needed"),
+                Ok(0) => {
+                    debug!("instagram token: permanent, no action needed");
+                    set_token_expiry(state_db, "instagram", "permanent");
+                }
                 Ok(expires_in) if expires_in < 86400 => {
                     // Short-lived — exchange for long-lived
                     if let (Some(app_id), Some(app_secret_env)) = (&ig.app_id, &ig.app_secret_env) {
@@ -213,6 +239,11 @@ pub async fn startup_token_check(
                             match crate::social::instagram::InstagramClient::exchange_token(app_id, &app_secret, &current_token).await {
                                 Ok(new_token) => {
                                     crate::config::write_env_var(&ig.token_env, &new_token);
+                                    // Re-check expiry of the new long-lived token
+                                    if let Ok(new_exp) = crate::social::instagram::InstagramClient::check_token_expiry(&new_token).await {
+                                        let expires_at = Utc::now() + chrono::Duration::seconds(new_exp);
+                                        set_token_expiry(state_db, "instagram", &expires_at.to_rfc3339());
+                                    }
                                     info!("instagram token: exchanged short-lived for long-lived");
                                 }
                                 Err(e) => warn!(error = %e, "instagram token exchange failed"),
@@ -224,7 +255,11 @@ pub async fn startup_token_check(
                         warn!("instagram token: short-lived but app_id/app_secret_env not configured, cannot exchange");
                     }
                 }
-                Ok(_) => debug!("instagram token: long-lived, no startup action needed"),
+                Ok(expires_in) => {
+                    let expires_at = Utc::now() + chrono::Duration::seconds(expires_in);
+                    set_token_expiry(state_db, "instagram", &expires_at.to_rfc3339());
+                    debug!("instagram token: long-lived, expires {}", expires_at.format("%Y-%m-%d"));
+                }
                 Err(e) => warn!(error = %e, "instagram token expiry check failed"),
             }
         }
@@ -241,9 +276,21 @@ pub async fn startup_token_check(
                             crate::config::write_env_var(&th.token_env, &new_token);
                             // Record refresh time so the 30-day timer starts from now.
                             let _ = state_db.upsert_social_cursor("threads", "token_refresh_at", &Utc::now().to_rfc3339());
+                            // Threads long-lived tokens are 60 days
+                            let expires_at = Utc::now() + chrono::Duration::days(60);
+                            set_token_expiry(state_db, "threads", &expires_at.to_rfc3339());
                             info!("threads token: exchanged short-lived for long-lived");
                         }
-                        Ok(_) => debug!("threads token: exchange returned same token, already long-lived"),
+                        Ok(_) => {
+                            // Already long-lived — estimate expiry from last refresh if known
+                            if let Ok(Some(last_refresh)) = state_db.get_social_cursor("threads", "token_refresh_at") {
+                                if let Ok(dt) = last_refresh.parse::<chrono::DateTime<Utc>>() {
+                                    let expires_at = dt + chrono::Duration::days(60);
+                                    set_token_expiry(state_db, "threads", &expires_at.to_rfc3339());
+                                }
+                            }
+                            debug!("threads token: exchange returned same token, already long-lived");
+                        }
                         Err(e) => debug!(error = %e, "threads token exchange skipped (likely already long-lived)"),
                     }
                 }
@@ -268,7 +315,10 @@ pub async fn check_token_refresh(
     if let Some(ig) = ig_cfg {
         if let Ok(current_token) = std::env::var(&ig.token_env) {
             match crate::social::instagram::InstagramClient::check_token_expiry(&current_token).await {
-                Ok(0) => debug!("instagram token: permanent, no refresh needed"),
+                Ok(0) => {
+                    set_token_expiry(state_db, "instagram", "permanent");
+                    debug!("instagram token: permanent, no refresh needed");
+                }
                 Ok(expires_in) if expires_in < 86400 => {
                     // Still short-lived (exchange hadn't happened yet or failed at startup)
                     if let (Some(app_id), Some(app_secret_env)) = (&ig.app_id, &ig.app_secret_env) {
@@ -276,6 +326,10 @@ pub async fn check_token_refresh(
                             match crate::social::instagram::InstagramClient::exchange_token(app_id, &app_secret, &current_token).await {
                                 Ok(new_token) => {
                                     crate::config::write_env_var(&ig.token_env, &new_token);
+                                    if let Ok(new_exp) = crate::social::instagram::InstagramClient::check_token_expiry(&new_token).await {
+                                        let expires_at = Utc::now() + chrono::Duration::seconds(new_exp);
+                                        set_token_expiry(state_db, "instagram", &expires_at.to_rfc3339());
+                                    }
                                     info!("instagram token: exchanged short-lived for long-lived");
                                 }
                                 Err(e) => warn!(error = %e, "instagram token exchange failed"),
@@ -288,12 +342,20 @@ pub async fn check_token_refresh(
                     match crate::social::instagram::InstagramClient::refresh_token(&current_token).await {
                         Ok(new_token) => {
                             crate::config::write_env_var(&ig.token_env, &new_token);
+                            if let Ok(new_exp) = crate::social::instagram::InstagramClient::check_token_expiry(&new_token).await {
+                                let expires_at = Utc::now() + chrono::Duration::seconds(new_exp);
+                                set_token_expiry(state_db, "instagram", &expires_at.to_rfc3339());
+                            }
                             info!(expires_in, "instagram token: refreshed (expiring soon)");
                         }
                         Err(e) => warn!(error = %e, "instagram token refresh failed"),
                     }
                 }
-                Ok(_) => debug!("instagram token: valid, no refresh needed"),
+                Ok(expires_in) => {
+                    let expires_at = Utc::now() + chrono::Duration::seconds(expires_in);
+                    set_token_expiry(state_db, "instagram", &expires_at.to_rfc3339());
+                    debug!("instagram token: valid, no refresh needed");
+                }
                 Err(e) => warn!(error = %e, "instagram token expiry check failed"),
             }
         }
@@ -321,6 +383,8 @@ pub async fn check_token_refresh(
                     Ok(new_token) => {
                         crate::config::write_env_var(&th.token_env, &new_token);
                         let _ = state_db.upsert_social_cursor("threads", "token_refresh_at", &Utc::now().to_rfc3339());
+                        let expires_at = Utc::now() + chrono::Duration::days(60);
+                        set_token_expiry(state_db, "threads", &expires_at.to_rfc3339());
                         info!("threads token: refreshed (30-day renewal)");
                     }
                     Err(e) => warn!(error = %e, "threads token refresh failed"),

@@ -911,6 +911,16 @@ fn handle_config_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         }
         std::env::set_var(&env_var_name, value);
         info!(key = %key, env_var = %env_var_name, "social secret updated in .env");
+
+        // Auto-exchange short-lived token → long-lived after token update
+        if matches!(key, "social.instagram.token_value" | "social.threads.token_value") {
+            let config = gw.config.clone();
+            let state_db = gw.state_db.clone();
+            tokio::spawn(async move {
+                crate::scheduler::startup_token_check(&config, &state_db).await;
+            });
+        }
+
         return WsResponse::ok(req.id, json!({"needs_restart": false, "key": key, "value": "***"}));
     }
 

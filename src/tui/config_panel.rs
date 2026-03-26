@@ -285,6 +285,8 @@ impl ConfigPanel {
             // token_value: display masked current value from env
             let tok_masked = std::env::var(&ig.token_env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
             entries.push(ConfigEntry { key: "social.instagram.token_value".to_string(), value: tok_masked, section: sec.to_string(), editable: true });
+            let expires = std::env::var("CATCLAW_INSTAGRAM_TOKEN_EXPIRES_AT").unwrap_or_else(|_| "(unknown)".to_string());
+            entries.push(ConfigEntry { key: "social.instagram.token_expires".to_string(), value: expires, section: sec.to_string(), editable: false });
             entries.push(ConfigEntry { key: "social.instagram.user_id".to_string(), value: ig.user_id.clone(), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.instagram.poll_interval_mins".to_string(), value: ig.poll_interval_mins.to_string(), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.instagram.admin_channel".to_string(), value: ig.admin_channel.clone(), section: sec.to_string(), editable: true });
@@ -328,6 +330,8 @@ impl ConfigPanel {
             entries.push(ConfigEntry { key: "social.threads.token_env".to_string(), value: th.token_env.clone(), section: sec.to_string(), editable: true });
             let tok_masked = std::env::var(&th.token_env).ok().map(|v| Self::mask_value(&v)).unwrap_or_else(|| "(not set)".to_string());
             entries.push(ConfigEntry { key: "social.threads.token_value".to_string(), value: tok_masked, section: sec.to_string(), editable: true });
+            let expires = std::env::var("CATCLAW_THREADS_TOKEN_EXPIRES_AT").unwrap_or_else(|_| "(unknown)".to_string());
+            entries.push(ConfigEntry { key: "social.threads.token_expires".to_string(), value: expires, section: sec.to_string(), editable: false });
             entries.push(ConfigEntry { key: "social.threads.user_id".to_string(), value: th.user_id.clone(), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.threads.poll_interval_mins".to_string(), value: th.poll_interval_mins.to_string(), section: sec.to_string(), editable: true });
             entries.push(ConfigEntry { key: "social.threads.admin_channel".to_string(), value: th.admin_channel.clone(), section: sec.to_string(), editable: true });
