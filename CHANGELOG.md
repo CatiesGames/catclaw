@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.2](https://github.com/CatiesGames/catclaw/compare/v0.20.1...v0.20.2) (2026-03-26)
+
+
+### Bug Fixes
+
+* 永遠顯示 app_secret 和 webhook_verify_token 設定欄位 ([3a059b8](https://github.com/CatiesGames/catclaw/commit/3a059b8280c4989f8736d27c68d7b58b26750f03))
+
 ## [0.20.1](https://github.com/CatiesGames/catclaw/compare/v0.20.0...v0.20.1) (2026-03-26)
 
 
