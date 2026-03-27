@@ -1245,7 +1245,15 @@ impl ChannelAdapter for DiscordAdapter {
                     .label("忽略")
                     .style(ButtonStyle::Danger),
             ],
-            ForwardCardType::DraftReview | ForwardCardType::Failed(_) => vec![
+            ForwardCardType::DraftReview => vec![
+                CreateButton::new(format!("{pfx}:approve:{cid}"))
+                    .label("核准發送")
+                    .style(ButtonStyle::Success),
+                CreateButton::new(format!("{pfx}:discard:{cid}"))
+                    .label("捨棄")
+                    .style(ButtonStyle::Danger),
+            ],
+            ForwardCardType::Failed(_) => vec![
                 CreateButton::new(format!("{pfx}:approve:{cid}"))
                     .label("重試發送")
                     .style(ButtonStyle::Success),
@@ -1336,7 +1344,15 @@ impl ChannelAdapter for DiscordAdapter {
                     .label("忽略")
                     .style(ButtonStyle::Danger),
             ],
-            ForwardCardType::DraftReview | ForwardCardType::Failed(_) => vec![
+            ForwardCardType::DraftReview => vec![
+                CreateButton::new(format!("{pfx}:approve:{cid}"))
+                    .label("核准發送")
+                    .style(ButtonStyle::Success),
+                CreateButton::new(format!("{pfx}:discard:{cid}"))
+                    .label("捨棄")
+                    .style(ButtonStyle::Danger),
+            ],
+            ForwardCardType::Failed(_) => vec![
                 CreateButton::new(format!("{pfx}:approve:{cid}"))
                     .label("重試發送")
                     .style(ButtonStyle::Success),

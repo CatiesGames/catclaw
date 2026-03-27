@@ -196,7 +196,11 @@ impl ForwardCard {
                 discord_button(&format!("{pfx}:manual_reply:{id}"), "手動回覆", 2),
                 discord_button(&format!("{pfx}:ignore:{id}"), "忽略", 4),
             ],
-            ForwardCardType::DraftReview | ForwardCardType::Failed(_) => vec![
+            ForwardCardType::DraftReview => vec![
+                discord_button(&format!("{pfx}:approve:{id}"), "核准發送", 3),
+                discord_button(&format!("{pfx}:discard:{id}"), "捨棄", 4),
+            ],
+            ForwardCardType::Failed(_) => vec![
                 discord_button(&format!("{pfx}:approve:{id}"), "重試發送", 3),
                 discord_button(&format!("{pfx}:discard:{id}"), "捨棄", 4),
             ],
@@ -276,7 +280,11 @@ impl ForwardCard {
                     tg_button("忽略", &format!("{pfx}:ignore:{id}")),
                 ],
             ],
-            ForwardCardType::DraftReview | ForwardCardType::Failed(_) => vec![vec![
+            ForwardCardType::DraftReview => vec![vec![
+                tg_button("核准發送", &format!("{pfx}:approve:{id}")),
+                tg_button("捨棄", &format!("{pfx}:discard:{id}")),
+            ]],
+            ForwardCardType::Failed(_) => vec![vec![
                 tg_button("重試發送", &format!("{pfx}:approve:{id}")),
                 tg_button("捨棄", &format!("{pfx}:discard:{id}")),
             ]],
