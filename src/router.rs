@@ -195,7 +195,13 @@ impl MessageRouter {
 
         // 6. Build context header + download attachments + compose message
         let context_header = build_context_header(ctx);
-        let mut message = format!("{}\n{}", context_header, ctx.text);
+        let reply_line = ctx.reply_to.as_ref().and_then(|r| {
+            r.text.as_ref().map(|t| {
+                let preview: String = t.chars().take(200).collect();
+                format!("[Replying to: \"{}\"]\n", preview)
+            })
+        }).unwrap_or_default();
+        let mut message = format!("{}\n{}{}", context_header, reply_line, ctx.text);
         if !ctx.attachments.is_empty() {
             let att_dir = self.workspace.join("attachments");
             let _ = std::fs::create_dir_all(&att_dir);
