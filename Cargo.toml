@@ -87,6 +87,9 @@ sha2 = "0.10"
 # HMAC-SHA256 for Meta webhook signature verification
 hmac = "0.12"
 
+# Image processing (format conversion for social media uploads)
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+
 # Hex encoding for HMAC output
 hex = "0.4"
 

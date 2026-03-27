@@ -296,7 +296,7 @@ async fn execute_social_tool(
             let file_path = str_arg(&args, "file_path")?;
             let base_url = cfg.general.webhook_base_url.as_deref()
                 .ok_or_else(|| CatClawError::Social("webhook_base_url not configured".into()))?;
-            upload_media_file(file_path, base_url, &cfg.general.workspace)
+            upload_media_file(file_path, base_url, &cfg.general.workspace, "instagram")
         }
         "instagram_reply_template" => {
             let (token, uid) = ig_creds(&cfg)?;
@@ -428,7 +428,7 @@ async fn execute_social_tool(
             let file_path = str_arg(&args, "file_path")?;
             let base_url = cfg.general.webhook_base_url.as_deref()
                 .ok_or_else(|| CatClawError::Social("webhook_base_url not configured".into()))?;
-            upload_media_file(file_path, base_url, &cfg.general.workspace)
+            upload_media_file(file_path, base_url, &cfg.general.workspace, "threads")
         }
         "threads_reply_template" => {
             let (token, uid) = th_creds(&cfg)?;
@@ -471,12 +471,17 @@ async fn execute_social_tool(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Copy a local file into `{workspace}/media_tmp/` and return a public URL.
-/// Validates the file exists and the extension is an image type.
+/// Copy a local image into `{workspace}/media_tmp/`, converting format if needed.
+///
+/// - Instagram: all formats → JPEG (Meta API requires JPEG for image posts)
+/// - Threads: GIF/WebP → JPEG, JPEG/PNG kept as-is
+///
+/// Conversion preserves original dimensions and uses quality 95 for JPEG.
 fn upload_media_file(
     file_path: &str,
     base_url: &str,
     workspace: &std::path::Path,
+    platform: &str,
 ) -> crate::error::Result<Value> {
     use std::path::Path;
 
@@ -503,14 +508,43 @@ fn upload_media_file(
         crate::error::CatClawError::Social(format!("failed to create media_tmp dir: {e}"))
     })?;
 
-    let filename = format!("{}.{}", uuid_v4(), ext);
-    let dest = media_dir.join(&filename);
-    std::fs::copy(src, &dest).map_err(|e| {
-        crate::error::CatClawError::Social(format!("failed to copy file: {e}"))
-    })?;
+    // Determine if conversion is needed
+    let needs_jpeg = match platform {
+        "instagram" => !matches!(ext.as_str(), "jpg" | "jpeg"),
+        "threads" => !matches!(ext.as_str(), "jpg" | "jpeg" | "png"),
+        _ => false,
+    };
+
+    let (filename, converted) = if needs_jpeg {
+        let img = image::open(src).map_err(|e| {
+            crate::error::CatClawError::Social(format!("failed to open image: {e}"))
+        })?;
+        let out_name = format!("{}.jpg", uuid_v4());
+        let dest = media_dir.join(&out_name);
+        let writer = std::io::BufWriter::new(std::fs::File::create(&dest).map_err(|e| {
+            crate::error::CatClawError::Social(format!("failed to create output file: {e}"))
+        })?);
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(writer, 95);
+        img.write_with_encoder(encoder).map_err(|e| {
+            crate::error::CatClawError::Social(format!("failed to convert to JPEG: {e}"))
+        })?;
+        (out_name, true)
+    } else {
+        let out_name = format!("{}.{}", uuid_v4(), ext);
+        let dest = media_dir.join(&out_name);
+        std::fs::copy(src, &dest).map_err(|e| {
+            crate::error::CatClawError::Social(format!("failed to copy file: {e}"))
+        })?;
+        (out_name, false)
+    };
 
     let url = format!("{}/media/{}", base_url.trim_end_matches('/'), filename);
-    Ok(serde_json::json!({ "url": url, "filename": filename }))
+    Ok(serde_json::json!({
+        "url": url,
+        "filename": filename,
+        "converted": converted,
+        "original_format": ext,
+    }))
 }
 
 fn uuid_v4() -> String {
