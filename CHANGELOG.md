@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.26.0](https://github.com/CatiesGames/catclaw/compare/v0.25.2...v0.26.0) (2026-03-27)
+
+
+### Features
+
+* 發文失敗卡片顯示紅色 + 重試/捨棄按鈕（全平台一致） ([a80689b](https://github.com/CatiesGames/catclaw/commit/a80689bc827bd55cbb9f3190c8d3b5d21b806b03))
+
+
+### Bug Fixes
+
+* failed draft 可重新核准（retry transient API errors） ([588fec2](https://github.com/CatiesGames/catclaw/commit/588fec28197338cb21be1c0b67c29915551c2fce))
+
 ## [0.25.2](https://github.com/CatiesGames/catclaw/compare/v0.25.1...v0.25.2) (2026-03-27)
 
 
