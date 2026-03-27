@@ -589,11 +589,15 @@ async fn handle_social_button_action(
             return;
         }
 
-        // Publish via Meta API
+        // Show "publishing..." state immediately
         let cfg = config.read().unwrap().clone();
         let workspace = cfg.general.workspace.clone();
-        let result = crate::social::execute_draft_publish(&draft, &cfg).await;
         let base = forward::build_social_draft_card(&draft);
+        let publishing = forward::build_publishing_card(&base);
+        try_update_draft_card(publishing).await;
+
+        // Publish via Meta API
+        let result = crate::social::execute_draft_publish(&draft, &cfg).await;
         match result {
             Ok(reply_id) => {
                 info!(card_id, reply_id = %reply_id, platform = %draft.platform, "social draft_approve: published successfully");

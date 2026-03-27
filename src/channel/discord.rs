@@ -1204,10 +1204,12 @@ impl ChannelAdapter for DiscordAdapter {
         let color = match &card.card_type {
             ForwardCardType::Incoming => 0x5865F2u32,
             ForwardCardType::DraftReview => 0xFEE75Cu32,
+            ForwardCardType::Publishing => 0xFFA500u32,
             ForwardCardType::Failed(_) => 0xED4245u32,
             ForwardCardType::Resolved(_) => 0x57F287u32,
         };
         let description = match &card.card_type {
+            ForwardCardType::Publishing => format!("{}\n\n⏳ _發送中..._", card.text),
             ForwardCardType::Resolved(ref s) => format!("{}\n\n_{}_", card.text, s),
             ForwardCardType::Failed(ref s) => format!("{}\n\n⚠️ _{}_", card.text, s),
             _ => card.text.clone(),
@@ -1261,7 +1263,7 @@ impl ChannelAdapter for DiscordAdapter {
                     .label("捨棄")
                     .style(ButtonStyle::Danger),
             ],
-            ForwardCardType::Resolved(_) => vec![],
+            ForwardCardType::Publishing | ForwardCardType::Resolved(_) => vec![],
         };
 
         let builder = if buttons.is_empty() {
@@ -1301,11 +1303,13 @@ impl ChannelAdapter for DiscordAdapter {
         let color = match &card.card_type {
             ForwardCardType::Incoming => 0x5865F2u32,
             ForwardCardType::DraftReview => 0xFEE75Cu32,
+            ForwardCardType::Publishing => 0xFFA500u32,
             ForwardCardType::Failed(_) => 0xED4245u32,
             ForwardCardType::Resolved(_) => 0x57F287u32,
         };
 
         let description = match &card.card_type {
+            ForwardCardType::Publishing => format!("{}\n\n⏳ _發送中..._", card.text),
             ForwardCardType::Resolved(ref s) => format!("{}\n\n_{}_", card.text, s),
             ForwardCardType::Failed(ref s) => format!("{}\n\n⚠️ _{}_", card.text, s),
             _ => card.text.clone(),
@@ -1360,7 +1364,7 @@ impl ChannelAdapter for DiscordAdapter {
                     .label("捨棄")
                     .style(ButtonStyle::Danger),
             ],
-            ForwardCardType::Resolved(_) => vec![],
+            ForwardCardType::Publishing | ForwardCardType::Resolved(_) => vec![],
         };
 
         let mut builder = EditMessage::new().embed(embed);

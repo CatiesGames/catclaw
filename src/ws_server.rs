@@ -1521,6 +1521,18 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
         "threads" => cfg.social.threads.as_ref().map(|c| c.admin_channel.clone()),
         _ => None,
     }.unwrap_or_default();
+
+    // Show "publishing..." state immediately
+    if let Some(ref fwd_ref) = draft.forward_ref {
+        if !admin_channel.is_empty() {
+            let base = crate::social::forward::build_social_draft_card(&draft);
+            let publishing = crate::social::forward::build_publishing_card(&base);
+            crate::social::forward::update_forward_card(
+                publishing, fwd_ref, &admin_channel, &gw.adapters_list,
+            ).await;
+        }
+    }
+
     match crate::social::execute_draft_publish(&draft, &cfg).await {
         Ok(reply_id) => {
             info!(id, reply_id = %reply_id, platform = %draft.platform, "social.draft.approve: published successfully");
