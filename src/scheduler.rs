@@ -265,20 +265,20 @@ pub async fn startup_token_check(
         }
     }
 
-    // Threads: only exchange if short-lived (identified by trying exchange and succeeding).
-    // Long-lived refresh is handled separately by the 30-day scheduler job.
+    // Threads: try exchange short→long, then estimate expiry.
+    // Threads API has no debug_token — expiry is estimated from last refresh (60-day lifetime).
     if let Some(th) = th_cfg {
         if let Ok(current_token) = std::env::var(&th.token_env) {
+            let mut expiry_set = false;
             if let (Some(app_id), Some(app_secret_env)) = (&th.app_id, &th.app_secret_env) {
                 if let Ok(app_secret) = std::env::var(app_secret_env) {
                     match crate::social::threads::ThreadsClient::exchange_token(app_id, &app_secret, &current_token).await {
                         Ok(new_token) if new_token != current_token => {
                             crate::config::write_env_var(&th.token_env, &new_token);
-                            // Record refresh time so the 30-day timer starts from now.
                             let _ = state_db.upsert_social_cursor("threads", "token_refresh_at", &Utc::now().to_rfc3339());
-                            // Threads long-lived tokens are 60 days
                             let expires_at = Utc::now() + chrono::Duration::days(60);
                             set_token_expiry(state_db, "threads", &expires_at.to_rfc3339());
+                            expiry_set = true;
                             info!("threads token: exchanged short-lived for long-lived");
                         }
                         Ok(_) => {
@@ -287,11 +287,29 @@ pub async fn startup_token_check(
                                 if let Ok(dt) = last_refresh.parse::<chrono::DateTime<Utc>>() {
                                     let expires_at = dt + chrono::Duration::days(60);
                                     set_token_expiry(state_db, "threads", &expires_at.to_rfc3339());
+                                    expiry_set = true;
                                 }
                             }
                             debug!("threads token: exchange returned same token, already long-lived");
                         }
                         Err(e) => debug!(error = %e, "threads token exchange skipped (likely already long-lived)"),
+                    }
+                }
+            }
+            // Fallback: if no expiry was set (no app_id, no refresh record, etc.),
+            // verify token is valid via /me and assume 60-day lifetime from now.
+            if !expiry_set {
+                let http = reqwest::Client::new();
+                let resp = http.get("https://graph.threads.net/v1.0/me")
+                    .query(&[("fields", "id"), ("access_token", &current_token)])
+                    .send().await;
+                if let Ok(r) = resp {
+                    if r.status().is_success() {
+                        let expires_at = Utc::now() + chrono::Duration::days(60);
+                        set_token_expiry(state_db, "threads", &expires_at.to_rfc3339());
+                        debug!("threads token: valid, estimated 60-day expiry");
+                    } else {
+                        warn!("threads token: /me returned {}, token may be invalid", r.status());
                     }
                 }
             }

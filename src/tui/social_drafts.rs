@@ -221,12 +221,12 @@ impl Component for SocialDraftsPanel {
                     self.discard();
                     self.status_msg = Some("Discarding draft…".to_string());
                 }
-                KeyCode::Tab => {
+                KeyCode::Char(']') | KeyCode::Char('l') => {
                     self.filter_idx = (self.filter_idx + 1) % StatusFilter::all().len();
                     self.selected = 0;
                     self.refresh();
                 }
-                KeyCode::BackTab => {
+                KeyCode::Char('[') | KeyCode::Char('h') => {
                     self.filter_idx = (self.filter_idx + StatusFilter::all().len() - 1) % StatusFilter::all().len();
                     self.selected = 0;
                     self.refresh();
@@ -370,9 +370,9 @@ impl Component for SocialDraftsPanel {
         let (hint_text, hint_style) = if let Some(ref msg) = self.status_msg {
             (msg.clone(), Style::default().fg(Theme::GREEN).bg(Theme::MANTLE))
         } else if self.detail_view {
-            (" Esc Back  A Approve  D Discard".to_string(), Style::default().fg(Theme::TEXT).bg(Theme::MANTLE))
+            (" Esc Back  A Approve  D Discard".to_string(), Style::default().fg(Theme::MAUVE).bg(Theme::MANTLE))
         } else {
-            (" Enter Detail  A Approve  D Discard  Tab Filter  r Refresh".to_string(), Style::default().fg(Theme::TEXT).bg(Theme::MANTLE))
+            (" Enter Detail  A Approve  D Discard  [/] Filter  r Refresh".to_string(), Style::default().fg(Theme::MAUVE).bg(Theme::MANTLE))
         };
         let hints = Paragraph::new(hint_text).style(hint_style);
         frame.render_widget(hints, chunks[2]);

@@ -205,50 +205,71 @@ impl Component for SocialInboxPanel {
             }
         }
 
-        match event.code {
-            KeyCode::Char('r') | KeyCode::F(5) => {
-                self.refresh();
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected + 1 < self.items.len() {
-                    self.selected += 1;
+        // Clear status message on any key press
+        self.status_msg = None;
+
+        if self.detail_view {
+            match event.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    self.detail_view = false;
                 }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected > 0 {
-                    self.selected -= 1;
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    self.approve_draft();
+                    self.status_msg = Some("Approving draft…".to_string());
                 }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    self.discard_draft();
+                    self.status_msg = Some("Discarding draft…".to_string());
+                    self.detail_view = false;
+                }
+                _ => {}
             }
-            KeyCode::Enter => {
-                self.detail_view = !self.detail_view;
+        } else {
+            match event.code {
+                KeyCode::Char('r') | KeyCode::F(5) => {
+                    self.refresh();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.selected + 1 < self.items.len() {
+                        self.selected += 1;
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.selected > 0 {
+                        self.selected -= 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    self.detail_view = true;
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    self.approve_draft();
+                    self.status_msg = Some("Approving draft…".to_string());
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    self.discard_draft();
+                    self.status_msg = Some("Discarding draft…".to_string());
+                }
+                KeyCode::Char('p') | KeyCode::Char('P') => {
+                    self.poll_now();
+                    self.status_msg = Some("Polling…".to_string());
+                }
+                KeyCode::Char('R') => {
+                    self.reprocess();
+                    self.status_msg = Some("Reprocessing…".to_string());
+                }
+                KeyCode::Char(']') | KeyCode::Char('l') => {
+                    self.filter_idx = (self.filter_idx + 1) % StatusFilter::all().len();
+                    self.selected = 0;
+                    self.refresh();
+                }
+                KeyCode::Char('[') | KeyCode::Char('h') => {
+                    self.filter_idx = (self.filter_idx + StatusFilter::all().len() - 1) % StatusFilter::all().len();
+                    self.selected = 0;
+                    self.refresh();
             }
-            KeyCode::Char('a') | KeyCode::Char('A') => {
-                self.approve_draft();
-                self.status_msg = Some("Approving draft…".to_string());
+                _ => {}
             }
-            KeyCode::Char('d') | KeyCode::Char('D') => {
-                self.discard_draft();
-                self.status_msg = Some("Discarding draft…".to_string());
-            }
-            KeyCode::Char('p') | KeyCode::Char('P') => {
-                self.poll_now();
-                self.status_msg = Some("Polling…".to_string());
-            }
-            KeyCode::Char('R') => {
-                self.reprocess();
-                self.status_msg = Some("Reprocessing…".to_string());
-            }
-            KeyCode::Tab => {
-                self.filter_idx = (self.filter_idx + 1) % StatusFilter::all().len();
-                self.selected = 0;
-                self.refresh();
-            }
-            KeyCode::BackTab => {
-                self.filter_idx = (self.filter_idx + StatusFilter::all().len() - 1) % StatusFilter::all().len();
-                self.selected = 0;
-                self.refresh();
-            }
-            _ => {}
         }
 
         // Load on first render.
@@ -388,13 +409,14 @@ impl Component for SocialInboxPanel {
         }
 
         // ── Hints bar ─────────────────────────────────────────────────────────
-        let hint_text = if let Some(ref msg) = self.status_msg {
-            msg.clone()
+        let (hint_text, hint_style) = if let Some(ref msg) = self.status_msg {
+            (msg.clone(), Style::default().fg(Theme::GREEN).bg(Theme::MANTLE))
+        } else if self.detail_view {
+            (" Esc Back  A Approve  D Discard".to_string(), Style::default().fg(Theme::MAUVE).bg(Theme::MANTLE))
         } else {
-            "[Enter] Detail  [A] Approve  [D] Discard  [R] Reprocess  [P] Poll  [Tab] Filter  [r] Refresh".to_string()
+            (" Enter Detail  A Approve  D Discard  R Reprocess  P Poll  [/] Filter  r Refresh".to_string(), Style::default().fg(Theme::MAUVE).bg(Theme::MANTLE))
         };
-        let hints = Paragraph::new(hint_text)
-            .style(Style::default().fg(Theme::OVERLAY1));
+        let hints = Paragraph::new(hint_text).style(hint_style);
         frame.render_widget(hints, chunks[2]);
     }
 }
