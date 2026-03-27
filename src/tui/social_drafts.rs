@@ -354,11 +354,11 @@ impl Component for SocialDraftsPanel {
                 .collect();
 
             let widths = [
-                Constraint::Length(5),
-                Constraint::Length(12),
-                Constraint::Length(8),
-                Constraint::Min(30),
-                Constraint::Length(16),
+                Constraint::Length(5),   // ID
+                Constraint::Length(10),  // Platform
+                Constraint::Length(6),   // Type
+                Constraint::Min(20),    // Content
+                Constraint::Length(20),  // Status
             ];
             let table = Table::new(rows, widths)
                 .header(header)

@@ -1217,11 +1217,16 @@ impl ChannelAdapter for DiscordAdapter {
             .title(&card.title)
             .description(description)
             .color(color)
-            .field("From", format!("@{}", card.author), true)
             .footer(serenity::all::CreateEmbedFooter::new(format!("id: {}", cid)));
 
+        if card.author != "unknown" {
+            embed = embed.field("From", format!("@{}", card.author), true);
+        }
         if let Some(ref url) = card.permalink {
             embed = embed.field("Post", url, false);
+        }
+        if let Some(ref url) = card.image_url {
+            embed = embed.image(url);
         }
 
         let buttons: Vec<CreateButton> = match &card.card_type {
@@ -1302,11 +1307,16 @@ impl ChannelAdapter for DiscordAdapter {
             .title(&card.title)
             .description(description)
             .color(color)
-            .field("From", format!("@{}", card.author), true)
             .footer(serenity::all::CreateEmbedFooter::new(format!("id: {}", cid)));
 
+        if card.author != "unknown" {
+            embed = embed.field("From", format!("@{}", card.author), true);
+        }
         if let Some(ref url) = card.permalink {
             embed = embed.field("Post", url, false);
+        }
+        if let Some(ref url) = card.image_url {
+            embed = embed.image(url);
         }
 
         let buttons: Vec<CreateButton> = match &card.card_type {
