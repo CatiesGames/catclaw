@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.1](https://github.com/CatiesGames/catclaw/compare/v0.25.0...v0.25.1) (2026-03-27)
+
+
+### Bug Fixes
+
+* TUI Social/Drafts Esc 返回 + 快捷鍵粉色 + filter 改 [/] + Threads token 到期日 ([9ddc25c](https://github.com/CatiesGames/catclaw/commit/9ddc25cf1e3f3fdef6f879f82e1d043a8ab21b85))
+
 ## [0.25.0](https://github.com/CatiesGames/catclaw/compare/v0.24.1...v0.25.0) (2026-03-27)
 
 
