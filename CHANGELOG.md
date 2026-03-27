@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.1](https://github.com/CatiesGames/catclaw/compare/v0.24.0...v0.24.1) (2026-03-27)
+
+
+### Bug Fixes
+
+* Discord 審核卡片顯示附圖 + post 類型隱藏 From + TUI draft 欄寬調整 ([c9f3c74](https://github.com/CatiesGames/catclaw/commit/c9f3c7488e3d741567410cea8bd35c7534147aa7))
+
 ## [0.24.0](https://github.com/CatiesGames/catclaw/compare/v0.23.1...v0.24.0) (2026-03-26)
 
 
