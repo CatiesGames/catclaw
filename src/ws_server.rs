@@ -1518,6 +1518,7 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
     let workspace = cfg.general.workspace.clone();
     match crate::social::execute_draft_publish(&draft, &cfg).await {
         Ok(reply_id) => {
+            info!(id, reply_id = %reply_id, platform = %draft.platform, "social.draft.approve: published successfully");
             let _ = gw.state_db.update_social_draft_sent(id, &reply_id);
             crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
 
@@ -1584,7 +1585,10 @@ async fn handle_social_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -
 
     // Delete from DB
     match gw.state_db.delete_social_draft(id) {
-        Ok(_) => WsResponse::ok(req.id, json!({ "status": "deleted" })),
+        Ok(_) => {
+            info!(id, platform = %draft.platform, "social.draft.discard: deleted");
+            WsResponse::ok(req.id, json!({ "status": "deleted" }))
+        }
         Err(e) => WsResponse::err(req.id, -1, format!("db error: {}", e)),
     }
 }

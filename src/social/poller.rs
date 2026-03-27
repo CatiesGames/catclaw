@@ -28,6 +28,7 @@ pub async fn poll_instagram(cfg: &InstagramConfig, db: &StateDb) -> Result<Vec<S
                 let new_items = poll_ig_mentions(&client, db).await?;
                 items.extend(new_items);
             }
+            "messages" => {} // DM — webhook only, no polling support
             unknown => {
                 warn!(feed = unknown, "instagram: unknown subscribe feed, skipping");
             }

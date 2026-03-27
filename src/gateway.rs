@@ -573,6 +573,7 @@ async fn handle_social_button_action(
                 warn!(card_id, status = %draft.status, "social draft_discard: already sent, cannot discard");
                 return;
             }
+            info!(card_id, platform = %draft.platform, "social draft_discard: deleted");
             let workspace = config.read().unwrap().general.workspace.clone();
             crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
             let base = forward::build_social_draft_card(&draft);
@@ -598,11 +599,12 @@ async fn handle_social_button_action(
         try_update_draft_card(resolved).await;
         match result {
             Ok(reply_id) => {
+                info!(card_id, reply_id = %reply_id, platform = %draft.platform, "social draft_approve: published successfully");
                 let _ = db.update_social_draft_sent(card_id, &reply_id);
                 crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
             }
             Err(e) => {
-                error!(card_id, error = %e, "social draft_approve: send failed");
+                error!(card_id, error = %e, platform = %draft.platform, "social draft_approve: send failed");
                 let _ = db.update_social_draft_status(card_id, "failed");
             }
         }
