@@ -1204,12 +1204,13 @@ impl ChannelAdapter for DiscordAdapter {
         let color = match &card.card_type {
             ForwardCardType::Incoming => 0x5865F2u32,
             ForwardCardType::DraftReview => 0xFEE75Cu32,
+            ForwardCardType::Failed(_) => 0xED4245u32,
             ForwardCardType::Resolved(_) => 0x57F287u32,
         };
-        let description = if let ForwardCardType::Resolved(ref s) = card.card_type {
-            format!("{}\n\n_{}_", card.text, s)
-        } else {
-            card.text.clone()
+        let description = match &card.card_type {
+            ForwardCardType::Resolved(ref s) => format!("{}\n\n_{}_", card.text, s),
+            ForwardCardType::Failed(ref s) => format!("{}\n\n⚠️ _{}_", card.text, s),
+            _ => card.text.clone(),
         };
         let pfx = &card.button_prefix;
         let cid = card.card_id;
@@ -1244,9 +1245,9 @@ impl ChannelAdapter for DiscordAdapter {
                     .label("忽略")
                     .style(ButtonStyle::Danger),
             ],
-            ForwardCardType::DraftReview => vec![
+            ForwardCardType::DraftReview | ForwardCardType::Failed(_) => vec![
                 CreateButton::new(format!("{pfx}:approve:{cid}"))
-                    .label("核准發送")
+                    .label("重試發送")
                     .style(ButtonStyle::Success),
                 CreateButton::new(format!("{pfx}:discard:{cid}"))
                     .label("捨棄")
@@ -1292,13 +1293,14 @@ impl ChannelAdapter for DiscordAdapter {
         let color = match &card.card_type {
             ForwardCardType::Incoming => 0x5865F2u32,
             ForwardCardType::DraftReview => 0xFEE75Cu32,
+            ForwardCardType::Failed(_) => 0xED4245u32,
             ForwardCardType::Resolved(_) => 0x57F287u32,
         };
 
-        let description = if let ForwardCardType::Resolved(ref s) = card.card_type {
-            format!("{}\n\n_{}_", card.text, s)
-        } else {
-            card.text.clone()
+        let description = match &card.card_type {
+            ForwardCardType::Resolved(ref s) => format!("{}\n\n_{}_", card.text, s),
+            ForwardCardType::Failed(ref s) => format!("{}\n\n⚠️ _{}_", card.text, s),
+            _ => card.text.clone(),
         };
 
         let pfx = &card.button_prefix;
@@ -1334,9 +1336,9 @@ impl ChannelAdapter for DiscordAdapter {
                     .label("忽略")
                     .style(ButtonStyle::Danger),
             ],
-            ForwardCardType::DraftReview => vec![
+            ForwardCardType::DraftReview | ForwardCardType::Failed(_) => vec![
                 CreateButton::new(format!("{pfx}:approve:{cid}"))
-                    .label("核准發送")
+                    .label("重試發送")
                     .style(ButtonStyle::Success),
                 CreateButton::new(format!("{pfx}:discard:{cid}"))
                     .label("捨棄")

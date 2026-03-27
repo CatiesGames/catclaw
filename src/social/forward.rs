@@ -127,6 +127,8 @@ pub fn build_social_draft_card(draft: &SocialDraftRow) -> ForwardCard {
 pub enum ForwardCardType {
     Incoming,
     DraftReview,
+    /// Failed — show error text with retry + discard buttons.
+    Failed(String),
     /// Terminal state — show status text, remove all buttons.
     Resolved(String),
 }
@@ -144,6 +146,21 @@ pub struct ForwardCard {
     pub image_url: Option<String>,
     pub created_at: String,
     pub card_type: ForwardCardType,
+}
+
+/// Build a failed card (retry + discard buttons) from an existing card.
+pub fn build_failed_card(card: &ForwardCard, status: &str) -> ForwardCard {
+    ForwardCard {
+        card_id: card.card_id,
+        button_prefix: card.button_prefix.clone(),
+        title: card.title.clone(),
+        author: card.author.clone(),
+        text: card.text.clone(),
+        permalink: card.permalink.clone(),
+        image_url: card.image_url.clone(),
+        created_at: card.created_at.clone(),
+        card_type: ForwardCardType::Failed(status.to_string()),
+    }
 }
 
 /// Build a resolved card (terminal state, no buttons) from an existing card.
@@ -167,6 +184,7 @@ impl ForwardCard {
         let color = match &self.card_type {
             ForwardCardType::Incoming => 0x5865F2u64,    // blurple
             ForwardCardType::DraftReview => 0xFEE75Cu64, // yellow
+            ForwardCardType::Failed(_) => 0xED4245u64,   // red
             ForwardCardType::Resolved(_) => 0x57F287u64, // green
         };
         let pfx = &self.button_prefix;
@@ -178,8 +196,8 @@ impl ForwardCard {
                 discord_button(&format!("{pfx}:manual_reply:{id}"), "手動回覆", 2),
                 discord_button(&format!("{pfx}:ignore:{id}"), "忽略", 4),
             ],
-            ForwardCardType::DraftReview => vec![
-                discord_button(&format!("{pfx}:approve:{id}"), "核准發送", 3),
+            ForwardCardType::DraftReview | ForwardCardType::Failed(_) => vec![
+                discord_button(&format!("{pfx}:approve:{id}"), "重試發送", 3),
                 discord_button(&format!("{pfx}:discard:{id}"), "捨棄", 4),
             ],
             ForwardCardType::Resolved(_) => vec![],
@@ -194,10 +212,10 @@ impl ForwardCard {
             .map(|d| d.with_timezone(&Utc).to_rfc3339())
             .unwrap_or_else(|_| self.created_at.clone());
 
-        let description = if let ForwardCardType::Resolved(ref s) = self.card_type {
-            format!("{}\n\n_{}_", self.text, s)
-        } else {
-            self.text.clone()
+        let description = match &self.card_type {
+            ForwardCardType::Resolved(ref s) => format!("{}\n\n_{}_", self.text, s),
+            ForwardCardType::Failed(ref s) => format!("{}\n\n⚠️ _{}_", self.text, s),
+            _ => self.text.clone(),
         };
 
         let components: Value = if buttons.is_empty() {
@@ -226,8 +244,12 @@ impl ForwardCard {
 
     /// Render as a Telegram message with inline keyboard.
     pub fn to_telegram_text_and_keyboard(&self) -> (String, Value) {
+        let status_line = match &self.card_type {
+            ForwardCardType::Failed(ref s) => format!("\n\n⚠️ _{}_", escape_markdown(s)),
+            _ => String::new(),
+        };
         let text = format!(
-            "*{}*\nFrom: @{}\n\n{}{}{}",
+            "*{}*\nFrom: @{}\n\n{}{}{}{}",
             escape_markdown(&self.title),
             escape_markdown(&self.author),
             escape_markdown(&self.text),
@@ -238,7 +260,8 @@ impl ForwardCard {
             self.image_url
                 .as_ref()
                 .map(|u| format!("\n[Media]({})", escape_markdown(u)))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            status_line
         );
         let pfx = &self.button_prefix;
         let id = self.card_id;
@@ -253,8 +276,8 @@ impl ForwardCard {
                     tg_button("忽略", &format!("{pfx}:ignore:{id}")),
                 ],
             ],
-            ForwardCardType::DraftReview => vec![vec![
-                tg_button("核准發送", &format!("{pfx}:approve:{id}")),
+            ForwardCardType::DraftReview | ForwardCardType::Failed(_) => vec![vec![
+                tg_button("重試發送", &format!("{pfx}:approve:{id}")),
                 tg_button("捨棄", &format!("{pfx}:discard:{id}")),
             ]],
             ForwardCardType::Resolved(_) => vec![],
@@ -293,6 +316,16 @@ impl ForwardCard {
                 slack_button(&format!("{pfx}:approve:{id}"), "核准發送", "primary"),
                 slack_button(&format!("{pfx}:discard:{id}"), "捨棄", "danger"),
             ],
+            ForwardCardType::Failed(s) => {
+                blocks.push(json!({
+                    "type": "context",
+                    "elements": [{ "type": "mrkdwn", "text": format!("⚠️ {}", s) }]
+                }));
+                vec![
+                    slack_button(&format!("{pfx}:approve:{id}"), "重試發送", "primary"),
+                    slack_button(&format!("{pfx}:discard:{id}"), "捨棄", "danger"),
+                ]
+            }
             ForwardCardType::Resolved(s) => {
                 blocks.push(json!({
                     "type": "context",

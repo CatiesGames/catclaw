@@ -1516,18 +1516,16 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
 
     let cfg = gw.config.read().unwrap().clone();
     let workspace = cfg.general.workspace.clone();
+    let admin_channel = match draft.platform.as_str() {
+        "instagram" => cfg.social.instagram.as_ref().map(|c| c.admin_channel.clone()),
+        "threads" => cfg.social.threads.as_ref().map(|c| c.admin_channel.clone()),
+        _ => None,
+    }.unwrap_or_default();
     match crate::social::execute_draft_publish(&draft, &cfg).await {
         Ok(reply_id) => {
             info!(id, reply_id = %reply_id, platform = %draft.platform, "social.draft.approve: published successfully");
             let _ = gw.state_db.update_social_draft_sent(id, &reply_id);
             crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
-
-            // Update forward card if present
-            let admin_channel = match draft.platform.as_str() {
-                "instagram" => cfg.social.instagram.as_ref().map(|c| c.admin_channel.clone()),
-                "threads" => cfg.social.threads.as_ref().map(|c| c.admin_channel.clone()),
-                _ => None,
-            }.unwrap_or_default();
             if let Some(ref fwd_ref) = draft.forward_ref {
                 if !admin_channel.is_empty() {
                     let base = crate::social::forward::build_social_draft_card(&draft);
@@ -1541,6 +1539,16 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
         }
         Err(e) => {
             let _ = gw.state_db.update_social_draft_status(id, "failed");
+            // Update card to failed state (with retry button)
+            if let Some(ref fwd_ref) = draft.forward_ref {
+                if !admin_channel.is_empty() {
+                    let base = crate::social::forward::build_social_draft_card(&draft);
+                    let failed = crate::social::forward::build_failed_card(&base, "發送失敗，點擊重試");
+                    crate::social::forward::update_forward_card(
+                        failed, fwd_ref, &admin_channel, &gw.adapters_list,
+                    ).await;
+                }
+            }
             WsResponse::err(req.id, -1, format!("publish failed: {}", e))
         }
     }

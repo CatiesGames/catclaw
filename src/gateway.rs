@@ -593,18 +593,19 @@ async fn handle_social_button_action(
         let cfg = config.read().unwrap().clone();
         let workspace = cfg.general.workspace.clone();
         let result = crate::social::execute_draft_publish(&draft, &cfg).await;
-        let status_label = if result.is_ok() { "已發送" } else { "發送失敗" };
         let base = forward::build_social_draft_card(&draft);
-        let resolved = forward::build_resolved_card(&base, status_label);
-        try_update_draft_card(resolved).await;
         match result {
             Ok(reply_id) => {
                 info!(card_id, reply_id = %reply_id, platform = %draft.platform, "social draft_approve: published successfully");
+                let resolved = forward::build_resolved_card(&base, "已發送");
+                try_update_draft_card(resolved).await;
                 let _ = db.update_social_draft_sent(card_id, &reply_id);
                 crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
             }
             Err(e) => {
                 error!(card_id, error = %e, platform = %draft.platform, "social draft_approve: send failed");
+                let failed = forward::build_failed_card(&base, "發送失敗，點擊重試");
+                try_update_draft_card(failed).await;
                 let _ = db.update_social_draft_status(card_id, "failed");
             }
         }
