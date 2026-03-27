@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.2](https://github.com/CatiesGames/catclaw/compare/v0.25.1...v0.25.2) (2026-03-27)
+
+
+### Bug Fixes
+
+* draft 審核日誌 + poller messages 靜默跳過 + IG stage_post media_url 必填 ([96341d7](https://github.com/CatiesGames/catclaw/commit/96341d7ba615b0c1d43b96586f0269dc4c175a77))
+
 ## [0.25.1](https://github.com/CatiesGames/catclaw/compare/v0.25.0...v0.25.1) (2026-03-27)
 
 
