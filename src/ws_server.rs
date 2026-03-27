@@ -1506,8 +1506,8 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
         Err(e) => return WsResponse::err(req.id, -1, format!("db error: {}", e)),
     };
 
-    // Idempotency guard: only awaiting_approval or draft can be approved
-    if draft.status != "awaiting_approval" && draft.status != "draft" {
+    // Idempotency guard: allow awaiting_approval/draft/failed (retry)
+    if draft.status != "awaiting_approval" && draft.status != "draft" && draft.status != "failed" {
         return WsResponse::err(
             req.id, -32602,
             format!("draft {} cannot be approved (status={})", id, draft.status),

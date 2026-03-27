@@ -583,8 +583,8 @@ async fn handle_social_button_action(
             return;
         }
 
-        // draft_approve: idempotency guard — only allow from awaiting_approval/draft
-        if draft.status != "awaiting_approval" && draft.status != "draft" {
+        // draft_approve: idempotency guard — allow awaiting_approval/draft/failed (retry)
+        if draft.status != "awaiting_approval" && draft.status != "draft" && draft.status != "failed" {
             warn!(card_id, status = %draft.status, "social draft_approve: already resolved");
             return;
         }
