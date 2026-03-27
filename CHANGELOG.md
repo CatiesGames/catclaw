@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/CatiesGames/catclaw/compare/v0.24.1...v0.25.0) (2026-03-27)
+
+
+### Features
+
+* 社群圖片上傳自動轉換格式 ([f723afe](https://github.com/CatiesGames/catclaw/commit/f723afe764c9591c646752f37718efb1b7d5eb35))
+
 ## [0.24.1](https://github.com/CatiesGames/catclaw/compare/v0.24.0...v0.24.1) (2026-03-27)
 
 
