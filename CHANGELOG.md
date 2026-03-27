@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.27.0](https://github.com/CatiesGames/catclaw/compare/v0.26.0...v0.27.0) (2026-03-27)
+
+
+### Features
+
+* Discord/Telegram reply 時 agent 可看到被回覆的原文 ([e7e1821](https://github.com/CatiesGames/catclaw/commit/e7e182117834b3339ab6e2a91b38cc75179ef943))
+* 發文審核卡片狀態流轉 — 核准→發送中(橘)→成功(綠)/失敗(紅+重試) ([414d2ca](https://github.com/CatiesGames/catclaw/commit/414d2cad7cf2385d67ee9480a3687759083e8428))
+
+
+### Bug Fixes
+
+* 首次審核卡片顯示「核准發送」，失敗後才顯示「重試發送」 ([7c6264b](https://github.com/CatiesGames/catclaw/commit/7c6264b754f7f80a753f6017224e0b1e8528779a))
+
 ## [0.26.0](https://github.com/CatiesGames/catclaw/compare/v0.25.2...v0.26.0) (2026-03-27)
 
 
