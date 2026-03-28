@@ -1515,7 +1515,6 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
     }
 
     let cfg = gw.config.read().unwrap().clone();
-    let workspace = cfg.general.workspace.clone();
     let admin_channel = match draft.platform.as_str() {
         "instagram" => cfg.social.instagram.as_ref().map(|c| c.admin_channel.clone()),
         "threads" => cfg.social.threads.as_ref().map(|c| c.admin_channel.clone()),
@@ -1537,7 +1536,7 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
         Ok(reply_id) => {
             info!(id, reply_id = %reply_id, platform = %draft.platform, "social.draft.approve: published successfully");
             let _ = gw.state_db.update_social_draft_sent(id, &reply_id);
-            crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
+            // Keep media_tmp file so the approval card image stays visible
             if let Some(ref fwd_ref) = draft.forward_ref {
                 if !admin_channel.is_empty() {
                     let base = crate::social::forward::build_social_draft_card(&draft);

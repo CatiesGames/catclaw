@@ -428,6 +428,26 @@ pub async fn execute_draft_publish(
     }
 }
 
+/// Remove media_tmp files older than the given number of days.
+pub fn cleanup_old_media(workspace: &std::path::Path, max_age_days: u64) {
+    let dir = workspace.join("media_tmp");
+    if !dir.exists() {
+        return;
+    }
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(max_age_days * 86400);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                let modified = meta.modified().unwrap_or(std::time::SystemTime::now());
+                if modified < cutoff {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
 /// Delete the local media_tmp file referenced by a draft's media_url, if any.
 pub fn cleanup_draft_media(workspace: &std::path::Path, media_url: Option<&str>) {
     if let Some(url) = media_url {

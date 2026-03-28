@@ -127,6 +127,7 @@ pub async fn run(
             // Clean up downloaded attachments older than archive timeout
             let max_age_days = config.archive_timeout_hours / 24;
             crate::router::cleanup_old_attachments(&config.workspace, max_age_days.max(1));
+            crate::social::cleanup_old_media(&config.workspace, max_age_days.max(1));
             next_archive = now + chrono::Duration::minutes(config.archive_check_interval_mins as i64);
         }
 

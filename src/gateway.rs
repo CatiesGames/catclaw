@@ -591,7 +591,6 @@ async fn handle_social_button_action(
 
         // Show "publishing..." state immediately
         let cfg = config.read().unwrap().clone();
-        let workspace = cfg.general.workspace.clone();
         let base = forward::build_social_draft_card(&draft);
         let publishing = forward::build_publishing_card(&base);
         try_update_draft_card(publishing).await;
@@ -604,7 +603,7 @@ async fn handle_social_button_action(
                 let resolved = forward::build_resolved_card(&base, "已發送");
                 try_update_draft_card(resolved).await;
                 let _ = db.update_social_draft_sent(card_id, &reply_id);
-                crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
+                // Keep media_tmp file so the approval card image stays visible
             }
             Err(e) => {
                 error!(card_id, error = %e, platform = %draft.platform, "social draft_approve: send failed");
