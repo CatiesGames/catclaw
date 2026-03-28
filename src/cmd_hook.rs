@@ -38,11 +38,6 @@ pub async fn run_pre_tool(config_path: &Path, session_key: &str) -> ! {
     let agent_id = parts.get(1).copied().unwrap_or("");
     let origin = parts.get(2).copied().unwrap_or("");
 
-    // System-originated sessions (cron, heartbeat) auto-approve — no human is waiting
-    if origin == "system" {
-        std::process::exit(0);
-    }
-
     // Build approval config: tool lists from agent's tools.toml, timeout from catclaw.toml
     let approval = {
         let agent_config = config.agents.iter().find(|a| a.id == agent_id);
@@ -78,6 +73,27 @@ pub async fn run_pre_tool(config_path: &Path, session_key: &str) -> ! {
 
     let tool = &hook_input.tool_name;
 
+    // Social publish tools that require approval must ALWAYS go through the
+    // draft-approval flow — even for system-originated sessions (cron tasks).
+    // Without this, scheduled tasks would bypass review and post directly.
+    const SOCIAL_PUBLISH_TOOLS: &[&str] = &[
+        "mcp__catclaw__instagram_reply_comment",
+        "mcp__catclaw__instagram_create_post",
+        "mcp__catclaw__instagram_send_dm",
+        "mcp__catclaw__threads_reply",
+        "mcp__catclaw__threads_create_post",
+    ];
+    if SOCIAL_PUBLISH_TOOLS.contains(&tool.as_str()) && approval.requires_approval(tool) {
+        submit_draft_for_approval(&config, session_key, &hook_input).await;
+        // never returns
+    }
+
+    // System-originated sessions (cron, heartbeat) auto-approve — no human is waiting.
+    // Social publish tools are already handled above.
+    if origin == "system" {
+        std::process::exit(0);
+    }
+
     // Check blocked list first
     if approval.is_blocked(tool) {
         eprintln!(
@@ -90,20 +106,6 @@ pub async fn run_pre_tool(config_path: &Path, session_key: &str) -> ! {
     // If no approval required, allow immediately
     if !approval.requires_approval(tool) {
         std::process::exit(0);
-    }
-
-    // Social publish tools: submit draft for human review then exit immediately
-    // so the agent session is released (no blocking wait).
-    const SOCIAL_PUBLISH_TOOLS: &[&str] = &[
-        "mcp__catclaw__instagram_reply_comment",
-        "mcp__catclaw__instagram_create_post",
-        "mcp__catclaw__instagram_send_dm",
-        "mcp__catclaw__threads_reply",
-        "mcp__catclaw__threads_create_post",
-    ];
-    if SOCIAL_PUBLISH_TOOLS.contains(&tool.as_str()) {
-        submit_draft_for_approval(&config, session_key, &hook_input).await;
-        // never returns
     }
 
     // Tool requires approval — connect to gateway and wait
