@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.1](https://github.com/CatiesGames/catclaw/compare/v0.27.0...v0.27.1) (2026-03-28)
+
+
+### Bug Fixes
+
+* 排程任務的社群發文工具必須走審核流程 ([554e217](https://github.com/CatiesGames/catclaw/commit/554e21742cfaa52276cb9c2919b9d47209bfc091))
+
 ## [0.27.0](https://github.com/CatiesGames/catclaw/compare/v0.26.0...v0.27.0) (2026-03-27)
 
 
