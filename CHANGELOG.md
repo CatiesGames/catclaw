@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.28.0](https://github.com/CatiesGames/catclaw/compare/v0.27.1...v0.28.0) (2026-03-29)
+
+
+### Features
+
+* 排程任務預設每次開新 session，避免 context 污染 ([b495efd](https://github.com/CatiesGames/catclaw/commit/b495efde598a0d6bc3b5cf3439acf4b966e69c74))
+
+
+### Bug Fixes
+
+* 發文核准後保留 media_tmp 圖片，避免審核卡片圖片掛掉 ([3487a32](https://github.com/CatiesGames/catclaw/commit/3487a3206553fd06c7cc22797bced3cd3698263b))
+
 ## [0.27.1](https://github.com/CatiesGames/catclaw/compare/v0.27.0...v0.27.1) (2026-03-28)
 
 
