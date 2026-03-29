@@ -48,6 +48,9 @@ pub struct ScheduledTaskRow {
     pub last_run_at: Option<String>,
     pub enabled: bool,
     pub payload: Option<String>,
+    /// When true, task reuses the same session across runs (context persists).
+    /// Default false: each run starts a fresh session.
+    pub keep_context: bool,
 }
 
 #[allow(dead_code)]
@@ -265,6 +268,10 @@ impl StateDb {
         let _ = conn.execute_batch(
             "ALTER TABLE scheduled_tasks ADD COLUMN name TEXT NOT NULL DEFAULT '';
              ALTER TABLE scheduled_tasks ADD COLUMN description TEXT;",
+        );
+        // Add keep_context column (default 0 = fresh session each run)
+        let _ = conn.execute_batch(
+            "ALTER TABLE scheduled_tasks ADD COLUMN keep_context INTEGER NOT NULL DEFAULT 0;",
         );
 
         // Social inbox tables
@@ -506,7 +513,7 @@ impl StateDb {
     pub fn list_scheduled_tasks(&self) -> Result<Vec<ScheduledTaskRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload
+            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context
              FROM scheduled_tasks ORDER BY next_run_at",
         )?;
         let rows = stmt
@@ -523,6 +530,7 @@ impl StateDb {
                     last_run_at: row.get(8)?,
                     enabled: row.get::<_, i32>(9)? != 0,
                     payload: row.get(10)?,
+                    keep_context: row.get::<_, i32>(11).unwrap_or(0) != 0,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -532,7 +540,7 @@ impl StateDb {
     pub fn list_due_tasks(&self, now: &str) -> Result<Vec<ScheduledTaskRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload
+            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context
              FROM scheduled_tasks WHERE enabled = 1 AND next_run_at <= ?1 ORDER BY next_run_at",
         )?;
         let rows = stmt
@@ -549,6 +557,7 @@ impl StateDb {
                     last_run_at: row.get(8)?,
                     enabled: row.get::<_, i32>(9)? != 0,
                     payload: row.get(10)?,
+                    keep_context: row.get::<_, i32>(11).unwrap_or(0) != 0,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -558,8 +567,8 @@ impl StateDb {
     pub fn insert_task(&self, task: &ScheduledTaskRow) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO scheduled_tasks (task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO scheduled_tasks (task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 task.task_type,
                 task.agent_id,
@@ -571,6 +580,7 @@ impl StateDb {
                 task.last_run_at,
                 task.enabled as i32,
                 task.payload,
+                task.keep_context as i32,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -624,7 +634,7 @@ impl StateDb {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload
+                "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context
                  FROM scheduled_tasks WHERE id = ?1",
                 params![id],
                 |row| {
@@ -640,6 +650,7 @@ impl StateDb {
                         last_run_at: row.get(8)?,
                         enabled: row.get::<_, i32>(9)? != 0,
                         payload: row.get(10)?,
+                        keep_context: row.get::<_, i32>(11).unwrap_or(0) != 0,
                     })
                 },
             )

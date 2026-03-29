@@ -442,7 +442,7 @@ async fn tick_user_tasks(
         );
 
         let prompt = task.payload.as_deref().unwrap_or("(no prompt specified)");
-        execute_prompt(&agent, session_manager, prompt, task.id).await;
+        execute_prompt(&agent, session_manager, prompt, task.id, task.keep_context).await;
 
         // Update schedule: calculate next run or disable if one-shot
         let last_run = now.to_rfc3339();
@@ -542,11 +542,18 @@ async fn execute_prompt(
     session_manager: &SessionManager,
     prompt: &str,
     task_id: i64,
+    keep_context: bool,
 ) {
-    // Each task gets its own session keyed by task ID, so context persists across runs
     let context_id = format!("task-{}", task_id);
     let key = SessionKey::new(&agent.id, "system", &context_id);
     let sender = SenderInfo::default();
+
+    // Default: archive old session so each run starts fresh.
+    // With keep_context, the session persists across runs.
+    if !keep_context {
+        let session_key = key.to_key_string();
+        let _ = session_manager.state_db().update_session_state(&session_key, "archived");
+    }
 
     match session_manager
         .send_and_wait(&key, agent, prompt, Priority::Cron, &sender, None, None)

@@ -407,6 +407,9 @@ enum TaskCommands {
         /// Absolute time to run (ISO 8601, RFC 3339, or HH:MM / HH:MM:SS for today UTC)
         #[arg(long)]
         at: Option<String>,
+        /// Keep session context across runs (default: fresh session each time)
+        #[arg(long)]
+        keep_context: bool,
     },
     /// Enable a task
     Enable {
@@ -1205,8 +1208,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     cron,
                     every,
                     at,
+                    keep_context,
                 } => {
-                    cmd_task_add(&state_db, &name, &agent, &prompt, in_mins, cron, every, at, config.general.timezone.as_deref())?;
+                    cmd_task_add(&state_db, &name, &agent, &prompt, in_mins, cron, every, at, config.general.timezone.as_deref(), keep_context)?;
                 }
                 TaskCommands::Enable { id_or_name } => {
                     let id = resolve_task_id(&state_db, &id_or_name)?;
@@ -3105,6 +3109,7 @@ fn cmd_task_get(t: &crate::state::ScheduledTaskRow) {
     println!("Agent:    {}", t.agent_id);
     println!("Status:   {}", status);
     println!("Schedule: {}", schedule);
+    println!("Context:  {}", if t.keep_context { "persistent" } else { "fresh each run" });
     println!("Next run: {}", format_utc_to_local(&t.next_run_at));
     if let Some(ref last) = t.last_run_at {
         println!("Last run: {}", format_utc_to_local(last));
@@ -3205,6 +3210,7 @@ fn cmd_task_add(
     every: Option<i64>,
     at: Option<String>,
     timezone: Option<&str>,
+    keep_context: bool,
 ) -> Result<()> {
     let now = chrono::Utc::now();
 
@@ -3268,6 +3274,7 @@ fn cmd_task_add(
         last_run_at: None,
         enabled: true,
         payload: Some(prompt.to_string()),
+        keep_context,
     })?;
 
     let next_display = format_utc_to_local(&next_run_at);

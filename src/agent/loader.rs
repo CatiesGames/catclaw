@@ -1549,6 +1549,9 @@ Scheduling options (pick one, mutually exclusive):
 - `--cron "<expr>"` — Cron expression. **Always evaluated in UTC.** (e.g. `"0 9 * * *"` = daily at 09:00 UTC)
 - `--every <N>` — Repeat every N minutes
 
+Session behavior:
+- `--keep-context` — Reuse the same session across runs (context persists). **Without this flag (default), each run starts a fresh session with no memory of previous runs.** Use `--keep-context` only when the task needs to remember what it did last time.
+
 ### Cron Timezone Conversion (IMPORTANT)
 
 **Cron expressions are always evaluated in UTC.** When a user asks for a cron task at a local time, you MUST convert to UTC first.
@@ -1578,7 +1581,7 @@ Daily digest (user timezone Asia/Taipei = UTC+8, 18:00 local = 10:00 UTC):
 catclaw task add "日報" --agent main --prompt "Summarize today's activity and post to the user via the appropriate CatClaw MCP send tool." --cron "0 10 * * *"
 ```
 
-**Prompt context:** The `--prompt` should contain the complete instruction — what to do, where to send it, and any relevant context. When the task triggers, a new independent session runs the prompt; it has no memory of the original conversation. The agent will automatically discover available channel tools from its MCP server.
+**Prompt context:** The `--prompt` should contain the complete instruction — what to do, where to send it, and any relevant context. By default, each task run starts a fresh session with no memory of previous runs or the original conversation. Use `--keep-context` only when the task explicitly needs cross-run memory. The agent will automatically discover available channel tools from its MCP server.
 
 ---
 
