@@ -461,8 +461,8 @@ pub fn cleanup_draft_media(workspace: &std::path::Path, media_url: Option<&str>)
     }
 }
 
-/// Spawn a claude session that generates a reply draft via `instagram_stage_reply`
-/// or `threads_stage_reply` MCP tool, then store draft in DB and send draft review card.
+/// Spawn a claude session that generates a reply via the publish tool
+/// (`instagram_reply_comment` / `threads_reply`), which auto-stages a draft.
 #[allow(clippy::too_many_arguments)]
 async fn execute_auto_reply(
     item: SocialItem,
@@ -485,9 +485,9 @@ async fn execute_auto_reply(
 
     let inbox_id = row.id;
     let platform_str = item.platform.to_string();
-    let (stage_tool, publish_tool, reply_id_param) = match item.platform {
-        SocialPlatform::Instagram => ("instagram_stage_reply", "instagram_reply_comment", "comment_id"),
-        SocialPlatform::Threads => ("threads_stage_reply", "threads_reply", "post_id"),
+    let (publish_tool, reply_id_param) = match item.platform {
+        SocialPlatform::Instagram => ("instagram_reply_comment", "comment_id"),
+        SocialPlatform::Threads => ("threads_reply", "post_id"),
     };
     let author = row.author_name.as_deref().unwrap_or("someone");
     let original_text = row.text.as_deref().unwrap_or("(no text)");
@@ -496,28 +496,22 @@ async fn execute_auto_reply(
     // Mark as auto_replying.
     db.update_social_inbox_session(inbox_id, &format!("social:{}", inbox_id))?;
 
-    // Build system prompt: guide agent to stage draft first, then publish.
+    // Build system prompt: guide agent to call the publish tool (which auto-stages a draft).
     let system_prompt = format!(
         "You are handling a social media reply task.\n\
          Platform: {platform}\n\
          Event type: {event_type}\n\
          From: @{author}\n\
          Content: {text}\n\n\
-         Step 1: Call `{stage_tool}` to stage your reply draft:\n\
-         - reply_to_id: {reply_to_id}\n\
-         - content: <your reply text>\n\
-         - original_text: {text}\n\
-         - original_author: {author}\n\n\
-         Step 2: Call `{publish_tool}` to publish:\n\
+         Call `{publish_tool}` to reply:\n\
          - {reply_id_param}: {reply_to_id}\n\
-         - message: <same reply text>\n\n\
-         The publish tool may be auto-approved or may require human review depending on configuration.\n\
+         - message/text: <your reply text>\n\n\
+         The tool auto-stages a draft. It may be auto-approved or may require human review.\n\
          If it requires human review, you will receive a block signal — do NOT retry.",
         platform = platform_str,
         event_type = item.event_type,
         author = author,
         text = original_text,
-        stage_tool = stage_tool,
         publish_tool = publish_tool,
         reply_to_id = reply_to_id,
         reply_id_param = reply_id_param,
