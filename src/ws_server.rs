@@ -303,21 +303,43 @@ async fn handle_approval_request(req: &WsRequest, gw: &Arc<GatewayHandle>) -> Ws
         let tinput = tool_input.clone();
         let skey = session_key.clone();
         tokio::spawn(async move {
-            if let Ok(Some(session_row)) = gw_fwd.state_db.get_session(&skey) {
-                let origin = &session_row.origin;
-                if origin == "tui" || origin == "system" {
-                    return; // TUI/system sessions don't need channel forwarding
+            let session_row = match gw_fwd.state_db.get_session(&skey) {
+                Ok(Some(row)) => row,
+                Ok(None) => {
+                    warn!(session_key = %skey, "approval forward: session not found in DB");
+                    return;
                 }
-                if let Some(adapter) = gw_fwd.adapters.get(origin) {
-                    if let (Some(channel_id), Some(sender_id)) = (
-                        session_row.platform_channel_id(),
-                        session_row.platform_sender_id(),
-                    ) {
-                        let thread_id = session_row.platform_thread_id();
-                        if let Err(e) = adapter.send_approval(&channel_id, &sender_id, thread_id.as_deref(), &rid, &tname, &tinput).await {
-                            warn!(error = %e, origin = %origin, "failed to forward approval to channel");
-                        }
+                Err(e) => {
+                    warn!(session_key = %skey, error = %e, "approval forward: DB error");
+                    return;
+                }
+            };
+            let origin = &session_row.origin;
+            if origin == "tui" || origin == "system" {
+                return; // TUI/system sessions don't need channel forwarding
+            }
+            let adapter = match gw_fwd.adapters.get(origin) {
+                Some(a) => a,
+                None => {
+                    warn!(origin = %origin, session_key = %skey, "approval forward: no adapter for origin");
+                    return;
+                }
+            };
+            match (session_row.platform_channel_id(), session_row.platform_sender_id()) {
+                (Some(channel_id), Some(sender_id)) => {
+                    let thread_id = session_row.platform_thread_id();
+                    if let Err(e) = adapter.send_approval(&channel_id, &sender_id, thread_id.as_deref(), &rid, &tname, &tinput).await {
+                        warn!(error = %e, origin = %origin, "approval forward: failed to send to channel");
                     }
+                }
+                (channel_id, sender_id) => {
+                    warn!(
+                        session_key = %skey,
+                        origin = %origin,
+                        has_channel_id = channel_id.is_some(),
+                        has_sender_id = sender_id.is_some(),
+                        "approval forward: missing platform IDs in session metadata"
+                    );
                 }
             }
         });
