@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.1](https://github.com/CatiesGames/catclaw/compare/v0.28.0...v0.28.1) (2026-03-31)
+
+
+### Bug Fixes
+
+* 審核卡片轉發失敗時增加 warning log ([0bdc327](https://github.com/CatiesGames/catclaw/commit/0bdc32740d4254ef844e9fabe653fcf69cd166ec))
+
 ## [0.28.0](https://github.com/CatiesGames/catclaw/compare/v0.27.1...v0.28.0) (2026-03-29)
 
 
