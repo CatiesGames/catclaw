@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.2](https://github.com/CatiesGames/catclaw/compare/v0.28.1...v0.28.2) (2026-04-01)
+
+
+### Bug Fixes
+
+* polling 的 ID 比較改為數字比較，修復漏抓留言 ([6b8d78a](https://github.com/CatiesGames/catclaw/commit/6b8d78ad840f199ec9a9fccc198ba1ccf88a61f5))
+
 ## [0.28.1](https://github.com/CatiesGames/catclaw/compare/v0.28.0...v0.28.1) (2026-03-31)
 
 
