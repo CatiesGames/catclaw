@@ -746,11 +746,28 @@ async fn handle_social_button_action(
                 }.unwrap_or_else(|| "main".to_string())
             };
 
+            // Fetch parent post text for AI context
+            let parent_context = if let Some(ref mid) = row.media_id {
+                fetch_parent_text(&row.platform, mid, db, config).await
+                    .map(|(text, _)| text)
+            } else {
+                None
+            };
+
             let platform = match row.platform.as_str() {
                 "instagram" => SocialPlatform::Instagram,
                 "threads" => SocialPlatform::Threads,
                 _ => return,
             };
+            let mut text_with_context = if let Some(h) = hint {
+                let base = row.text.as_deref().unwrap_or("");
+                format!("{}\n\n[Admin hint: {}]", base, h)
+            } else {
+                row.text.as_deref().unwrap_or("").to_string()
+            };
+            if let Some(ref parent) = parent_context {
+                text_with_context = format!("[Original post they are replying to: {}]\n\n{}", parent, text_with_context);
+            }
             let item = SocialItem {
                 platform,
                 platform_id: row.platform_id.clone(),
@@ -758,12 +775,7 @@ async fn handle_social_button_action(
                 author_id: row.author_id.clone(),
                 author_name: row.author_name.clone(),
                 media_id: row.media_id.clone(),
-                text: if let Some(h) = hint {
-                    let base = row.text.as_deref().unwrap_or("");
-                    Some(format!("{}\n\n[Admin hint: {}]", base, h))
-                } else {
-                    row.text.clone()
-                },
+                text: Some(text_with_context),
                 metadata: row.metadata.as_deref()
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or(serde_json::json!({})),
@@ -774,8 +786,66 @@ async fn handle_social_button_action(
                 item, db, config, adapters, session_manager, agent_registry, &admin_channel,
             ).await;
         }
+        "view_original" => {
+            let media_id = match &row.media_id {
+                Some(id) => id.clone(),
+                None => {
+                    warn!(card_id, "view_original: no media_id");
+                    return;
+                }
+            };
+            let original = fetch_parent_text(&row.platform, &media_id, db, config).await;
+            if let Some((text, _permalink)) = original {
+                let mut card = forward::build_forward_card(&row);
+                card.original_text = Some(text);
+                try_update_card(card).await;
+            } else {
+                warn!(card_id, platform = %row.platform, media_id = %media_id, "view_original: failed to fetch parent text");
+            }
+        }
         unknown => {
             warn!(card_id, action = unknown, "social button action: unknown action");
         }
     }
+}
+
+/// Fetch parent post text, using cache if available. Returns (text, permalink).
+async fn fetch_parent_text(
+    platform: &str,
+    media_id: &str,
+    db: &Arc<StateDb>,
+    config: &Arc<std::sync::RwLock<Config>>,
+) -> Option<(String, Option<String>)> {
+    // Check cache first
+    if let Ok(Some(cached)) = db.get_parent_cache(platform, media_id) {
+        return Some(cached);
+    }
+    // Fetch from API
+    let cfg = config.read().unwrap().clone();
+    let result = match platform {
+        "instagram" => {
+            let ig = cfg.social.instagram.as_ref()?;
+            let token = std::env::var(&ig.token_env).ok()?;
+            let resp = crate::social::instagram::InstagramClient::new(token, ig.user_id.clone())
+                .get_media_by_id(media_id).await.ok()?;
+            let text = resp.get("caption").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let permalink = resp.get("permalink").and_then(|v| v.as_str()).map(str::to_string);
+            Some((text, permalink))
+        }
+        "threads" => {
+            let th = cfg.social.threads.as_ref()?;
+            let token = std::env::var(&th.token_env).ok()?;
+            let resp = crate::social::threads::ThreadsClient::new(token, th.user_id.clone())
+                .get_post_by_id(media_id).await.ok()?;
+            let text = resp.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let permalink = resp.get("permalink").and_then(|v| v.as_str()).map(str::to_string);
+            Some((text, permalink))
+        }
+        _ => None,
+    };
+    // Cache the result
+    if let Some((ref text, ref permalink)) = result {
+        let _ = db.upsert_parent_cache(platform, media_id, text, permalink.as_deref());
+    }
+    result
 }

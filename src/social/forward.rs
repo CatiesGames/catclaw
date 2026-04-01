@@ -52,6 +52,7 @@ pub fn build_forward_card(row: &SocialInboxRow) -> ForwardCard {
         text: text.to_string(),
         permalink,
         image_url: None,
+        original_text: None,
         created_at: row.created_at.clone(),
         card_type: ForwardCardType::Incoming,
     }
@@ -75,6 +76,7 @@ pub fn build_draft_card(row: &SocialInboxRow, draft: &str) -> ForwardCard {
         text: format!("Original ({}): {}\nDraft: {}", author, original_text, draft),
         permalink: None,
         image_url: None,
+        original_text: None,
         created_at: row.created_at.clone(),
         card_type: ForwardCardType::DraftReview,
     }
@@ -118,6 +120,7 @@ pub fn build_social_draft_card(draft: &SocialDraftRow) -> ForwardCard {
         text,
         permalink: None,
         image_url: draft.media_url.clone(),
+        original_text: None,
         created_at: draft.created_at.clone(),
         card_type: ForwardCardType::DraftReview,
     }
@@ -146,6 +149,8 @@ pub struct ForwardCard {
     pub permalink: Option<String>,
     /// Image URL to display in the card (e.g., draft post media).
     pub image_url: Option<String>,
+    /// Cached parent post text (shown when user clicks "查看原文").
+    pub original_text: Option<String>,
     pub created_at: String,
     pub card_type: ForwardCardType,
 }
@@ -160,6 +165,7 @@ pub fn build_publishing_card(card: &ForwardCard) -> ForwardCard {
         text: card.text.clone(),
         permalink: card.permalink.clone(),
         image_url: card.image_url.clone(),
+        original_text: card.original_text.clone(),
         created_at: card.created_at.clone(),
         card_type: ForwardCardType::Publishing,
     }
@@ -175,6 +181,7 @@ pub fn build_failed_card(card: &ForwardCard, status: &str) -> ForwardCard {
         text: card.text.clone(),
         permalink: card.permalink.clone(),
         image_url: card.image_url.clone(),
+        original_text: card.original_text.clone(),
         created_at: card.created_at.clone(),
         card_type: ForwardCardType::Failed(status.to_string()),
     }
@@ -190,6 +197,7 @@ pub fn build_resolved_card(card: &ForwardCard, status: &str) -> ForwardCard {
         text: card.text.clone(),
         permalink: card.permalink.clone(),
         image_url: card.image_url.clone(),
+        original_text: card.original_text.clone(),
         created_at: card.created_at.clone(),
         card_type: ForwardCardType::Resolved(status.to_string()),
     }
@@ -211,6 +219,7 @@ impl ForwardCard {
             ForwardCardType::Incoming => vec![
                 discord_button(&format!("{pfx}:ai_reply:{id}"), "AI 回覆", 1),
                 discord_button(&format!("{pfx}:ai_reply_hint:{id}"), "建議 AI 回覆", 2),
+                discord_button(&format!("{pfx}:view_original:{id}"), "查看原文", 2),
                 discord_button(&format!("{pfx}:manual_reply:{id}"), "手動回覆", 2),
                 discord_button(&format!("{pfx}:ignore:{id}"), "忽略", 4),
             ],
@@ -234,11 +243,16 @@ impl ForwardCard {
             .map(|d| d.with_timezone(&Utc).to_rfc3339())
             .unwrap_or_else(|_| self.created_at.clone());
 
+        let base_text = if let Some(ref orig) = self.original_text {
+            format!("📄 **原文：** {}\n\n💬 **回覆：** {}", orig, self.text)
+        } else {
+            self.text.clone()
+        };
         let description = match &self.card_type {
-            ForwardCardType::Publishing => format!("{}\n\n⏳ _發送中..._", self.text),
-            ForwardCardType::Resolved(ref s) => format!("{}\n\n_{}_", self.text, s),
-            ForwardCardType::Failed(ref s) => format!("{}\n\n⚠️ _{}_", self.text, s),
-            _ => self.text.clone(),
+            ForwardCardType::Publishing => format!("{}\n\n⏳ _發送中..._", base_text),
+            ForwardCardType::Resolved(ref s) => format!("{}\n\n_{}_", base_text, s),
+            ForwardCardType::Failed(ref s) => format!("{}\n\n⚠️ _{}_", base_text, s),
+            _ => base_text,
         };
 
         let components: Value = if buttons.is_empty() {
@@ -272,11 +286,17 @@ impl ForwardCard {
             ForwardCardType::Failed(ref s) => format!("\n\n⚠️ _{}_", escape_markdown(s)),
             _ => String::new(),
         };
+        let body = if let Some(ref orig) = self.original_text {
+            format!("📄 *原文：* {}\n\n💬 *回覆：* {}",
+                escape_markdown(orig), escape_markdown(&self.text))
+        } else {
+            escape_markdown(&self.text)
+        };
         let text = format!(
             "*{}*\nFrom: @{}\n\n{}{}{}{}",
             escape_markdown(&self.title),
             escape_markdown(&self.author),
-            escape_markdown(&self.text),
+            body,
             self.permalink
                 .as_ref()
                 .map(|u| format!("\n[Post]({})", u))
@@ -296,6 +316,7 @@ impl ForwardCard {
                     tg_button("建議 AI 回覆", &format!("{pfx}:ai_reply_hint:{id}")),
                 ],
                 vec![
+                    tg_button("查看原文", &format!("{pfx}:view_original:{id}")),
                     tg_button("手動回覆", &format!("{pfx}:manual_reply:{id}")),
                     tg_button("忽略", &format!("{pfx}:ignore:{id}")),
                 ],
@@ -319,9 +340,14 @@ impl ForwardCard {
             "type": "header",
             "text": { "type": "plain_text", "text": self.title }
         });
+        let body_text = if let Some(ref orig) = self.original_text {
+            format!("*From:* @{}\n📄 *原文：* {}\n\n💬 *回覆：* {}", self.author, orig, self.text)
+        } else {
+            format!("*From:* @{}\n{}", self.author, self.text)
+        };
         let body = json!({
             "type": "section",
-            "text": { "type": "mrkdwn", "text": format!("*From:* @{}\n{}", self.author, self.text) }
+            "text": { "type": "mrkdwn", "text": body_text }
         });
         let mut blocks = vec![header, body];
         if let Some(ref url) = self.image_url {
@@ -337,6 +363,7 @@ impl ForwardCard {
             ForwardCardType::Incoming => vec![
                 slack_button(&format!("{pfx}:ai_reply:{id}"), "AI 回覆", "primary"),
                 slack_button(&format!("{pfx}:ai_reply_hint:{id}"), "建議 AI 回覆", "default"),
+                slack_button(&format!("{pfx}:view_original:{id}"), "查看原文", "default"),
                 slack_button(&format!("{pfx}:manual_reply:{id}"), "手動回覆", "default"),
                 slack_button(&format!("{pfx}:ignore:{id}"), "忽略", "danger"),
             ],

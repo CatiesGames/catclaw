@@ -306,6 +306,15 @@ impl StateDb {
                 PRIMARY KEY (platform, feed)
             );
 
+            CREATE TABLE IF NOT EXISTS social_parent_cache (
+                platform    TEXT NOT NULL,
+                media_id    TEXT NOT NULL,
+                text        TEXT,
+                permalink   TEXT,
+                fetched_at  TEXT NOT NULL,
+                PRIMARY KEY (platform, media_id)
+            );
+
             CREATE TABLE IF NOT EXISTS social_drafts (
                 id              INTEGER PRIMARY KEY,
                 platform        TEXT NOT NULL,
@@ -975,6 +984,35 @@ impl StateDb {
              VALUES (?1,?2,?3,?4)
              ON CONFLICT(platform,feed) DO UPDATE SET cursor_val=excluded.cursor_val, updated_at=excluded.updated_at",
             params![platform, feed, cursor_val, now],
+        )?;
+        Ok(())
+    }
+
+    // --- Social Parent Cache ---
+
+    /// Get cached parent post text and permalink. Returns None if not cached.
+    pub fn get_parent_cache(&self, platform: &str, media_id: &str) -> Result<Option<(String, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT text, permalink FROM social_parent_cache WHERE platform=?1 AND media_id=?2",
+            params![platform, media_id],
+            |row| Ok((
+                row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(1)?,
+            )),
+        ).optional()?;
+        Ok(row)
+    }
+
+    /// Insert or update cached parent post text.
+    pub fn upsert_parent_cache(&self, platform: &str, media_id: &str, text: &str, permalink: Option<&str>) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO social_parent_cache (platform, media_id, text, permalink, fetched_at)
+             VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(platform,media_id) DO UPDATE SET text=excluded.text, permalink=excluded.permalink, fetched_at=excluded.fetched_at",
+            params![platform, media_id, text, permalink, now],
         )?;
         Ok(())
     }
