@@ -12,6 +12,15 @@ use crate::social::{SocialItem, SocialPlatform};
 use crate::state::StateDb;
 use tracing::{debug, warn};
 
+/// Compare two numeric ID strings by value (not lexicographic order).
+/// Falls back to string comparison if either value is not a valid integer.
+fn id_gt(a: &str, b: &str) -> bool {
+    match (a.parse::<u64>(), b.parse::<u64>()) {
+        (Ok(a_num), Ok(b_num)) => a_num > b_num,
+        _ => a > b,
+    }
+}
+
 /// Poll all configured Instagram feeds, return new SocialItems.
 pub async fn poll_instagram(cfg: &InstagramConfig, db: &StateDb) -> Result<Vec<SocialItem>> {
     let token = resolve_env(&cfg.token_env)?;
@@ -93,13 +102,12 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
                 Some(id) => id.to_string(),
                 None => continue,
             };
-            // Skip already-seen IDs (lexicographic comparison on numeric ID strings).
             if let Some(ref last) = cursor {
-                if id.as_str() <= last.as_str() {
+                if !id_gt(&id, last) {
                     continue;
                 }
             }
-            if newest_id.as_deref().map(|n| id.as_str() > n).unwrap_or(true) {
+            if newest_id.as_deref().map(|n| id_gt(&id, n)).unwrap_or(true) {
                 newest_id = Some(id.clone());
             }
             items.push(SocialItem {
@@ -182,11 +190,11 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
                 None => continue,
             };
             if let Some(ref last) = cursor {
-                if id.as_str() <= last.as_str() {
+                if !id_gt(&id, last) {
                     continue;
                 }
             }
-            if newest_id.as_deref().map(|n| id.as_str() > n).unwrap_or(true) {
+            if newest_id.as_deref().map(|n| id_gt(&id, n)).unwrap_or(true) {
                 newest_id = Some(id.clone());
             }
             items.push(SocialItem {
