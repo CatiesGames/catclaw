@@ -964,6 +964,19 @@ impl StateDb {
         Ok(row)
     }
 
+    /// List platform_id values of inbox items we have replied to (status='sent' with reply_id).
+    /// Used by poller to know which replies to check for sub-replies.
+    pub fn list_replied_platform_ids(&self, platform: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT reply_id FROM social_inbox WHERE platform=?1 AND status='sent' AND reply_id IS NOT NULL",
+        )?;
+        let ids = stmt.query_map(params![platform], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
+    }
+
     // --- Social Cursors ---
 
     pub fn get_social_cursor(&self, platform: &str, feed: &str) -> Result<Option<String>> {

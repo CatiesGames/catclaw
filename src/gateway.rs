@@ -589,29 +589,41 @@ async fn handle_social_button_action(
             return;
         }
 
-        // Show "publishing..." state immediately
+        // Show "publishing..." state immediately, then spawn background task for API call.
+        // This prevents blocking the button handler loop while waiting for Meta API.
         let cfg = config.read().unwrap().clone();
         let base = forward::build_social_draft_card(&draft);
         let publishing = forward::build_publishing_card(&base);
         try_update_draft_card(publishing).await;
 
-        // Publish via Meta API
-        let result = crate::social::execute_draft_publish(&draft, &cfg).await;
-        match result {
-            Ok(reply_id) => {
-                info!(card_id, reply_id = %reply_id, platform = %draft.platform, "social draft_approve: published successfully");
-                let resolved = forward::build_resolved_card(&base, "已發送");
-                try_update_draft_card(resolved).await;
-                let _ = db.update_social_draft_sent(card_id, &reply_id);
-                // Keep media_tmp file so the approval card image stays visible
+        let db = db.clone();
+        let adapters = adapters.clone();
+        tokio::spawn(async move {
+            let try_update = |card: forward::ForwardCard| {
+                let fwd_ref = draft.forward_ref.clone();
+                let ch = admin_channel.clone();
+                let ads = adapters.clone();
+                async move {
+                    if let (Some(msg_ref), false) = (fwd_ref, ch.is_empty()) {
+                        forward::update_forward_card(card, &msg_ref, &ch, &ads).await;
+                    }
+                }
+            };
+            match crate::social::execute_draft_publish(&draft, &cfg).await {
+                Ok(reply_id) => {
+                    info!(card_id, reply_id = %reply_id, platform = %draft.platform, "social draft_approve: published successfully");
+                    let resolved = forward::build_resolved_card(&base, "已發送");
+                    try_update(resolved).await;
+                    let _ = db.update_social_draft_sent(card_id, &reply_id);
+                }
+                Err(e) => {
+                    error!(card_id, error = %e, platform = %draft.platform, "social draft_approve: send failed");
+                    let failed = forward::build_failed_card(&base, "發送失敗，點擊重試");
+                    try_update(failed).await;
+                    let _ = db.update_social_draft_status(card_id, "failed");
+                }
             }
-            Err(e) => {
-                error!(card_id, error = %e, platform = %draft.platform, "social draft_approve: send failed");
-                let failed = forward::build_failed_card(&base, "發送失敗，點擊重試");
-                try_update_draft_card(failed).await;
-                let _ = db.update_social_draft_status(card_id, "failed");
-            }
-        }
+        });
         return;
     }
 

@@ -172,6 +172,9 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
     let mut items = Vec::new();
     let mut newest_id: Option<String> = cursor.clone();
 
+    // Collect first-level reply IDs so we can check sub-replies on our replied items
+    let mut first_level_ids: Vec<String> = Vec::new();
+
     for post in &posts {
         let post_id = match post.get("id").and_then(|v| v.as_str()) {
             Some(id) => id,
@@ -189,6 +192,7 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
                 Some(id) => id.to_string(),
                 None => continue,
             };
+            first_level_ids.push(id.clone());
             if let Some(ref last) = cursor {
                 if !id_gt(&id, last) {
                     continue;
@@ -215,6 +219,60 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
                 metadata: reply.clone(),
+            });
+        }
+    }
+
+    // Check sub-replies on items we have replied to (our reply_id is in social_inbox).
+    // This catches "reply to our reply" — the conversation thread we're participating in.
+    let our_reply_ids = db.list_replied_platform_ids("threads").unwrap_or_default();
+    for reply_id in &our_reply_ids {
+        // Only check sub-replies for items that appeared in the first-level scan
+        // or are themselves our reply IDs (we replied to them).
+        let sub_replies = match client.get_replies(reply_id, None).await {
+            Ok(r) => r,
+            Err(e) => {
+                debug!(reply_id = %reply_id, error = %e, "threads poll: failed to fetch sub-replies");
+                continue;
+            }
+        };
+        let sub_list = sub_replies
+            .get("data")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for sub in &sub_list {
+            let id = match sub.get("id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            if let Some(ref last) = cursor {
+                if !id_gt(&id, last) {
+                    continue;
+                }
+            }
+            if newest_id.as_deref().map(|n| id_gt(&id, n)).unwrap_or(true) {
+                newest_id = Some(id.clone());
+            }
+            items.push(SocialItem {
+                platform: SocialPlatform::Threads,
+                platform_id: id,
+                event_type: "reply".to_string(),
+                author_id: sub
+                    .get("username")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                author_name: sub
+                    .get("username")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                media_id: Some(reply_id.clone()),
+                text: sub
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                metadata: sub.clone(),
             });
         }
     }
