@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.29.0](https://github.com/CatiesGames/catclaw/compare/v0.28.2...v0.29.0) (2026-04-01)
+
+
+### Features
+
+* 社群 inbox 卡片增加「查看原文」按鈕，AI 回覆自動抓原文 context ([788af3e](https://github.com/CatiesGames/catclaw/commit/788af3eb0e111561bf5cbcd99bcf151b652eb66e))
+
+
+### Bug Fixes
+
+* 發文核准按鈕不再排隊等待 + Threads 追蹤子回覆 ([d42ea14](https://github.com/CatiesGames/catclaw/commit/d42ea14ba501b7e9482965ea56fb8eaabcb037c1))
+
 ## [0.28.2](https://github.com/CatiesGames/catclaw/compare/v0.28.1...v0.28.2) (2026-04-01)
 
 
