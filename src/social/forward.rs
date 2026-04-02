@@ -46,6 +46,7 @@ pub fn build_forward_card(row: &SocialInboxRow) -> ForwardCard {
 
     ForwardCard {
         card_id: row.id,
+        platform_id: row.platform_id.clone(),
         button_prefix: "social".to_string(),
         title: format!("{} {}", platform_label, event_label),
         author: author.to_string(),
@@ -70,6 +71,7 @@ pub fn build_draft_card(row: &SocialInboxRow, draft: &str) -> ForwardCard {
 
     ForwardCard {
         card_id: row.id,
+        platform_id: row.platform_id.clone(),
         button_prefix: "social".to_string(),
         title: format!("{} Draft Reply", platform_label),
         author: author.to_string(),
@@ -114,6 +116,7 @@ pub fn build_social_draft_card(draft: &SocialDraftRow) -> ForwardCard {
 
     ForwardCard {
         card_id: draft.id,
+        platform_id: draft.reply_to_id.clone().unwrap_or_default(),
         button_prefix: "social_draft".to_string(),
         title,
         author: author.to_string(),
@@ -141,6 +144,8 @@ pub enum ForwardCardType {
 #[derive(Debug, Clone)]
 pub struct ForwardCard {
     pub card_id: i64,
+    /// The platform-native ID (e.g., Threads post ID, Instagram comment ID).
+    pub platform_id: String,
     /// Button ID prefix: "social" for inbox cards, "social_draft" for draft cards.
     pub button_prefix: String,
     pub title: String,
@@ -159,6 +164,7 @@ pub struct ForwardCard {
 pub fn build_publishing_card(card: &ForwardCard) -> ForwardCard {
     ForwardCard {
         card_id: card.card_id,
+        platform_id: card.platform_id.clone(),
         button_prefix: card.button_prefix.clone(),
         title: card.title.clone(),
         author: card.author.clone(),
@@ -175,6 +181,7 @@ pub fn build_publishing_card(card: &ForwardCard) -> ForwardCard {
 pub fn build_failed_card(card: &ForwardCard, status: &str) -> ForwardCard {
     ForwardCard {
         card_id: card.card_id,
+        platform_id: card.platform_id.clone(),
         button_prefix: card.button_prefix.clone(),
         title: card.title.clone(),
         author: card.author.clone(),
@@ -191,6 +198,7 @@ pub fn build_failed_card(card: &ForwardCard, status: &str) -> ForwardCard {
 pub fn build_resolved_card(card: &ForwardCard, status: &str) -> ForwardCard {
     ForwardCard {
         card_id: card.card_id,
+        platform_id: card.platform_id.clone(),
         button_prefix: card.button_prefix.clone(),
         title: card.title.clone(),
         author: card.author.clone(),
@@ -266,7 +274,11 @@ impl ForwardCard {
             "description": description,
             "color": color,
             "fields": fields,
-            "footer": { "text": format!("id: {}", self.card_id) },
+            "footer": { "text": if self.platform_id.is_empty() {
+                format!("id: {}", self.card_id)
+            } else {
+                format!("id: {} | {}", self.card_id, self.platform_id)
+            } },
             "timestamp": ts
         });
         if let Some(ref url) = self.image_url {
@@ -292,8 +304,13 @@ impl ForwardCard {
         } else {
             escape_markdown(&self.text)
         };
+        let id_line = if self.platform_id.is_empty() {
+            format!("\n`id: {}`", self.card_id)
+        } else {
+            format!("\n`id: {} \\| {}`", self.card_id, escape_markdown(&self.platform_id))
+        };
         let text = format!(
-            "*{}*\nFrom: @{}\n\n{}{}{}{}",
+            "*{}*\nFrom: @{}\n\n{}{}{}{}{}",
             escape_markdown(&self.title),
             escape_markdown(&self.author),
             body,
@@ -305,7 +322,8 @@ impl ForwardCard {
                 .as_ref()
                 .map(|u| format!("\n[Media]({})", escape_markdown(u)))
                 .unwrap_or_default(),
-            status_line
+            status_line,
+            id_line,
         );
         let pfx = &self.button_prefix;
         let id = self.card_id;
@@ -357,6 +375,15 @@ impl ForwardCard {
                 "alt_text": "Draft media"
             }));
         }
+        let id_text = if self.platform_id.is_empty() {
+            format!("id: {}", self.card_id)
+        } else {
+            format!("id: {} | {}", self.card_id, self.platform_id)
+        };
+        blocks.push(json!({
+            "type": "context",
+            "elements": [{ "type": "mrkdwn", "text": id_text }]
+        }));
         let pfx = &self.button_prefix;
         let id = self.card_id;
         let actions: Vec<Value> = match &self.card_type {

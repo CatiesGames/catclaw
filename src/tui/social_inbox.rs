@@ -15,6 +15,7 @@ use crate::ws_client::GatewayClient;
 #[derive(Debug, Clone)]
 struct InboxItem {
     id: i64,
+    platform_id: String,
     platform: String,
     event_type: String,
     author_name: String,
@@ -337,6 +338,10 @@ impl Component for SocialInboxPanel {
                         Span::raw(format!("{} ({})", item.platform, item.event_type)),
                     ]),
                     Line::from(vec![
+                        Span::styled("Platform ID: ", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(if item.platform_id.is_empty() { "-".to_string() } else { item.platform_id.clone() }),
+                    ]),
+                    Line::from(vec![
                         Span::styled("From: ", Style::default().add_modifier(Modifier::BOLD)),
                         Span::raw(item.author_name.clone()),
                     ]),
@@ -428,6 +433,7 @@ fn parse_items(val: &serde_json::Value) -> Vec<InboxItem> {
                 .filter_map(|v| {
                     Some(InboxItem {
                         id: v.get("id")?.as_i64()?,
+                        platform_id: v.get("platform_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                         platform: v.get("platform")?.as_str()?.to_string(),
                         event_type: v.get("event_type")?.as_str()?.to_string(),
                         author_name: v.get("author_name").and_then(|x| x.as_str()).unwrap_or("-").to_string(),

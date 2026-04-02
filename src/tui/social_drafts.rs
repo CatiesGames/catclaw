@@ -17,6 +17,7 @@ struct DraftItem {
     id: i64,
     platform: String,
     draft_type: String,
+    reply_to_id: Option<String>,
     content: String,
     media_url: Option<String>,
     status: String,
@@ -297,6 +298,10 @@ impl Component for SocialDraftsPanel {
                         Span::raw(format!("{} ({})", item.platform, item.draft_type)),
                     ]),
                     Line::from(vec![
+                        Span::styled("Reply To: ", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw(item.reply_to_id.as_deref().unwrap_or("-")),
+                    ]),
+                    Line::from(vec![
                         Span::styled("Status: ", Style::default().add_modifier(Modifier::BOLD)),
                         Span::raw(item.status.clone()),
                     ]),
@@ -388,6 +393,7 @@ fn parse_items(val: &serde_json::Value) -> Vec<DraftItem> {
                         id: v.get("id")?.as_i64()?,
                         platform: v.get("platform")?.as_str()?.to_string(),
                         draft_type: v.get("draft_type")?.as_str()?.to_string(),
+                        reply_to_id: v.get("reply_to_id").and_then(|x| x.as_str()).map(str::to_string),
                         content: v.get("content")?.as_str()?.to_string(),
                         media_url: v.get("media_url").and_then(|x| x.as_str()).map(str::to_string),
                         status: v.get("status")?.as_str()?.to_string(),

@@ -1220,7 +1220,13 @@ impl ChannelAdapter for DiscordAdapter {
             .title(&card.title)
             .description(description)
             .color(color)
-            .footer(serenity::all::CreateEmbedFooter::new(format!("id: {}", cid)));
+            .footer(serenity::all::CreateEmbedFooter::new(
+                if card.platform_id.is_empty() {
+                    format!("id: {}", cid)
+                } else {
+                    format!("id: {} | {}", cid, card.platform_id)
+                }
+            ));
 
         if card.author != "unknown" {
             embed = embed.field("From", format!("@{}", card.author), true);
@@ -1321,7 +1327,13 @@ impl ChannelAdapter for DiscordAdapter {
             .title(&card.title)
             .description(description)
             .color(color)
-            .footer(serenity::all::CreateEmbedFooter::new(format!("id: {}", cid)));
+            .footer(serenity::all::CreateEmbedFooter::new(
+                if card.platform_id.is_empty() {
+                    format!("id: {}", cid)
+                } else {
+                    format!("id: {} | {}", cid, card.platform_id)
+                }
+            ));
 
         if card.author != "unknown" {
             embed = embed.field("From", format!("@{}", card.author), true);
