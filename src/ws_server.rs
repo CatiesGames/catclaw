@@ -303,14 +303,28 @@ async fn handle_approval_request(req: &WsRequest, gw: &Arc<GatewayHandle>) -> Ws
         let tinput = tool_input.clone();
         let skey = session_key.clone();
         tokio::spawn(async move {
+            let broadcast_forward_failed = |reason: String| {
+                let event = crate::ws_protocol::WsEvent {
+                    event: "approval.forward_failed".to_string(),
+                    data: json!({
+                        "request_id": rid,
+                        "session_key": skey,
+                        "reason": reason,
+                    }),
+                };
+                let _ = gw_fwd.event_bus.send(serde_json::to_string(&event).unwrap_or_default());
+            };
+
             let session_row = match gw_fwd.state_db.get_session(&skey) {
                 Ok(Some(row)) => row,
                 Ok(None) => {
                     warn!(session_key = %skey, "approval forward: session not found in DB");
+                    broadcast_forward_failed("session not found in DB".to_string());
                     return;
                 }
                 Err(e) => {
                     warn!(session_key = %skey, error = %e, "approval forward: DB error");
+                    broadcast_forward_failed(format!("DB error: {e}"));
                     return;
                 }
             };
@@ -322,6 +336,7 @@ async fn handle_approval_request(req: &WsRequest, gw: &Arc<GatewayHandle>) -> Ws
                 Some(a) => a,
                 None => {
                     warn!(origin = %origin, session_key = %skey, "approval forward: no adapter for origin");
+                    broadcast_forward_failed(format!("no adapter for origin '{origin}'"));
                     return;
                 }
             };
@@ -330,6 +345,7 @@ async fn handle_approval_request(req: &WsRequest, gw: &Arc<GatewayHandle>) -> Ws
                     let thread_id = session_row.platform_thread_id();
                     if let Err(e) = adapter.send_approval(&channel_id, &sender_id, thread_id.as_deref(), &rid, &tname, &tinput).await {
                         warn!(error = %e, origin = %origin, "approval forward: failed to send to channel");
+                        broadcast_forward_failed(format!("failed to send to {origin}: {e}"));
                     }
                 }
                 (channel_id, sender_id) => {
@@ -340,6 +356,10 @@ async fn handle_approval_request(req: &WsRequest, gw: &Arc<GatewayHandle>) -> Ws
                         has_sender_id = sender_id.is_some(),
                         "approval forward: missing platform IDs in session metadata"
                     );
+                    broadcast_forward_failed(format!(
+                        "missing platform IDs (channel={}, sender={})",
+                        channel_id.is_some(), sender_id.is_some()
+                    ));
                 }
             }
         });
@@ -1700,9 +1720,24 @@ async fn handle_social_draft_submit(req: &WsRequest, gw: &Arc<GatewayHandle>) ->
         Ok(Some(msg_id)) => {
             let _ = gw.state_db.update_social_draft_forward_ref(draft.id, &msg_id);
         }
-        Ok(None) => {}
+        Ok(None) => {
+            warn!("social.draft.submit_for_approval: no adapter sent the card (admin_channel={})", admin_channel);
+            let _ = gw.state_db.update_social_draft_status(draft.id, "failed");
+            return WsResponse::err(
+                req.id, -1,
+                format!(
+                    "no adapter found for admin_channel '{}' — draft {} set to failed",
+                    admin_channel, draft.id,
+                ),
+            );
+        }
         Err(e) => {
             warn!(error = %e, "social.draft.submit_for_approval: failed to send card");
+            let _ = gw.state_db.update_social_draft_status(draft.id, "failed");
+            return WsResponse::err(
+                req.id, -1,
+                format!("failed to send approval card: {} — draft {} set to failed", e, draft.id),
+            );
         }
     }
 

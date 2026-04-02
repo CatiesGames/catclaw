@@ -501,6 +501,13 @@ impl SessionsPanel {
                         self.approval_selected = self.pending_approvals.len().saturating_sub(1);
                     }
                 }
+                "approval.forward_failed" => {
+                    let rid = event.data.get("request_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let reason = event.data.get("reason").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    tracing::warn!(request_id = %rid, reason = %reason, "approval card failed to forward to channel");
+                    // Mark the pending approval so TUI can indicate it's channel-only
+                    // (the approval still works from TUI, just not forwarded to Discord/etc.)
+                }
                 "session.updated" => {
                     // Channel session changed — refresh list
                     self.refresh();
