@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.0](https://github.com/CatiesGames/catclaw/compare/v0.30.0...v0.31.0) (2026-04-02)
+
+
+### Features
+
+* IG/Threads carousel（多圖輪播）發文支援 + 修復草稿審核流程 ([a213648](https://github.com/CatiesGames/catclaw/commit/a2136485302fbf69277de86e2ff85c9f66b7ddc9))
+
 ## [0.30.0](https://github.com/CatiesGames/catclaw/compare/v0.29.0...v0.30.0) (2026-04-02)
 
 
