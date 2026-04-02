@@ -1626,7 +1626,7 @@ async fn handle_social_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -
 
     // Clean up media file if present
     let workspace = gw.config.read().unwrap().general.workspace.clone();
-    crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
+    crate::social::cleanup_draft_media(&workspace, &draft.media_urls);
 
     // Update forward card in admin channel (remove buttons, show "已捨棄")
     let cfg = gw.config.read().unwrap().clone();
@@ -1655,8 +1655,57 @@ async fn handle_social_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -
     }
 }
 
+/// Create a draft from tool_input args. Called by the hook path — the MCP handler
+/// hasn't executed yet, so we must build the draft here from the raw arguments.
+fn stage_draft_from_tool(
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+    db: &crate::state::StateDb,
+) -> std::result::Result<crate::state::SocialDraftRow, String> {
+    use crate::state::SocialDraftRow;
+
+    let (platform, draft_type, content_key, reply_to_key, media_key) = match tool_name {
+        "mcp__catclaw__instagram_reply_comment" => ("instagram", "reply", "message", Some("comment_id"), None),
+        "mcp__catclaw__instagram_create_post"   => ("instagram", "post",  "caption", None,               Some("image_urls")),
+        "mcp__catclaw__instagram_send_dm"       => ("instagram", "dm",    "text",    Some("recipient_id"), None),
+        "mcp__catclaw__threads_reply"            => ("threads",   "reply", "text",    Some("post_id"),      None),
+        "mcp__catclaw__threads_create_post"      => ("threads",   "post",  "text",    None,               Some("media_urls")),
+        other => return Err(format!("unrecognized social tool '{}'", other)),
+    };
+
+    let content = tool_input.get(content_key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("missing '{}' in tool_input", content_key))?;
+
+    let reply_to_id = reply_to_key
+        .and_then(|k| tool_input.get(k))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let media_urls: Vec<String> = media_key
+        .and_then(|k| tool_input.get(k))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+
+    // Check if a matching draft already exists (idempotency for retries).
+    if let Ok(Some(existing)) = db.find_latest_draft_for_tool(platform, draft_type, reply_to_id.as_deref()) {
+        return Ok(existing);
+    }
+
+    let mut row = SocialDraftRow::new(platform, draft_type, content);
+    row.reply_to_id = reply_to_id;
+    row.media_urls = media_urls;
+
+    let id = db.insert_social_draft(&row).map_err(|e| format!("db insert error: {}", e))?;
+    db.get_social_draft(id)
+        .map_err(|e| format!("db read error: {}", e))?
+        .ok_or_else(|| "failed to read auto-staged draft".to_string())
+}
+
 /// Called by the cmd_hook when a social publish tool hits require_approval.
-/// Looks up the latest staged draft, sends approval card, stores forward_ref.
+/// Creates the draft from tool_input (since the MCP handler hasn't run yet),
+/// sends approval card, stores forward_ref.
 async fn handle_social_draft_submit(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
     let tool_name = match req.params.get("tool_name").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
@@ -1664,35 +1713,18 @@ async fn handle_social_draft_submit(req: &WsRequest, gw: &Arc<GatewayHandle>) ->
     };
     let tool_input = req.params.get("tool_input").cloned().unwrap_or(json!({}));
 
-    // Infer platform + draft_type + reply_to_id from tool_name.
-    let (platform, draft_type, reply_to_id) = match tool_name.as_str() {
-        "mcp__catclaw__instagram_reply_comment" => {
-            let rid = tool_input.get("comment_id").and_then(|v| v.as_str()).map(str::to_string);
-            ("instagram", "reply", rid)
-        }
-        "mcp__catclaw__instagram_create_post" => ("instagram", "post", None),
-        "mcp__catclaw__instagram_send_dm" => {
-            let rid = tool_input.get("recipient_id").and_then(|v| v.as_str()).map(str::to_string);
-            ("instagram", "dm", rid)
-        }
-        "mcp__catclaw__threads_reply" => {
-            let rid = tool_input.get("post_id").and_then(|v| v.as_str()).map(str::to_string);
-            ("threads", "reply", rid)
-        }
-        "mcp__catclaw__threads_create_post" => ("threads", "post", None),
-        other => return WsResponse::err(req.id, -32602, format!("unrecognized social tool '{}'", other)),
-    };
-
-    let draft = match gw.state_db.find_latest_draft_for_tool(platform, draft_type, reply_to_id.as_deref()) {
-        Ok(Some(d)) => d,
-        Ok(None) => return WsResponse::err(req.id, -32602, "no staged draft found for this tool call"),
-        Err(e) => return WsResponse::err(req.id, -1, format!("db error: {}", e)),
+    // Build draft from tool_input. The hook fires BEFORE the MCP handler, so the
+    // draft does not exist yet — we must create it here.
+    let draft = match stage_draft_from_tool(&tool_name, &tool_input, &gw.state_db) {
+        Ok(d) => d,
+        Err(e) => return WsResponse::err(req.id, -32602, e),
     };
 
     // Set status to awaiting_approval.
     let _ = gw.state_db.update_social_draft_status(draft.id, "awaiting_approval");
 
     // Determine admin_channel.
+    let platform = draft.platform.as_str();
     let admin_channel = {
         let cfg = gw.config.read().unwrap();
         match platform {

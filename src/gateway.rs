@@ -575,7 +575,7 @@ async fn handle_social_button_action(
             }
             info!(card_id, platform = %draft.platform, "social draft_discard: deleted");
             let workspace = config.read().unwrap().general.workspace.clone();
-            crate::social::cleanup_draft_media(&workspace, draft.media_url.as_deref());
+            crate::social::cleanup_draft_media(&workspace, &draft.media_urls);
             let base = forward::build_social_draft_card(&draft);
             let resolved = forward::build_resolved_card(&base, "已捨棄");
             try_update_draft_card(resolved).await;

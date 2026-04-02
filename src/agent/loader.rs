@@ -1768,12 +1768,12 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 | `instagram_delete_comment` | Delete (requires approval) |
 | `instagram_get_insights` | Insights data |
 | `instagram_get_inbox` | Query social_inbox table |
-| `instagram_create_post` | Publish image post (auto-stages draft, approval if configured) |
+| `instagram_create_post` | Publish image/carousel post (`image_urls` array, 1-10 images; auto-stages draft) |
 | `instagram_send_dm` | Send DM (auto-stages draft, approval if configured) |
 | `threads_get_profile` | Account info |
 | `threads_get_timeline` | List posts |
 | `threads_get_replies` | Fetch replies |
-| `threads_create_post` | Publish post (auto-stages draft, approval if configured) |
+| `threads_create_post` | Publish text/image/carousel post (`media_urls` optional array, 0-20 images; auto-stages draft) |
 | `threads_reply` | Reply to post (auto-stages draft, approval if configured) |
 | `threads_upload_media` | Copy local image to media_tmp and return public URL |
 | `threads_reply_template` | Send template reply |
@@ -2066,7 +2066,7 @@ Statuses: `pending` → `forwarded` / `auto_replying` / `template_sent` / `ignor
 | `instagram_delete_comment` | required | Delete a comment |
 | `instagram_get_insights` | none | Reach, impressions, engagement |
 | `instagram_get_inbox` | none | Query social_inbox table |
-| `instagram_create_post` | approval/auto | Publish image post (auto-stages draft) |
+| `instagram_create_post` | approval/auto | Publish image/carousel post (`image_urls` array, 1-10 images) |
 | `instagram_send_dm` | approval/auto | Send DM (auto-stages draft) |
 
 **Publish flow:** Just call the publish tool (`instagram_create_post`, `instagram_reply_comment`, `instagram_send_dm`) — it auto-stages a draft. If approval is required, a review card is sent to the admin channel.
@@ -2175,7 +2175,7 @@ The `threads_reply` and `threads_create_post` MCP tools handle both steps transp
 | `threads_get_profile` | none | Account info |
 | `threads_get_timeline` | none | List posts |
 | `threads_get_replies` | none | Fetch replies to a post |
-| `threads_create_post` | approval/auto | Publish post (auto-stages draft) |
+| `threads_create_post` | approval/auto | Publish text/image/carousel post (`media_urls` optional array, 0-20 images) |
 | `threads_reply` | approval/auto | Reply to post (auto-stages draft) |
 | `threads_upload_media` | none | Copy local image to media_tmp, return public URL |
 | `threads_reply_template` | none | Send a named template reply |

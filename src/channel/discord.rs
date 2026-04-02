@@ -1234,8 +1234,14 @@ impl ChannelAdapter for DiscordAdapter {
         if let Some(ref url) = card.permalink {
             embed = embed.field("Post", url, false);
         }
-        if let Some(ref url) = card.image_url {
-            embed = embed.image(url);
+        if let Some(first_url) = card.image_urls.first() {
+            embed = embed.image(first_url);
+        }
+
+        // Additional images as extra embeds — Discord renders them as a gallery.
+        let mut embeds = vec![embed];
+        for url in card.image_urls.iter().skip(1) {
+            embeds.push(CreateEmbed::new().image(url).color(color));
         }
 
         let buttons: Vec<CreateButton> = match &card.card_type {
@@ -1273,10 +1279,10 @@ impl ChannelAdapter for DiscordAdapter {
         };
 
         let builder = if buttons.is_empty() {
-            CreateMessage::new().embed(embed)
+            CreateMessage::new().embeds(embeds)
         } else {
             CreateMessage::new()
-                .embed(embed)
+                .embeds(embeds)
                 .components(vec![CreateActionRow::Buttons(buttons)])
         };
 
@@ -1341,8 +1347,13 @@ impl ChannelAdapter for DiscordAdapter {
         if let Some(ref url) = card.permalink {
             embed = embed.field("Post", url, false);
         }
-        if let Some(ref url) = card.image_url {
-            embed = embed.image(url);
+        if let Some(first_url) = card.image_urls.first() {
+            embed = embed.image(first_url);
+        }
+
+        let mut embeds = vec![embed];
+        for url in card.image_urls.iter().skip(1) {
+            embeds.push(CreateEmbed::new().image(url).color(color));
         }
 
         let buttons: Vec<CreateButton> = match &card.card_type {
@@ -1379,7 +1390,7 @@ impl ChannelAdapter for DiscordAdapter {
             ForwardCardType::Publishing | ForwardCardType::Resolved(_) => vec![],
         };
 
-        let mut builder = EditMessage::new().embed(embed);
+        let mut builder = EditMessage::new().embeds(embeds);
         if buttons.is_empty() {
             builder = builder.components(vec![]);
         } else {

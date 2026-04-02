@@ -52,7 +52,7 @@ pub fn build_forward_card(row: &SocialInboxRow) -> ForwardCard {
         author: author.to_string(),
         text: text.to_string(),
         permalink,
-        image_url: None,
+        image_urls: vec![],
         original_text: None,
         created_at: row.created_at.clone(),
         card_type: ForwardCardType::Incoming,
@@ -77,7 +77,7 @@ pub fn build_draft_card(row: &SocialInboxRow, draft: &str) -> ForwardCard {
         author: author.to_string(),
         text: format!("Original ({}): {}\nDraft: {}", author, original_text, draft),
         permalink: None,
-        image_url: None,
+        image_urls: vec![],
         original_text: None,
         created_at: row.created_at.clone(),
         card_type: ForwardCardType::DraftReview,
@@ -122,7 +122,7 @@ pub fn build_social_draft_card(draft: &SocialDraftRow) -> ForwardCard {
         author: author.to_string(),
         text,
         permalink: None,
-        image_url: draft.media_url.clone(),
+        image_urls: draft.media_urls.clone(),
         original_text: None,
         created_at: draft.created_at.clone(),
         card_type: ForwardCardType::DraftReview,
@@ -152,8 +152,8 @@ pub struct ForwardCard {
     pub author: String,
     pub text: String,
     pub permalink: Option<String>,
-    /// Image URL to display in the card (e.g., draft post media).
-    pub image_url: Option<String>,
+    /// Image URLs to display in the card (e.g., draft post media). Empty = no media.
+    pub image_urls: Vec<String>,
     /// Cached parent post text (shown when user clicks "查看原文").
     pub original_text: Option<String>,
     pub created_at: String,
@@ -170,7 +170,7 @@ pub fn build_publishing_card(card: &ForwardCard) -> ForwardCard {
         author: card.author.clone(),
         text: card.text.clone(),
         permalink: card.permalink.clone(),
-        image_url: card.image_url.clone(),
+        image_urls: card.image_urls.clone(),
         original_text: card.original_text.clone(),
         created_at: card.created_at.clone(),
         card_type: ForwardCardType::Publishing,
@@ -187,7 +187,7 @@ pub fn build_failed_card(card: &ForwardCard, status: &str) -> ForwardCard {
         author: card.author.clone(),
         text: card.text.clone(),
         permalink: card.permalink.clone(),
-        image_url: card.image_url.clone(),
+        image_urls: card.image_urls.clone(),
         original_text: card.original_text.clone(),
         created_at: card.created_at.clone(),
         card_type: ForwardCardType::Failed(status.to_string()),
@@ -204,7 +204,7 @@ pub fn build_resolved_card(card: &ForwardCard, status: &str) -> ForwardCard {
         author: card.author.clone(),
         text: card.text.clone(),
         permalink: card.permalink.clone(),
-        image_url: card.image_url.clone(),
+        image_urls: card.image_urls.clone(),
         original_text: card.original_text.clone(),
         created_at: card.created_at.clone(),
         card_type: ForwardCardType::Resolved(status.to_string()),
@@ -281,12 +281,21 @@ impl ForwardCard {
             } },
             "timestamp": ts
         });
-        if let Some(ref url) = self.image_url {
-            embed["image"] = json!({"url": url});
+        if let Some(first_url) = self.image_urls.first() {
+            embed["image"] = json!({"url": first_url});
+        }
+
+        let mut embeds = vec![embed];
+        // Additional images as extra embeds — Discord renders them as a gallery.
+        for url in self.image_urls.iter().skip(1) {
+            embeds.push(json!({
+                "image": {"url": url},
+                "color": color
+            }));
         }
 
         json!({
-            "embeds": [embed],
+            "embeds": embeds,
             "components": components
         })
     }
@@ -318,10 +327,18 @@ impl ForwardCard {
                 .as_ref()
                 .map(|u| format!("\n[Post]({})", u))
                 .unwrap_or_default(),
-            self.image_url
-                .as_ref()
-                .map(|u| format!("\n[Media]({})", escape_markdown(u)))
-                .unwrap_or_default(),
+            if self.image_urls.is_empty() {
+                String::new()
+            } else {
+                let links: Vec<String> = self.image_urls.iter().enumerate().map(|(i, u)| {
+                    if i == 0 {
+                        format!("[Media]({})", escape_markdown(u))
+                    } else {
+                        format!("[圖{}]({})", i + 1, escape_markdown(u))
+                    }
+                }).collect();
+                format!("\n{}", links.join(" "))
+            },
             status_line,
             id_line,
         );
@@ -368,11 +385,11 @@ impl ForwardCard {
             "text": { "type": "mrkdwn", "text": body_text }
         });
         let mut blocks = vec![header, body];
-        if let Some(ref url) = self.image_url {
+        for (i, url) in self.image_urls.iter().enumerate() {
             blocks.push(json!({
                 "type": "image",
                 "image_url": url,
-                "alt_text": "Draft media"
+                "alt_text": format!("Media {}", i + 1)
             }));
         }
         let id_text = if self.platform_id.is_empty() {

@@ -182,7 +182,7 @@ fn instagram_tools() -> Vec<Value> {
         social_tool("instagram_delete_comment", "Delete an Instagram comment (requires approval)", serde_json::json!({"type":"object","properties":{"comment_id":{"type":"string","description":"Comment ID to delete"}},"required":["comment_id"]})),
         social_tool("instagram_get_insights", "Get Instagram account insights/analytics", serde_json::json!({"type":"object","properties":{"metric":{"type":"string","description":"Comma-separated metrics (e.g. impressions,reach)"},"period":{"type":"string","description":"Period: day, week, month"}},"required":["metric","period"]})),
         social_tool("instagram_get_inbox", "Query the Social Inbox for Instagram events", serde_json::json!({"type":"object","properties":{"status":{"type":"string","description":"Filter by status: pending, forwarded, draft_ready, sent, ignored, failed"},"limit":{"type":"integer","description":"Max rows to return (default 20)"}},"required":[]})),
-        social_tool("instagram_create_post", "Create a new Instagram image post. Auto-stages a draft if not already staged. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"image_url":{"type":"string","description":"Public URL of the image to post (JPEG, max 8MB)"},"caption":{"type":"string","description":"Post caption (max 2200 characters)"}},"required":["image_url","caption"]})),
+        social_tool("instagram_create_post", "Create a new Instagram image post or carousel. Auto-stages a draft if not already staged. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"image_urls":{"type":"array","items":{"type":"string"},"description":"Public URLs of images to post (JPEG, max 8MB each). 1 image = single post, 2-10 images = carousel.","minItems":1,"maxItems":10},"caption":{"type":"string","description":"Post caption (max 2200 characters)"}},"required":["image_urls","caption"]})),
         social_tool("instagram_send_dm", "Send a direct message to an Instagram user. Auto-stages a draft if not already staged. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Instagram-scoped user ID of the recipient"},"text":{"type":"string","description":"Message text (max 1000 characters)"}},"required":["recipient_id","text"]})),
     ]
 }
@@ -192,7 +192,7 @@ fn threads_tools() -> Vec<Value> {
         social_tool("threads_get_profile", "Get Threads account profile info", serde_json::json!({"type":"object","properties":{},"required":[]})),
         social_tool("threads_get_timeline", "List recent Threads posts", serde_json::json!({"type":"object","properties":{"limit":{"type":"integer","description":"Number of posts to fetch (default 10)"}},"required":[]})),
         social_tool("threads_get_replies", "Get replies on a Threads post", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Threads post ID"}},"required":["post_id"]})),
-        social_tool("threads_create_post", "Create a new Threads post. Auto-stages a draft if not already staged. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"Post text content"},"media_url":{"type":"string","description":"Public image URL (optional, for image posts)"}},"required":["text"]})),
+        social_tool("threads_create_post", "Create a new Threads post. Auto-stages a draft if not already staged. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"Post text content"},"media_urls":{"type":"array","items":{"type":"string"},"description":"Public image URLs (optional). 1 image = single image post, 2-20 images = carousel.","maxItems":20}},"required":["text"]})),
         social_tool("threads_reply", "Reply to a Threads post. Auto-stages a draft. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID to reply to"},"text":{"type":"string","description":"Reply text"}},"required":["post_id","text"]})),
         social_tool("threads_upload_media", "Copy a local image file to the gateway media_tmp dir and return a public URL for use with threads_create_post.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Absolute local path to the image file (jpg, png, gif, webp)"}},"required":["file_path"]})),
         social_tool("threads_reply_template", "Send a template reply to a Threads post", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID"},"template_name":{"type":"string","description":"Template name from catclaw.toml"}},"required":["post_id","template_name"]})),
@@ -296,20 +296,28 @@ async fn execute_social_tool(
         }
         "instagram_create_post" => {
             let (token, uid) = ig_creds(&cfg)?;
-            let image_url = str_arg(&args, "image_url")?;
+            let image_urls = arr_arg(&args, "image_urls")?;
             let agent_caption = str_arg(&args, "caption")?;
             // Auto-stage if no draft exists yet
             let draft = match gw.state_db.find_latest_draft_for_tool("instagram", "post", None).ok().flatten() {
                 Some(d) => d,
                 None => {
                     let mut row = crate::state::SocialDraftRow::new("instagram", "post", agent_caption);
-                    row.media_url = Some(image_url.to_string());
+                    row.media_urls = image_urls.clone();
                     let id = gw.state_db.insert_social_draft(&row)?;
                     gw.state_db.get_social_draft(id)?.ok_or_else(|| CatClawError::Social("failed to read auto-staged draft".into()))?
                 }
             };
             let caption = draft.content.as_str();
-            let result = InstagramClient::new(token, uid).create_image_post(image_url, caption).await?;
+            let client = InstagramClient::new(token, uid);
+            let result = match draft.media_urls.len() {
+                0 => return Err(CatClawError::Social("instagram post requires at least one image".into())),
+                1 => client.create_image_post(&draft.media_urls[0], caption).await?,
+                _ => {
+                    let refs: Vec<&str> = draft.media_urls.iter().map(|s| s.as_str()).collect();
+                    client.create_carousel_post(&refs, caption).await?
+                }
+            };
             if let Some(post_id) = result.get("id").and_then(|v| v.as_str()) {
                 let _ = gw.state_db.update_social_draft_sent(draft.id, post_id);
             }
@@ -355,23 +363,26 @@ async fn execute_social_tool(
         "threads_create_post" => {
             let (token, uid) = th_creds(&cfg)?;
             let agent_text = str_arg(&args, "text")?;
-            let agent_media_url = args.get("media_url").and_then(|v| v.as_str());
+            let agent_media_urls = opt_arr_arg(&args, "media_urls");
             // Auto-stage if no draft exists yet
             let draft = match gw.state_db.find_latest_draft_for_tool("threads", "post", None).ok().flatten() {
                 Some(d) => d,
                 None => {
                     let mut row = crate::state::SocialDraftRow::new("threads", "post", agent_text);
-                    row.media_url = agent_media_url.map(str::to_string);
+                    row.media_urls = agent_media_urls;
                     let id = gw.state_db.insert_social_draft(&row)?;
                     gw.state_db.get_social_draft(id)?.ok_or_else(|| CatClawError::Social("failed to read auto-staged draft".into()))?
                 }
             };
             let text = draft.content.as_str();
             let client = ThreadsClient::new(token, uid);
-            let result = if let Some(ref url) = draft.media_url {
-                client.create_image_post(url, text).await?
-            } else {
-                client.create_post(text).await?
+            let result = match draft.media_urls.len() {
+                0 => client.create_post(text).await?,
+                1 => client.create_image_post(&draft.media_urls[0], text).await?,
+                _ => {
+                    let refs: Vec<&str> = draft.media_urls.iter().map(|s| s.as_str()).collect();
+                    client.create_carousel_post(&refs, text).await?
+                }
             };
             if let Some(post_id) = result.get("id").and_then(|v| v.as_str()) {
                 let _ = gw.state_db.update_social_draft_sent(draft.id, post_id);
@@ -546,6 +557,22 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> crate::error::Result<&'a str> {
     args.get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| crate::error::CatClawError::Social(format!("missing argument '{}'", key)))
+}
+
+/// Parse a required array-of-strings argument.
+fn arr_arg(args: &Value, key: &str) -> crate::error::Result<Vec<String>> {
+    args.get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .ok_or_else(|| crate::error::CatClawError::Social(format!("missing argument '{}'", key)))
+}
+
+/// Parse an optional array-of-strings argument (returns empty vec if absent).
+fn opt_arr_arg(args: &Value, key: &str) -> Vec<String> {
+    args.get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
 }
 
 /// Build a JSON-RPC success response

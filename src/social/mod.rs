@@ -379,11 +379,16 @@ pub async fn execute_draft_publish(
             let token = std::env::var(&ig.token_env)
                 .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", ig.token_env)))?;
             let client = instagram::InstagramClient::new(token, ig.user_id.clone());
-            let image_url = draft.media_url.as_deref()
-                .ok_or_else(|| crate::error::CatClawError::Social(
-                    "instagram post requires media_url — use instagram_upload_media first".into()
-                ))?;
-            let resp = client.create_image_post(image_url, &draft.content).await?;
+            let resp = match draft.media_urls.len() {
+                0 => return Err(crate::error::CatClawError::Social(
+                    "instagram post requires at least one image — use instagram_upload_media first".into()
+                )),
+                1 => client.create_image_post(&draft.media_urls[0], &draft.content).await?,
+                _ => {
+                    let refs: Vec<&str> = draft.media_urls.iter().map(|s| s.as_str()).collect();
+                    client.create_carousel_post(&refs, &draft.content).await?
+                }
+            };
             Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
         }
         ("instagram", "dm") => {
@@ -412,10 +417,13 @@ pub async fn execute_draft_publish(
             let token = std::env::var(&th.token_env)
                 .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", th.token_env)))?;
             let client = threads::ThreadsClient::new(token, th.user_id.clone());
-            let resp = if let Some(ref url) = draft.media_url {
-                client.create_image_post(url, &draft.content).await?
-            } else {
-                client.create_post(&draft.content).await?
+            let resp = match draft.media_urls.len() {
+                0 => client.create_post(&draft.content).await?,
+                1 => client.create_image_post(&draft.media_urls[0], &draft.content).await?,
+                _ => {
+                    let refs: Vec<&str> = draft.media_urls.iter().map(|s| s.as_str()).collect();
+                    client.create_carousel_post(&refs, &draft.content).await?
+                }
             };
             Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
         }
@@ -448,9 +456,9 @@ pub fn cleanup_old_media(workspace: &std::path::Path, max_age_days: u64) {
     }
 }
 
-/// Delete the local media_tmp file referenced by a draft's media_url, if any.
-pub fn cleanup_draft_media(workspace: &std::path::Path, media_url: Option<&str>) {
-    if let Some(url) = media_url {
+/// Delete the local media_tmp files referenced by a draft's media_urls.
+pub fn cleanup_draft_media(workspace: &std::path::Path, media_urls: &[String]) {
+    for url in media_urls {
         if let Some(filename) = url.rsplit('/').next() {
             // Safety: only delete from media_tmp, validate filename
             if !filename.contains("..") && !filename.contains('/') {

@@ -109,6 +109,54 @@ impl InstagramClient {
         self.post_form(&publish_url, &[("creation_id", &container_id)]).await
     }
 
+    /// Create a carousel post with multiple images (three-step: child containers → carousel container → publish).
+    /// `image_urls` must contain 2–10 publicly accessible JPEG URLs.
+    pub async fn create_carousel_post(&self, image_urls: &[&str], caption: &str) -> Result<Value> {
+        if image_urls.len() < 2 {
+            return Err(CatClawError::Social("carousel requires at least 2 images".into()));
+        }
+        if image_urls.len() > 10 {
+            return Err(CatClawError::Social("carousel supports at most 10 images".into()));
+        }
+
+        // Step 1: create child containers (one per image, no caption).
+        let container_url = format!("{}/{}/media", self.base(), self.user_id);
+        let mut child_ids = Vec::with_capacity(image_urls.len());
+        for url in image_urls {
+            let child: Value = self
+                .post_form(&container_url, &[("image_url", *url), ("is_carousel_item", "true")])
+                .await?;
+            let child_id = child
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| CatClawError::Social("instagram: no child container id".into()))?
+                .to_string();
+            child_ids.push(child_id);
+        }
+
+        // Step 2: wait for child containers to finish processing.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        // Step 3: create carousel container.
+        let children_csv = child_ids.join(",");
+        let carousel: Value = self
+            .post_form(
+                &container_url,
+                &[("media_type", "CAROUSEL"), ("children", &children_csv), ("caption", caption)],
+            )
+            .await?;
+        let carousel_id = carousel
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CatClawError::Social("instagram: no carousel container id".into()))?
+            .to_string();
+
+        // Step 4: wait for carousel container processing, then publish.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let publish_url = format!("{}/{}/media_publish", self.base(), self.user_id);
+        self.post_form(&publish_url, &[("creation_id", &carousel_id)]).await
+    }
+
     /// Send a direct message to a user.
     pub async fn send_dm(&self, recipient_id: &str, text: &str) -> Result<Value> {
         let url = format!("{}/me/messages", self.base());

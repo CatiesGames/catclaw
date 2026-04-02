@@ -844,7 +844,7 @@ impl StateDb {
               status, reply_id, forward_ref, agent_id, session_key, metadata, created_at, updated_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
-                row.platform, row.draft_type, row.content, row.media_url,
+                row.platform, row.draft_type, row.content, encode_media_urls(&row.media_urls),
                 row.reply_to_id, row.original_text, row.original_author,
                 row.status, row.reply_id, row.forward_ref, row.agent_id,
                 row.session_key, row.metadata, row.created_at, row.updated_at,
@@ -1113,7 +1113,9 @@ pub struct SocialDraftRow {
     /// "reply" | "post" | "dm"
     pub draft_type: String,
     pub content: String,
-    pub media_url: Option<String>,
+    /// Media URLs for the draft. Single image = 1 entry, carousel = 2+ entries.
+    /// Stored in DB as: NULL (empty), plain string (1 URL), JSON array (2+ URLs).
+    pub media_urls: Vec<String>,
     pub reply_to_id: Option<String>,
     pub original_text: Option<String>,
     pub original_author: Option<String>,
@@ -1136,7 +1138,7 @@ impl SocialDraftRow {
             platform: platform.to_string(),
             draft_type: draft_type.to_string(),
             content: content.to_string(),
-            media_url: None,
+            media_urls: vec![],
             reply_to_id: None,
             original_text: None,
             original_author: None,
@@ -1152,13 +1154,33 @@ impl SocialDraftRow {
     }
 }
 
+/// Encode media URLs for DB storage: 0 → NULL, 1 → plain string, 2+ → JSON array.
+fn encode_media_urls(urls: &[String]) -> Option<String> {
+    match urls.len() {
+        0 => None,
+        1 => Some(urls[0].clone()),
+        _ => Some(serde_json::to_string(urls).unwrap_or_default()),
+    }
+}
+
+/// Decode media URLs from DB: NULL → empty, JSON array → vec, plain string → vec![s].
+fn decode_media_urls(raw: Option<String>) -> Vec<String> {
+    match raw {
+        None => vec![],
+        Some(s) if s.starts_with('[') => {
+            serde_json::from_str(&s).unwrap_or_else(|_| vec![s])
+        }
+        Some(s) => vec![s],
+    }
+}
+
 fn social_draft_row_mapper(row: &rusqlite::Row) -> rusqlite::Result<SocialDraftRow> {
     Ok(SocialDraftRow {
         id: row.get(0)?,
         platform: row.get(1)?,
         draft_type: row.get(2)?,
         content: row.get(3)?,
-        media_url: row.get(4)?,
+        media_urls: decode_media_urls(row.get(4)?),
         reply_to_id: row.get(5)?,
         original_text: row.get(6)?,
         original_author: row.get(7)?,

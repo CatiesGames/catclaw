@@ -1427,7 +1427,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                 println!("{}", "-".repeat(91));
                                 for row in &rows {
                                     let content_preview: String = row.content.chars().take(38).collect();
-                                    let media = if row.media_url.is_some() { "yes" } else { "-" };
+                                    let media = match row.media_urls.len() {
+                                        0 => "-".to_string(),
+                                        1 => "1".to_string(),
+                                        n => format!("{n}"),
+                                    };
                                     println!(
                                         "{:<5} {:<12} {:<8} {:<40} {:<6} {:<18}",
                                         row.id,
@@ -1447,8 +1451,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                     println!("  Platform:   {} ({})", d.platform, d.draft_type);
                                     println!("  Status:     {}", d.status);
                                     println!("  Content:    {}", d.content);
-                                    if let Some(ref url) = d.media_url {
-                                        println!("  Media:      {}", url);
+                                    for (i, url) in d.media_urls.iter().enumerate() {
+                                        if d.media_urls.len() == 1 {
+                                            println!("  Media:      {}", url);
+                                        } else {
+                                            println!("  Media {}: {}", i + 1, url);
+                                        }
                                     }
                                     if let Some(ref reply_to) = d.reply_to_id {
                                         println!("  Reply to:   {}", reply_to);

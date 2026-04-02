@@ -103,6 +103,57 @@ impl ThreadsClient {
         self.post_form(&publish_url, &[("creation_id", &container_id)]).await
     }
 
+    /// Create a carousel post with multiple images (three-step: child containers → carousel container → publish).
+    /// `image_urls` must contain 2–20 publicly accessible image URLs.
+    pub async fn create_carousel_post(&self, image_urls: &[&str], text: &str) -> Result<Value> {
+        if image_urls.len() < 2 {
+            return Err(CatClawError::Social("carousel requires at least 2 images".into()));
+        }
+        if image_urls.len() > 20 {
+            return Err(CatClawError::Social("carousel supports at most 20 images".into()));
+        }
+
+        // Step 1: create child containers (one per image).
+        let container_url = format!("{}/{}/threads", self.base(), self.user_id);
+        let mut child_ids = Vec::with_capacity(image_urls.len());
+        for url in image_urls {
+            let child: Value = self
+                .post_form(
+                    &container_url,
+                    &[("media_type", "IMAGE"), ("image_url", *url), ("is_carousel_item", "true")],
+                )
+                .await?;
+            let child_id = child
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| CatClawError::Social("threads: no child container id".into()))?
+                .to_string();
+            child_ids.push(child_id);
+        }
+
+        // Step 2: wait for child containers to finish processing.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        // Step 3: create carousel container.
+        let children_csv = child_ids.join(",");
+        let carousel: Value = self
+            .post_form(
+                &container_url,
+                &[("media_type", "CAROUSEL"), ("children", &children_csv), ("text", text)],
+            )
+            .await?;
+        let carousel_id = carousel
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CatClawError::Social("threads: no carousel container id".into()))?
+            .to_string();
+
+        // Step 4: wait for carousel container processing, then publish.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let publish_url = format!("{}/{}/threads_publish", self.base(), self.user_id);
+        self.post_form(&publish_url, &[("creation_id", &carousel_id)]).await
+    }
+
     /// Reply to a post (two-step: create reply container → publish).
     pub async fn reply(&self, post_id: &str, text: &str) -> Result<Value> {
         let container_url = format!("{}/{}/threads", self.base(), self.user_id);

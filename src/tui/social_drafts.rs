@@ -19,7 +19,7 @@ struct DraftItem {
     draft_type: String,
     reply_to_id: Option<String>,
     content: String,
-    media_url: Option<String>,
+    media_urls: Vec<String>,
     status: String,
     created_at: String,
 }
@@ -310,9 +310,14 @@ impl Component for SocialDraftsPanel {
                         Span::raw(item.content.clone()),
                     ]),
                 ];
-                if let Some(ref url) = item.media_url {
+                for (i, url) in item.media_urls.iter().enumerate() {
+                    let label = if item.media_urls.len() == 1 {
+                        "Media: ".to_string()
+                    } else {
+                        format!("Media {}: ", i + 1)
+                    };
                     detail_text.push(Line::from(vec![
-                        Span::styled("Media: ", Style::default().add_modifier(Modifier::BOLD)),
+                        Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
                         Span::raw(url.to_string()),
                     ]));
                 }
@@ -339,8 +344,10 @@ impl Component for SocialDraftsPanel {
                 .enumerate()
                 .map(|(i, item)| {
                     let mut content_preview: String = item.content.chars().take(40).collect();
-                    if item.media_url.is_some() {
-                        content_preview = format!("[img] {}", content_preview);
+                    match item.media_urls.len() {
+                        0 => {}
+                        1 => content_preview = format!("[img] {}", content_preview),
+                        n => content_preview = format!("[{n} imgs] {}", content_preview),
                     }
                     let style = if i == self.selected {
                         Style::default().bg(Theme::MAUVE).fg(Theme::BASE)
@@ -395,7 +402,10 @@ fn parse_items(val: &serde_json::Value) -> Vec<DraftItem> {
                         draft_type: v.get("draft_type")?.as_str()?.to_string(),
                         reply_to_id: v.get("reply_to_id").and_then(|x| x.as_str()).map(str::to_string),
                         content: v.get("content")?.as_str()?.to_string(),
-                        media_url: v.get("media_url").and_then(|x| x.as_str()).map(str::to_string),
+                        media_urls: v.get("media_urls")
+                            .and_then(|x| x.as_array())
+                            .map(|arr| arr.iter().filter_map(|u| u.as_str().map(str::to_string)).collect())
+                            .unwrap_or_default(),
                         status: v.get("status")?.as_str()?.to_string(),
                         created_at: v.get("created_at").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                     })
