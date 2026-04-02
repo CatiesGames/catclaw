@@ -565,19 +565,40 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> crate::error::Result<&'a str> {
         .ok_or_else(|| crate::error::CatClawError::Social(format!("missing argument '{}'", key)))
 }
 
-/// Parse a required array-of-strings argument.
-fn arr_arg(args: &Value, key: &str) -> crate::error::Result<Vec<String>> {
-    args.get(key)
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-        .ok_or_else(|| crate::error::CatClawError::Social(format!("missing argument '{}'", key)))
+/// Parse a JSON value that may be a real array or a stringified JSON array.
+/// Agents sometimes pass `"[\"url1\"]"` (string) instead of `["url1"]` (array).
+fn parse_string_or_array(v: &Value) -> Vec<String> {
+    if let Some(arr) = v.as_array() {
+        return arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+    }
+    if let Some(s) = v.as_str() {
+        if s.starts_with('[') {
+            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(s) {
+                return parsed;
+            }
+        }
+        if !s.is_empty() {
+            return vec![s.to_string()];
+        }
+    }
+    vec![]
 }
 
-/// Parse an optional array-of-strings argument (returns empty vec if absent).
+/// Parse a required array-of-strings argument (tolerates stringified arrays).
+fn arr_arg(args: &Value, key: &str) -> crate::error::Result<Vec<String>> {
+    let v = args.get(key)
+        .ok_or_else(|| crate::error::CatClawError::Social(format!("missing argument '{}'", key)))?;
+    let urls = parse_string_or_array(v);
+    if urls.is_empty() {
+        return Err(crate::error::CatClawError::Social(format!("argument '{}' is empty", key)));
+    }
+    Ok(urls)
+}
+
+/// Parse an optional array-of-strings argument (tolerates stringified arrays).
 fn opt_arr_arg(args: &Value, key: &str) -> Vec<String> {
     args.get(key)
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(parse_string_or_array)
         .unwrap_or_default()
 }
 

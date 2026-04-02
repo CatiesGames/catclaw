@@ -1655,6 +1655,26 @@ async fn handle_social_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -
     }
 }
 
+/// Parse a JSON value that may be a real array or a stringified JSON array.
+/// Agents sometimes pass `"[\"url1\",\"url2\"]"` instead of `["url1","url2"]`.
+fn parse_string_or_array(v: &serde_json::Value) -> Vec<String> {
+    if let Some(arr) = v.as_array() {
+        return arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+    }
+    if let Some(s) = v.as_str() {
+        if s.starts_with('[') {
+            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(s) {
+                return parsed;
+            }
+        }
+        // Single URL string — wrap in vec.
+        if !s.is_empty() {
+            return vec![s.to_string()];
+        }
+    }
+    vec![]
+}
+
 /// Create a draft from tool_input args. Called by the hook path — the MCP handler
 /// hasn't executed yet, so we must build the draft here from the raw arguments.
 fn stage_draft_from_tool(
@@ -1684,8 +1704,7 @@ fn stage_draft_from_tool(
 
     let media_urls: Vec<String> = media_key
         .and_then(|k| tool_input.get(k))
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(parse_string_or_array)
         .unwrap_or_default();
 
     // Check if a matching draft already exists (idempotency for retries).
