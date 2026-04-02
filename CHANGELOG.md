@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.30.0](https://github.com/CatiesGames/catclaw/compare/v0.29.0...v0.30.0) (2026-04-02)
+
+
+### Features
+
+* 社群卡片與 TUI 顯示 platform_id（Threads/IG 原生 ID） ([1a0a6d2](https://github.com/CatiesGames/catclaw/commit/1a0a6d2b2a6e1bf7757362a5b87f6c155ef3753d))
+
+
+### Bug Fixes
+
+* 核准卡片轉發失敗時不再靜默吞錯 ([02844ec](https://github.com/CatiesGames/catclaw/commit/02844ec4f82e0fb8b27071ae4000e4c0494f98c5))
+
 ## [0.29.0](https://github.com/CatiesGames/catclaw/compare/v0.28.2...v0.29.0) (2026-04-01)
 
 
