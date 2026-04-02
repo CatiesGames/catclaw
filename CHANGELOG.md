@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.0](https://github.com/CatiesGames/catclaw/compare/v0.31.0...v0.32.0) (2026-04-02)
+
+
+### Features
+
+* upload_media 支援批次上傳 + 補齊 skill 多圖操作步驟 ([1a673fe](https://github.com/CatiesGames/catclaw/commit/1a673fe1c1366d32cf6bc965a80dcaa8895a56c4))
+
 ## [0.31.0](https://github.com/CatiesGames/catclaw/compare/v0.30.0...v0.31.0) (2026-04-02)
 
 
