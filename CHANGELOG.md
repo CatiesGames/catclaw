@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.1](https://github.com/CatiesGames/catclaw/compare/v0.32.0...v0.32.1) (2026-04-02)
+
+
+### Bug Fixes
+
+* 容忍 agent 傳字串化 JSON array 作為 image_urls/media_urls ([4c571c0](https://github.com/CatiesGames/catclaw/commit/4c571c0084e91a1c4e8d693f76f9938d8b03e360))
+
 ## [0.32.0](https://github.com/CatiesGames/catclaw/compare/v0.31.0...v0.32.0) (2026-04-02)
 
 
