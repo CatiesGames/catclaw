@@ -177,7 +177,7 @@ fn instagram_tools() -> Vec<Value> {
         social_tool("instagram_get_media", "List recent Instagram posts", serde_json::json!({"type":"object","properties":{"limit":{"type":"integer","description":"Number of posts to fetch (default 10)"}},"required":[]})),
         social_tool("instagram_get_comments", "Get comments on an Instagram post", serde_json::json!({"type":"object","properties":{"media_id":{"type":"string","description":"Instagram media/post ID"}},"required":["media_id"]})),
         social_tool("instagram_reply_comment", "Reply to an Instagram comment. Auto-stages a draft. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"comment_id":{"type":"string","description":"Comment ID to reply to"},"message":{"type":"string","description":"Reply text"}},"required":["comment_id","message"]})),
-        social_tool("instagram_upload_media", "Copy a local image file to the gateway media_tmp dir and return a public URL for use with instagram_create_post.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Absolute local path to the image file (jpg, png, gif, webp)"}},"required":["file_path"]})),
+        social_tool("instagram_upload_media", "Copy local image files to the gateway media_tmp dir and return public URLs for use with instagram_create_post. Supports batch upload.", serde_json::json!({"type":"object","properties":{"file_paths":{"type":"array","items":{"type":"string"},"description":"Absolute local paths to image files (jpg, png, gif, webp). Supports 1-10 files.","minItems":1,"maxItems":10}},"required":["file_paths"]})),
         social_tool("instagram_reply_template", "Send a template reply to an Instagram comment", serde_json::json!({"type":"object","properties":{"comment_id":{"type":"string","description":"Comment ID"},"template_name":{"type":"string","description":"Template name from catclaw.toml"}},"required":["comment_id","template_name"]})),
         social_tool("instagram_delete_comment", "Delete an Instagram comment (requires approval)", serde_json::json!({"type":"object","properties":{"comment_id":{"type":"string","description":"Comment ID to delete"}},"required":["comment_id"]})),
         social_tool("instagram_get_insights", "Get Instagram account insights/analytics", serde_json::json!({"type":"object","properties":{"metric":{"type":"string","description":"Comma-separated metrics (e.g. impressions,reach)"},"period":{"type":"string","description":"Period: day, week, month"}},"required":["metric","period"]})),
@@ -194,7 +194,7 @@ fn threads_tools() -> Vec<Value> {
         social_tool("threads_get_replies", "Get replies on a Threads post", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Threads post ID"}},"required":["post_id"]})),
         social_tool("threads_create_post", "Create a new Threads post. Auto-stages a draft if not already staged. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"Post text content"},"media_urls":{"type":"array","items":{"type":"string"},"description":"Public image URLs (optional). 1 image = single image post, 2-20 images = carousel.","maxItems":20}},"required":["text"]})),
         social_tool("threads_reply", "Reply to a Threads post. Auto-stages a draft. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID to reply to"},"text":{"type":"string","description":"Reply text"}},"required":["post_id","text"]})),
-        social_tool("threads_upload_media", "Copy a local image file to the gateway media_tmp dir and return a public URL for use with threads_create_post.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Absolute local path to the image file (jpg, png, gif, webp)"}},"required":["file_path"]})),
+        social_tool("threads_upload_media", "Copy local image files to the gateway media_tmp dir and return public URLs for use with threads_create_post. Supports batch upload.", serde_json::json!({"type":"object","properties":{"file_paths":{"type":"array","items":{"type":"string"},"description":"Absolute local paths to image files (jpg, png, gif, webp). Supports 1-20 files.","minItems":1,"maxItems":20}},"required":["file_paths"]})),
         social_tool("threads_reply_template", "Send a template reply to a Threads post", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID"},"template_name":{"type":"string","description":"Template name from catclaw.toml"}},"required":["post_id","template_name"]})),
         social_tool("threads_delete_post", "Delete a Threads post (requires approval)", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID to delete"}},"required":["post_id"]})),
         social_tool("threads_get_insights", "Get Threads account insights/analytics", serde_json::json!({"type":"object","properties":{"metric":{"type":"string","description":"Comma-separated metrics"}},"required":["metric"]})),
@@ -261,10 +261,13 @@ async fn execute_social_tool(
             Ok(result)
         }
         "instagram_upload_media" => {
-            let file_path = str_arg(&args, "file_path")?;
+            let file_paths = arr_arg(&args, "file_paths")?;
             let base_url = cfg.general.webhook_base_url.as_deref()
                 .ok_or_else(|| CatClawError::Social("webhook_base_url not configured".into()))?;
-            upload_media_file(file_path, base_url, &cfg.general.workspace, "instagram")
+            let results: Vec<Value> = file_paths.iter()
+                .map(|p| upload_media_file(p, base_url, &cfg.general.workspace, "instagram"))
+                .collect::<crate::error::Result<Vec<_>>>()?;
+            Ok(serde_json::json!(results))
         }
         "instagram_reply_template" => {
             let (token, uid) = ig_creds(&cfg)?;
@@ -411,10 +414,13 @@ async fn execute_social_tool(
             Ok(result)
         }
         "threads_upload_media" => {
-            let file_path = str_arg(&args, "file_path")?;
+            let file_paths = arr_arg(&args, "file_paths")?;
             let base_url = cfg.general.webhook_base_url.as_deref()
                 .ok_or_else(|| CatClawError::Social("webhook_base_url not configured".into()))?;
-            upload_media_file(file_path, base_url, &cfg.general.workspace, "threads")
+            let results: Vec<Value> = file_paths.iter()
+                .map(|p| upload_media_file(p, base_url, &cfg.general.workspace, "threads"))
+                .collect::<crate::error::Result<Vec<_>>>()?;
+            Ok(serde_json::json!(results))
         }
         "threads_reply_template" => {
             let (token, uid) = th_creds(&cfg)?;

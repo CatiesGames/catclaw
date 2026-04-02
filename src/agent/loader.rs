@@ -1763,7 +1763,7 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 | `instagram_get_media` | List posts |
 | `instagram_get_comments` | Fetch comments |
 | `instagram_reply_comment` | Reply to comment (auto-stages draft, approval if configured) |
-| `instagram_upload_media` | Copy local image to media_tmp and return public URL |
+| `instagram_upload_media` | Batch upload local images to media_tmp (`file_paths` array), return public URLs |
 | `instagram_reply_template` | Send a template reply |
 | `instagram_delete_comment` | Delete (requires approval) |
 | `instagram_get_insights` | Insights data |
@@ -1775,7 +1775,7 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 | `threads_get_replies` | Fetch replies |
 | `threads_create_post` | Publish text/image/carousel post (`media_urls` optional array, 0-20 images; auto-stages draft) |
 | `threads_reply` | Reply to post (auto-stages draft, approval if configured) |
-| `threads_upload_media` | Copy local image to media_tmp and return public URL |
+| `threads_upload_media` | Batch upload local images to media_tmp (`file_paths` array), return public URLs |
 | `threads_reply_template` | Send template reply |
 | `threads_delete_post` | Delete post (requires approval) |
 | `threads_get_insights` | Insights data |
@@ -1783,6 +1783,8 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 | `threads_keyword_search` | Search posts by keyword |
 
 **Publish flow:** Just call the publish tool (`instagram_create_post`, `threads_create_post`, etc.) — it auto-stages a draft and triggers the approval hook, which sends a review card to the admin channel.
+
+**Image/carousel posts:** Upload each image with `instagram_upload_media` / `threads_upload_media` first, then pass all URLs as an array to the create_post tool. 1 image = single post, 2+ images = carousel.
 
 For full setup guidance, load the `instagram` or `threads` skill.
 "#;
@@ -2061,7 +2063,7 @@ Statuses: `pending` → `forwarded` / `auto_replying` / `template_sent` / `ignor
 | `instagram_get_media` | none | List recent posts |
 | `instagram_get_comments` | none | Fetch comments on a post |
 | `instagram_reply_comment` | approval/auto | Reply to comment (auto-stages draft) |
-| `instagram_upload_media` | none | Copy local image to media_tmp, return public URL |
+| `instagram_upload_media` | none | Batch upload images to media_tmp (`file_paths` array), return public URLs |
 | `instagram_reply_template` | none | Send a named template reply |
 | `instagram_delete_comment` | required | Delete a comment |
 | `instagram_get_insights` | none | Reach, impressions, engagement |
@@ -2073,6 +2075,16 @@ Statuses: `pending` → `forwarded` / `auto_replying` / `template_sent` / `ignor
 
 If `require_approval` is set: hook intercepts the publish tool, sends a review card, and releases the agent immediately. A human reviews via the admin channel or TUI Drafts panel (Alt+0), then approves → gateway publishes.
 If `allowed`: publish tool executes directly and updates draft status to sent.
+
+### Image / Carousel Post Steps
+
+1. Call `instagram_upload_media` with `file_paths: ["/path/to/img1.jpg", "/path/to/img2.png", ...]` → returns an array of `{url, filename, ...}` objects.
+2. Collect all `url` values into an array.
+3. Call `instagram_create_post` with `image_urls: [url1, url2, ...]` and `caption`.
+   - 1 URL = single image post. 2-10 URLs = carousel (multi-image) post.
+   - Instagram only accepts JPEG; the upload tool auto-converts other formats.
+
+Single upload call handles all images — no need to call upload_media multiple times.
 
 ## TUI
 
@@ -2177,7 +2189,7 @@ The `threads_reply` and `threads_create_post` MCP tools handle both steps transp
 | `threads_get_replies` | none | Fetch replies to a post |
 | `threads_create_post` | approval/auto | Publish text/image/carousel post (`media_urls` optional array, 0-20 images) |
 | `threads_reply` | approval/auto | Reply to post (auto-stages draft) |
-| `threads_upload_media` | none | Copy local image to media_tmp, return public URL |
+| `threads_upload_media` | none | Batch upload images to media_tmp (`file_paths` array), return public URLs |
 | `threads_reply_template` | none | Send a named template reply |
 | `threads_delete_post` | required | Delete a post |
 | `threads_get_insights` | none | Views, likes, replies, reposts |
@@ -2187,6 +2199,16 @@ The `threads_reply` and `threads_create_post` MCP tools handle both steps transp
 **Publish flow:** Just call the publish tool (`threads_create_post`, `threads_reply`) — it auto-stages a draft. If approval is required, a review card is sent to the admin channel.
 
 If `require_approval` is set: hook intercepts the publish tool, sends a review card, and releases the agent immediately. A human reviews via the admin channel or TUI Drafts panel (Alt+0), then approves → gateway publishes.
+
+### Image / Carousel Post Steps
+
+1. Call `threads_upload_media` with `file_paths: ["/path/to/img1.jpg", "/path/to/img2.png", ...]` → returns an array of `{url, filename, ...}` objects.
+2. Collect all `url` values into an array.
+3. Call `threads_create_post` with `text` and `media_urls: [url1, url2, ...]`.
+   - 0 URLs = text-only post. 1 URL = single image post. 2-20 URLs = carousel.
+   - Threads accepts JPEG and PNG; the upload tool auto-converts other formats.
+
+Single upload call handles all images — no need to call upload_media multiple times.
 
 ## Inbox Management
 
