@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.0](https://github.com/CatiesGames/catclaw/compare/v0.32.1...v0.33.0) (2026-04-04)
+
+
+### Features
+
+* poller debug log + TUI cursor 顯示 + 回覆卡原文 API fallback ([0782509](https://github.com/CatiesGames/catclaw/commit/07825095ba57ea8b2c93c327819405ef24c87ade))
+
 ## [0.32.1](https://github.com/CatiesGames/catclaw/compare/v0.32.0...v0.32.1) (2026-04-02)
 
 
