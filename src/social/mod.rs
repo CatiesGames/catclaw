@@ -495,7 +495,7 @@ async fn execute_auto_reply(
     let platform_str = item.platform.to_string();
     let (publish_tool, reply_id_param) = match item.platform {
         SocialPlatform::Instagram => ("instagram_reply_comment", "comment_id"),
-        SocialPlatform::Threads => ("threads_reply", "post_id"),
+        SocialPlatform::Threads => ("threads_reply", "reply_to_id"),
     };
     let author = row.author_name.as_deref().unwrap_or("someone");
     let original_text = row.text.as_deref().unwrap_or("(no text)");

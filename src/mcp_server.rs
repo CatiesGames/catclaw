@@ -191,9 +191,9 @@ fn threads_tools() -> Vec<Value> {
     vec![
         social_tool("threads_get_profile", "Get Threads account profile info", serde_json::json!({"type":"object","properties":{},"required":[]})),
         social_tool("threads_get_timeline", "List recent Threads posts", serde_json::json!({"type":"object","properties":{"limit":{"type":"integer","description":"Number of posts to fetch (default 10)"}},"required":[]})),
-        social_tool("threads_get_replies", "Get replies on a Threads post", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Threads post ID"}},"required":["post_id"]})),
+        social_tool("threads_get_replies", "Get replies on a Threads post. Each reply in the response has its own `id` — use that id (not the parent post_id) when calling threads_reply.", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Threads post ID"}},"required":["post_id"]})),
         social_tool("threads_create_post", "Create a new Threads post. Auto-stages a draft if not already staged. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"Post text content"},"media_urls":{"type":"array","items":{"type":"string"},"description":"Public image URLs (optional). 1 image = single image post, 2-20 images = carousel.","maxItems":20}},"required":["text"]})),
-        social_tool("threads_reply", "Reply to a specific Threads post or reply. IMPORTANT: post_id must be the ID of the exact item you are replying to — if replying to a reply, use that reply's ID, NOT the root post ID. Auto-stages a draft.", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"ID of the post/reply you are replying TO (not the root post)"},"text":{"type":"string","description":"Reply text"}},"required":["post_id","text"]})),
+        social_tool("threads_reply", "Reply to a specific Threads post or reply. IMPORTANT: reply_to_id must be the ID of the exact item you are replying to — if replying to a reply, use that reply's `id` from threads_get_replies, NOT the root post ID.", serde_json::json!({"type":"object","properties":{"reply_to_id":{"type":"string","description":"ID of the specific post or reply you are replying TO. Use the reply's own `id` from threads_get_replies, NOT the parent post ID."},"text":{"type":"string","description":"Reply text"}},"required":["reply_to_id","text"]})),
         social_tool("threads_upload_media", "Copy local image files to the gateway media_tmp dir and return public URLs for use with threads_create_post. Supports batch upload.", serde_json::json!({"type":"object","properties":{"file_paths":{"type":"array","items":{"type":"string"},"description":"Absolute local paths to image files (jpg, png, gif, webp). Supports 1-20 files.","minItems":1,"maxItems":20}},"required":["file_paths"]})),
         social_tool("threads_reply_template", "Send a template reply to a Threads post", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID"},"template_name":{"type":"string","description":"Template name from catclaw.toml"}},"required":["post_id","template_name"]})),
         social_tool("threads_delete_post", "Delete a Threads post (requires approval)", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID to delete"}},"required":["post_id"]})),
@@ -403,19 +403,19 @@ async fn execute_social_tool(
         }
         "threads_reply" => {
             let (token, uid) = th_creds(&cfg)?;
-            let post_id = str_arg(&args, "post_id")?;
+            let reply_to_id = str_arg(&args, "reply_to_id")?;
             let agent_text = str_arg(&args, "text")?;
             // Auto-stage if no draft exists yet
-            let draft = match gw.state_db.find_latest_draft_for_tool("threads", "reply", Some(post_id)).ok().flatten() {
+            let draft = match gw.state_db.find_latest_draft_for_tool("threads", "reply", Some(reply_to_id)).ok().flatten() {
                 Some(d) => d,
                 None => {
                     let mut row = crate::state::SocialDraftRow::new("threads", "reply", agent_text);
-                    row.reply_to_id = Some(post_id.to_string());
-                    if let Ok(Some(inbox)) = gw.state_db.get_social_inbox_by_platform_id("threads", post_id) {
+                    row.reply_to_id = Some(reply_to_id.to_string());
+                    if let Ok(Some(inbox)) = gw.state_db.get_social_inbox_by_platform_id("threads", reply_to_id) {
                         row.original_author = inbox.author_name.clone();
                         row.original_text = inbox.text.clone();
                     } else if let Ok(val) = ThreadsClient::new(token.clone(), uid.clone())
-                        .get_post_by_id(post_id).await {
+                        .get_post_by_id(reply_to_id).await {
                         row.original_author = val.get("username").and_then(|v| v.as_str()).map(str::to_string);
                         row.original_text = val.get("text").and_then(|v| v.as_str()).map(str::to_string);
                     }
@@ -424,7 +424,7 @@ async fn execute_social_tool(
                 }
             };
             let text = draft.content.as_str();
-            let result = ThreadsClient::new(token, uid).reply(post_id, text).await?;
+            let result = ThreadsClient::new(token, uid).reply(reply_to_id, text).await?;
             if let Some(reply_id) = result.get("id").and_then(|v| v.as_str()) {
                 let _ = gw.state_db.update_social_draft_sent(draft.id, reply_id);
             }

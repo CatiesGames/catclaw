@@ -1720,7 +1720,7 @@ fn stage_draft_from_tool(
         "mcp__catclaw__instagram_reply_comment" => ("instagram", "reply", "message", Some("comment_id"), None),
         "mcp__catclaw__instagram_create_post"   => ("instagram", "post",  "caption", None,               Some("image_urls")),
         "mcp__catclaw__instagram_send_dm"       => ("instagram", "dm",    "text",    Some("recipient_id"), None),
-        "mcp__catclaw__threads_reply"            => ("threads",   "reply", "text",    Some("post_id"),      None),
+        "mcp__catclaw__threads_reply"            => ("threads",   "reply", "text",    Some("reply_to_id"),  None),
         "mcp__catclaw__threads_create_post"      => ("threads",   "post",  "text",    None,               Some("media_urls")),
         other => return Err(format!("unrecognized social tool '{}'", other)),
     };

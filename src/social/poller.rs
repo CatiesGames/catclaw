@@ -2,7 +2,10 @@
 
 // Polling logic for Instagram and Threads.
 // Called by scheduler.rs on the configured interval.
-// Uses social_cursors table to track last-fetched ID per (platform, feed).
+// Uses social_cursors table to track last-fetched timestamp per (platform, feed).
+//
+// IMPORTANT: Meta platform IDs are NOT monotonically increasing — a newer post can
+// have a smaller numeric ID than an older one. Cursors must use timestamps, not IDs.
 
 use crate::config::{InstagramConfig, ThreadsConfig};
 use crate::error::Result;
@@ -12,13 +15,9 @@ use crate::social::{SocialItem, SocialPlatform};
 use crate::state::StateDb;
 use tracing::{debug, warn};
 
-/// Compare two numeric ID strings by value (not lexicographic order).
-/// Falls back to string comparison if either value is not a valid integer.
-fn id_gt(a: &str, b: &str) -> bool {
-    match (a.parse::<u64>(), b.parse::<u64>()) {
-        (Ok(a_num), Ok(b_num)) => a_num > b_num,
-        _ => a > b,
-    }
+/// Compare two ISO 8601 timestamp strings. Returns true if `a` is strictly after `b`.
+fn ts_gt(a: &str, b: &str) -> bool {
+    a > b
 }
 
 /// Poll all configured Instagram feeds, return new SocialItems.
@@ -87,7 +86,7 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
     debug!("instagram poll: fetched {} media posts", media_list.len());
 
     let mut items = Vec::new();
-    let mut newest_id: Option<String> = cursor.clone();
+    let mut newest_ts: Option<String> = cursor.clone();
     let mut total_comments = 0u32;
     let mut skipped_by_cursor = 0u32;
     let mut skipped_by_dedup = 0u32;
@@ -111,9 +110,14 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
                 Some(id) => id.to_string(),
                 None => continue,
             };
+            let ts = comment
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             total_comments += 1;
-            if let Some(ref last) = cursor {
-                if !id_gt(&id, last) {
+            if let Some(ref last_ts) = cursor {
+                if !ts_gt(&ts, last_ts) {
                     skipped_by_cursor += 1;
                     continue;
                 }
@@ -123,8 +127,8 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
                 skipped_by_dedup += 1;
                 continue;
             }
-            if newest_id.as_deref().map(|n| id_gt(&id, n)).unwrap_or(true) {
-                newest_id = Some(id.clone());
+            if newest_ts.as_deref().map(|n| ts_gt(&ts, n)).unwrap_or(true) {
+                newest_ts = Some(ts.clone());
             }
             let username = comment
                 .get("username")
@@ -134,7 +138,7 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
                 .get("text")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            debug!(id = %id, username = ?username, text = ?text, "instagram poll: new comment");
+            debug!(id = %id, ts = %ts, username = ?username, text = ?text, "instagram poll: new comment");
             items.push(SocialItem {
                 platform: SocialPlatform::Instagram,
                 platform_id: id,
@@ -152,9 +156,9 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
         }
     }
 
-    if let Some(ref nid) = newest_id {
-        if cursor.as_deref() != Some(nid.as_str()) {
-            db.upsert_social_cursor("instagram", "comments", nid)?;
+    if let Some(ref nts) = newest_ts {
+        if cursor.as_deref() != Some(nts.as_str()) {
+            db.upsert_social_cursor("instagram", "comments", nts)?;
         }
     }
 
@@ -164,7 +168,7 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
         skipped_by_cursor,
         skipped_by_dedup,
         cursor = ?cursor,
-        newest_id = ?newest_id,
+        newest_ts = ?newest_ts,
         "instagram poll comments: done"
     );
     Ok(items)
@@ -201,7 +205,7 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
     debug!("threads poll: fetched {} posts", posts.len());
 
     let mut items = Vec::new();
-    let mut newest_id: Option<String> = cursor.clone();
+    let mut newest_ts: Option<String> = cursor.clone();
     let mut total_replies = 0u32;
     let mut skipped_by_cursor = 0u32;
     let mut skipped_by_dedup = 0u32;
@@ -228,10 +232,15 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
                 Some(id) => id.to_string(),
                 None => continue,
             };
+            let ts = reply
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             total_replies += 1;
             first_level_ids.push(id.clone());
-            if let Some(ref last) = cursor {
-                if !id_gt(&id, last) {
+            if let Some(ref last_ts) = cursor {
+                if !ts_gt(&ts, last_ts) {
                     skipped_by_cursor += 1;
                     continue;
                 }
@@ -240,8 +249,8 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
                 skipped_by_dedup += 1;
                 continue;
             }
-            if newest_id.as_deref().map(|n| id_gt(&id, n)).unwrap_or(true) {
-                newest_id = Some(id.clone());
+            if newest_ts.as_deref().map(|n| ts_gt(&ts, n)).unwrap_or(true) {
+                newest_ts = Some(ts.clone());
             }
             let username = reply
                 .get("username")
@@ -251,7 +260,7 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
                 .get("text")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            debug!(id = %id, username = ?username, text = ?text, "threads poll: new reply");
+            debug!(id = %id, ts = %ts, username = ?username, text = ?text, "threads poll: new reply");
             items.push(SocialItem {
                 platform: SocialPlatform::Threads,
                 platform_id: id,
@@ -269,8 +278,6 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
     // This catches "reply to our reply" — the conversation thread we're participating in.
     let our_reply_ids = db.list_replied_platform_ids("threads").unwrap_or_default();
     for reply_id in &our_reply_ids {
-        // Only check sub-replies for items that appeared in the first-level scan
-        // or are themselves our reply IDs (we replied to them).
         let sub_replies = match client.get_replies(reply_id, None).await {
             Ok(r) => r,
             Err(e) => {
@@ -289,13 +296,18 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
                 Some(id) => id.to_string(),
                 None => continue,
             };
-            if let Some(ref last) = cursor {
-                if !id_gt(&id, last) {
+            let ts = sub
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(ref last_ts) = cursor {
+                if !ts_gt(&ts, last_ts) {
                     continue;
                 }
             }
-            if newest_id.as_deref().map(|n| id_gt(&id, n)).unwrap_or(true) {
-                newest_id = Some(id.clone());
+            if newest_ts.as_deref().map(|n| ts_gt(&ts, n)).unwrap_or(true) {
+                newest_ts = Some(ts.clone());
             }
             items.push(SocialItem {
                 platform: SocialPlatform::Threads,
@@ -319,9 +331,9 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
         }
     }
 
-    if let Some(ref nid) = newest_id {
-        if cursor.as_deref() != Some(nid.as_str()) {
-            db.upsert_social_cursor("threads", "replies", nid)?;
+    if let Some(ref nts) = newest_ts {
+        if cursor.as_deref() != Some(nts.as_str()) {
+            db.upsert_social_cursor("threads", "replies", nts)?;
         }
     }
 
@@ -331,7 +343,7 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
         skipped_by_cursor,
         skipped_by_dedup,
         cursor = ?cursor,
-        newest_id = ?newest_id,
+        newest_ts = ?newest_ts,
         "threads poll replies: done"
     );
     Ok(items)
