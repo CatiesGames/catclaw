@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.1](https://github.com/CatiesGames/catclaw/compare/v0.33.0...v0.33.1) (2026-04-04)
+
+
+### Bug Fixes
+
+* poller cursor 改用 timestamp + threads_reply 參數改名 reply_to_id ([e267bdb](https://github.com/CatiesGames/catclaw/commit/e267bdb63f9c0035b9e6e4c29067717157e3b7ef))
+
 ## [0.33.0](https://github.com/CatiesGames/catclaw/compare/v0.32.1...v0.33.0) (2026-04-04)
 
 
