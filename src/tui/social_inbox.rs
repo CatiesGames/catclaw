@@ -71,7 +71,7 @@ impl StatusFilter {
 }
 
 enum InboxEvent {
-    Loaded(Vec<InboxItem>),
+    Loaded(Vec<InboxItem>, std::collections::HashMap<String, String>),
     ActionDone(String),
 }
 
@@ -85,6 +85,8 @@ pub struct SocialInboxPanel {
     loaded: bool,
     status_msg: Option<String>,
     detail_view: bool,
+    /// Poll cursors: "instagram.comments" → "18079...", etc.
+    cursors: std::collections::HashMap<String, String>,
 }
 
 impl SocialInboxPanel {
@@ -100,6 +102,7 @@ impl SocialInboxPanel {
             loaded: false,
             status_msg: None,
             detail_view: false,
+            cursors: std::collections::HashMap::new(),
         }
     }
 
@@ -119,8 +122,15 @@ impl SocialInboxPanel {
             }
             match client.request("social.inbox.list", params).await {
                 Ok(val) => {
-                    let items = parse_items(&val);
-                    let _ = tx.send(InboxEvent::Loaded(items));
+                    let items_val = val.get("items").cloned().unwrap_or(val.clone());
+                    let items = parse_items(&items_val);
+                    let cursors = val.get("cursors")
+                        .and_then(|v| v.as_object())
+                        .map(|obj| obj.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect())
+                        .unwrap_or_default();
+                    let _ = tx.send(InboxEvent::Loaded(items, cursors));
                 }
                 Err(e) => {
                     error!(error = %e, "social inbox: failed to load items");
@@ -192,8 +202,9 @@ impl Component for SocialInboxPanel {
         // Drain async events first.
         while let Ok(ev) = self.event_rx.try_recv() {
             match ev {
-                InboxEvent::Loaded(items) => {
+                InboxEvent::Loaded(items, cursors) => {
                     self.items = items;
+                    self.cursors = cursors;
                     self.loaded = true;
                     if self.selected >= self.items.len() && !self.items.is_empty() {
                         self.selected = self.items.len() - 1;
@@ -285,8 +296,9 @@ impl Component for SocialInboxPanel {
         // Drain async events on render too.
         while let Ok(ev) = self.event_rx.try_recv() {
             match ev {
-                InboxEvent::Loaded(items) => {
+                InboxEvent::Loaded(items, cursors) => {
                     self.items = items;
+                    self.cursors = cursors;
                     self.loaded = true;
                 }
                 InboxEvent::ActionDone(msg) => {
@@ -325,8 +337,22 @@ impl Component for SocialInboxPanel {
                 vec![label, Span::raw(" ")]
             })
             .collect();
+        // Build cursor display for the title bar.
+        let cursor_info = if self.cursors.is_empty() {
+            String::new()
+        } else {
+            let parts: Vec<String> = self.cursors.iter()
+                .map(|(k, v)| {
+                    // Shorten key: "instagram.comments" → "ig.comments"
+                    let short = k.replace("instagram", "ig").replace("threads", "th");
+                    format!("{}={}", short, v)
+                })
+                .collect();
+            format!("  cursors: {}", parts.join(" | "))
+        };
+        let title = format!(" Social Inbox{} ", cursor_info);
         let filter_bar = Paragraph::new(Line::from(filter_spans))
-            .block(Block::default().borders(Borders::ALL).title(" Social Inbox "));
+            .block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(filter_bar, chunks[0]);
 
         // ── Item list ─────────────────────────────────────────────────────────

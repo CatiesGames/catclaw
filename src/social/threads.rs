@@ -40,10 +40,10 @@ impl ThreadsClient {
         self.get(&url).await
     }
 
-    /// Fetch a single post by ID (text, permalink, etc.).
+    /// Fetch a single post by ID (text, permalink, username, etc.).
     pub async fn get_post_by_id(&self, post_id: &str) -> Result<Value> {
         let url = format!(
-            "{}/{}?fields=id,text,media_type,timestamp,permalink",
+            "{}/{}?fields=id,text,username,media_type,timestamp,permalink",
             self.base(), post_id,
         );
         self.get(&url).await

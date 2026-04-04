@@ -193,7 +193,7 @@ fn threads_tools() -> Vec<Value> {
         social_tool("threads_get_timeline", "List recent Threads posts", serde_json::json!({"type":"object","properties":{"limit":{"type":"integer","description":"Number of posts to fetch (default 10)"}},"required":[]})),
         social_tool("threads_get_replies", "Get replies on a Threads post", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Threads post ID"}},"required":["post_id"]})),
         social_tool("threads_create_post", "Create a new Threads post. Auto-stages a draft if not already staged. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"text":{"type":"string","description":"Post text content"},"media_urls":{"type":"array","items":{"type":"string"},"description":"Public image URLs (optional). 1 image = single image post, 2-20 images = carousel.","maxItems":20}},"required":["text"]})),
-        social_tool("threads_reply", "Reply to a Threads post. Auto-stages a draft. If approval is required, a review card is sent to the admin channel.", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID to reply to"},"text":{"type":"string","description":"Reply text"}},"required":["post_id","text"]})),
+        social_tool("threads_reply", "Reply to a specific Threads post or reply. IMPORTANT: post_id must be the ID of the exact item you are replying to — if replying to a reply, use that reply's ID, NOT the root post ID. Auto-stages a draft.", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"ID of the post/reply you are replying TO (not the root post)"},"text":{"type":"string","description":"Reply text"}},"required":["post_id","text"]})),
         social_tool("threads_upload_media", "Copy local image files to the gateway media_tmp dir and return public URLs for use with threads_create_post. Supports batch upload.", serde_json::json!({"type":"object","properties":{"file_paths":{"type":"array","items":{"type":"string"},"description":"Absolute local paths to image files (jpg, png, gif, webp). Supports 1-20 files.","minItems":1,"maxItems":20}},"required":["file_paths"]})),
         social_tool("threads_reply_template", "Send a template reply to a Threads post", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID"},"template_name":{"type":"string","description":"Template name from catclaw.toml"}},"required":["post_id","template_name"]})),
         social_tool("threads_delete_post", "Delete a Threads post (requires approval)", serde_json::json!({"type":"object","properties":{"post_id":{"type":"string","description":"Post ID to delete"}},"required":["post_id"]})),
@@ -249,6 +249,15 @@ async fn execute_social_tool(
                 None => {
                     let mut row = crate::state::SocialDraftRow::new("instagram", "reply", agent_message);
                     row.reply_to_id = Some(comment_id.to_string());
+                    // Try inbox first, then API fallback.
+                    if let Ok(Some(inbox)) = gw.state_db.get_social_inbox_by_platform_id("instagram", comment_id) {
+                        row.original_author = inbox.author_name.clone();
+                        row.original_text = inbox.text.clone();
+                    } else if let Ok(val) = InstagramClient::new(token.clone(), uid.clone())
+                        .get_comment_by_id(comment_id).await {
+                        row.original_author = val.get("username").and_then(|v| v.as_str()).map(str::to_string);
+                        row.original_text = val.get("text").and_then(|v| v.as_str()).map(str::to_string);
+                    }
                     let id = gw.state_db.insert_social_draft(&row)?;
                     gw.state_db.get_social_draft(id)?.ok_or_else(|| CatClawError::Social("failed to read auto-staged draft".into()))?
                 }
@@ -402,6 +411,14 @@ async fn execute_social_tool(
                 None => {
                     let mut row = crate::state::SocialDraftRow::new("threads", "reply", agent_text);
                     row.reply_to_id = Some(post_id.to_string());
+                    if let Ok(Some(inbox)) = gw.state_db.get_social_inbox_by_platform_id("threads", post_id) {
+                        row.original_author = inbox.author_name.clone();
+                        row.original_text = inbox.text.clone();
+                    } else if let Ok(val) = ThreadsClient::new(token.clone(), uid.clone())
+                        .get_post_by_id(post_id).await {
+                        row.original_author = val.get("username").and_then(|v| v.as_str()).map(str::to_string);
+                        row.original_text = val.get("text").and_then(|v| v.as_str()).map(str::to_string);
+                    }
                     let id = gw.state_db.insert_social_draft(&row)?;
                     gw.state_db.get_social_draft(id)?.ok_or_else(|| CatClawError::Social("failed to read auto-staged draft".into()))?
                 }

@@ -1260,7 +1260,17 @@ fn handle_social_inbox_list(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRespo
     let status = req.params.get("status").and_then(|v| v.as_str());
     let limit = req.params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
     match gw.state_db.list_social_inbox(platform, status, limit) {
-        Ok(rows) => WsResponse::ok(req.id, json!(rows)),
+        Ok(rows) => {
+            // Attach poll cursors so TUI can display them.
+            let mut cursors = serde_json::Map::new();
+            for (p, f) in &[("instagram", "comments"), ("instagram", "mentions"),
+                            ("threads", "replies"), ("threads", "mentions")] {
+                if let Ok(Some(val)) = gw.state_db.get_social_cursor(p, f) {
+                    cursors.insert(format!("{}.{}", p, f), json!(val));
+                }
+            }
+            WsResponse::ok(req.id, json!({ "items": rows, "cursors": cursors }))
+        }
         Err(e) => WsResponse::err(req.id, -32603, format!("db error: {}", e)),
     }
 }
@@ -1655,6 +1665,28 @@ async fn handle_social_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -
     }
 }
 
+/// Fetch original comment context from Instagram API. Returns (username, text).
+async fn fetch_ig_comment_context(comment_id: &str, cfg: &crate::config::Config) -> Option<(String, String)> {
+    let ig = cfg.social.instagram.as_ref()?;
+    let token = std::env::var(&ig.token_env).ok()?;
+    let client = crate::social::instagram::InstagramClient::new(token, ig.user_id.clone());
+    let val = client.get_comment_by_id(comment_id).await.ok()?;
+    let username = val.get("username").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+    let text = val.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    Some((username, text))
+}
+
+/// Fetch original post context from Threads API. Returns (username, text).
+async fn fetch_th_post_context(post_id: &str, cfg: &crate::config::Config) -> Option<(String, String)> {
+    let th = cfg.social.threads.as_ref()?;
+    let token = std::env::var(&th.token_env).ok()?;
+    let client = crate::social::threads::ThreadsClient::new(token, th.user_id.clone());
+    let val = client.get_post_by_id(post_id).await.ok()?;
+    let username = val.get("username").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+    let text = val.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    Some((username, text))
+}
+
 /// Parse a JSON value that may be a real array or a stringified JSON array.
 /// Agents sometimes pass `"[\"url1\",\"url2\"]"` instead of `["url1","url2"]`.
 fn parse_string_or_array(v: &serde_json::Value) -> Vec<String> {
@@ -1713,8 +1745,18 @@ fn stage_draft_from_tool(
     }
 
     let mut row = SocialDraftRow::new(platform, draft_type, content);
-    row.reply_to_id = reply_to_id;
+    row.reply_to_id = reply_to_id.clone();
     row.media_urls = media_urls;
+
+    // For reply/dm drafts, try to fill original_author and original_text from inbox.
+    if draft_type == "reply" || draft_type == "dm" {
+        if let Some(ref rid) = reply_to_id {
+            if let Ok(Some(inbox_row)) = db.get_social_inbox_by_platform_id(platform, rid) {
+                row.original_author = inbox_row.author_name.clone();
+                row.original_text = inbox_row.text.clone();
+            }
+        }
+    }
 
     let id = db.insert_social_draft(&row).map_err(|e| format!("db insert error: {}", e))?;
     db.get_social_draft(id)
@@ -1734,10 +1776,27 @@ async fn handle_social_draft_submit(req: &WsRequest, gw: &Arc<GatewayHandle>) ->
 
     // Build draft from tool_input. The hook fires BEFORE the MCP handler, so the
     // draft does not exist yet — we must create it here.
-    let draft = match stage_draft_from_tool(&tool_name, &tool_input, &gw.state_db) {
+    let mut draft = match stage_draft_from_tool(&tool_name, &tool_input, &gw.state_db) {
         Ok(d) => d,
         Err(e) => return WsResponse::err(req.id, -32602, e),
     };
+
+    // For reply drafts missing original context, fetch from API.
+    if draft.original_author.is_none() && draft.draft_type == "reply" {
+        if let Some(ref rid) = draft.reply_to_id {
+            let cfg = gw.config.read().unwrap().clone();
+            let fetched = match draft.platform.as_str() {
+                "instagram" => fetch_ig_comment_context(rid, &cfg).await,
+                "threads" => fetch_th_post_context(rid, &cfg).await,
+                _ => None,
+            };
+            if let Some((author, text)) = fetched {
+                draft.original_author = Some(author.clone());
+                draft.original_text = Some(text.clone());
+                let _ = gw.state_db.update_social_draft_original(draft.id, &author, &text);
+            }
+        }
+    }
 
     // Set status to awaiting_approval.
     let _ = gw.state_db.update_social_draft_status(draft.id, "awaiting_approval");

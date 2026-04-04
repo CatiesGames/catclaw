@@ -910,6 +910,16 @@ impl StateDb {
         Ok(())
     }
 
+    pub fn update_social_draft_original(&self, id: i64, author: &str, text: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_drafts SET original_author=?1, original_text=?2, updated_at=?3 WHERE id=?4",
+            params![author, text, now, id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_social_draft(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM social_drafts WHERE id=?1", params![id])?;

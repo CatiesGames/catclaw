@@ -60,6 +60,15 @@ impl InstagramClient {
         self.get(&url).await
     }
 
+    /// Fetch a single comment by ID (text, username, etc.).
+    pub async fn get_comment_by_id(&self, comment_id: &str) -> Result<Value> {
+        let url = format!(
+            "{}/{}?fields=id,text,username,timestamp",
+            self.base(), comment_id,
+        );
+        self.get(&url).await
+    }
+
     pub async fn get_comments(&self, media_id: &str, since_id: Option<&str>) -> Result<Value> {
         let mut url = format!(
             "{}/{}/comments?fields=id,text,username,timestamp,from",

@@ -74,6 +74,8 @@ pub async fn poll_threads(cfg: &ThreadsConfig, db: &StateDb) -> Result<Vec<Socia
 
 async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<SocialItem>> {
     let cursor = db.get_social_cursor("instagram", "comments")?;
+    debug!(cursor = ?cursor, "instagram poll comments: starting");
+
     // Fetch recent media (up to 10 posts) then their comments.
     let media = client.get_media(10).await?;
     let media_list = media
@@ -82,8 +84,13 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
         .cloned()
         .unwrap_or_default();
 
+    debug!("instagram poll: fetched {} media posts", media_list.len());
+
     let mut items = Vec::new();
     let mut newest_id: Option<String> = cursor.clone();
+    let mut total_comments = 0u32;
+    let mut skipped_by_cursor = 0u32;
+    let mut skipped_by_dedup = 0u32;
 
     for media_obj in &media_list {
         let media_id = match media_obj.get("id").and_then(|v| v.as_str()) {
@@ -97,19 +104,37 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
             .cloned()
             .unwrap_or_default();
 
+        debug!(media_id, comments = comment_list.len(), "instagram poll: media comments");
+
         for comment in &comment_list {
             let id = match comment.get("id").and_then(|v| v.as_str()) {
                 Some(id) => id.to_string(),
                 None => continue,
             };
+            total_comments += 1;
             if let Some(ref last) = cursor {
                 if !id_gt(&id, last) {
+                    skipped_by_cursor += 1;
                     continue;
                 }
+            }
+            // Check dedup — already in inbox?
+            if db.get_social_inbox_by_platform_id("instagram", &id).ok().flatten().is_some() {
+                skipped_by_dedup += 1;
+                continue;
             }
             if newest_id.as_deref().map(|n| id_gt(&id, n)).unwrap_or(true) {
                 newest_id = Some(id.clone());
             }
+            let username = comment
+                .get("username")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let text = comment
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            debug!(id = %id, username = ?username, text = ?text, "instagram poll: new comment");
             items.push(SocialItem {
                 platform: SocialPlatform::Instagram,
                 platform_id: id,
@@ -119,15 +144,9 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
                     .and_then(|f| f.get("id"))
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
-                author_name: comment
-                    .get("username")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
+                author_name: username,
                 media_id: Some(media_id.to_string()),
-                text: comment
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
+                text,
                 metadata: comment.clone(),
             });
         }
@@ -139,7 +158,15 @@ async fn poll_ig_comments(client: &InstagramClient, db: &StateDb) -> Result<Vec<
         }
     }
 
-    debug!("instagram poll comments: {} new items", items.len());
+    debug!(
+        new = items.len(),
+        total_comments,
+        skipped_by_cursor,
+        skipped_by_dedup,
+        cursor = ?cursor,
+        newest_id = ?newest_id,
+        "instagram poll comments: done"
+    );
     Ok(items)
 }
 
@@ -162,6 +189,8 @@ async fn poll_ig_mentions(client: &InstagramClient, db: &StateDb) -> Result<Vec<
 
 async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<SocialItem>> {
     let cursor = db.get_social_cursor("threads", "replies")?;
+    debug!(cursor = ?cursor, "threads poll replies: starting");
+
     let timeline = client.get_timeline(20).await?;
     let posts = timeline
         .get("data")
@@ -169,8 +198,13 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
         .cloned()
         .unwrap_or_default();
 
+    debug!("threads poll: fetched {} posts", posts.len());
+
     let mut items = Vec::new();
     let mut newest_id: Option<String> = cursor.clone();
+    let mut total_replies = 0u32;
+    let mut skipped_by_cursor = 0u32;
+    let mut skipped_by_dedup = 0u32;
 
     // Collect first-level reply IDs so we can check sub-replies on our replied items
     let mut first_level_ids: Vec<String> = Vec::new();
@@ -187,37 +221,45 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
             .cloned()
             .unwrap_or_default();
 
+        debug!(post_id, replies = reply_list.len(), "threads poll: post replies");
+
         for reply in &reply_list {
             let id = match reply.get("id").and_then(|v| v.as_str()) {
                 Some(id) => id.to_string(),
                 None => continue,
             };
+            total_replies += 1;
             first_level_ids.push(id.clone());
             if let Some(ref last) = cursor {
                 if !id_gt(&id, last) {
+                    skipped_by_cursor += 1;
                     continue;
                 }
+            }
+            if db.get_social_inbox_by_platform_id("threads", &id).ok().flatten().is_some() {
+                skipped_by_dedup += 1;
+                continue;
             }
             if newest_id.as_deref().map(|n| id_gt(&id, n)).unwrap_or(true) {
                 newest_id = Some(id.clone());
             }
+            let username = reply
+                .get("username")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let text = reply
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            debug!(id = %id, username = ?username, text = ?text, "threads poll: new reply");
             items.push(SocialItem {
                 platform: SocialPlatform::Threads,
                 platform_id: id,
                 event_type: "reply".to_string(),
-                author_id: reply
-                    .get("username")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                author_name: reply
-                    .get("username")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
+                author_id: username.clone(),
+                author_name: username,
                 media_id: Some(post_id.to_string()),
-                text: reply
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
+                text,
                 metadata: reply.clone(),
             });
         }
@@ -283,7 +325,15 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
         }
     }
 
-    debug!("threads poll replies: {} new items", items.len());
+    debug!(
+        new = items.len(),
+        total_replies,
+        skipped_by_cursor,
+        skipped_by_dedup,
+        cursor = ?cursor,
+        newest_id = ?newest_id,
+        "threads poll replies: done"
+    );
     Ok(items)
 }
 

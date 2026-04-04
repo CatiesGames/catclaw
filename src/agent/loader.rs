@@ -1762,7 +1762,7 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 | `instagram_get_profile` | Account info |
 | `instagram_get_media` | List posts |
 | `instagram_get_comments` | Fetch comments |
-| `instagram_reply_comment` | Reply to comment (auto-stages draft, approval if configured) |
+| `instagram_reply_comment` | Reply to a specific comment (`comment_id` = the comment you reply TO) |
 | `instagram_upload_media` | Batch upload local images to media_tmp (`file_paths` array), return public URLs |
 | `instagram_reply_template` | Send a template reply |
 | `instagram_delete_comment` | Delete (requires approval) |
@@ -1774,7 +1774,7 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 | `threads_get_timeline` | List posts |
 | `threads_get_replies` | Fetch replies |
 | `threads_create_post` | Publish text/image/carousel post (`media_urls` optional array, 0-20 images; auto-stages draft) |
-| `threads_reply` | Reply to post (auto-stages draft, approval if configured) |
+| `threads_reply` | Reply to a specific post/reply (`post_id` = the item you reply TO, not root post) |
 | `threads_upload_media` | Batch upload local images to media_tmp (`file_paths` array), return public URLs |
 | `threads_reply_template` | Send template reply |
 | `threads_delete_post` | Delete post (requires approval) |
@@ -2062,7 +2062,7 @@ Statuses: `pending` → `forwarded` / `auto_replying` / `template_sent` / `ignor
 | `instagram_get_profile` | none | Account name, followers, etc. |
 | `instagram_get_media` | none | List recent posts |
 | `instagram_get_comments` | none | Fetch comments on a post |
-| `instagram_reply_comment` | approval/auto | Reply to comment (auto-stages draft) |
+| `instagram_reply_comment` | approval/auto | Reply to a specific comment (`comment_id` = the comment you reply TO) |
 | `instagram_upload_media` | none | Batch upload images to media_tmp (`file_paths` array), return public URLs |
 | `instagram_reply_template` | none | Send a named template reply |
 | `instagram_delete_comment` | required | Delete a comment |
@@ -2188,7 +2188,7 @@ The `threads_reply` and `threads_create_post` MCP tools handle both steps transp
 | `threads_get_timeline` | none | List posts |
 | `threads_get_replies` | none | Fetch replies to a post |
 | `threads_create_post` | approval/auto | Publish text/image/carousel post (`media_urls` optional array, 0-20 images) |
-| `threads_reply` | approval/auto | Reply to post (auto-stages draft) |
+| `threads_reply` | approval/auto | Reply to a specific post/reply. `post_id` must be the ID of the item you are replying TO (not the root post). |
 | `threads_upload_media` | none | Batch upload images to media_tmp (`file_paths` array), return public URLs |
 | `threads_reply_template` | none | Send a named template reply |
 | `threads_delete_post` | required | Delete a post |
