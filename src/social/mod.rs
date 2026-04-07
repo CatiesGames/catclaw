@@ -552,9 +552,25 @@ async fn execute_auto_reply(
         std::time::Duration::from_secs(300), // 5-minute hard cap
         session_manager.send_and_wait(&key, &agent, &system_prompt, Priority::Channel, &sender, None, None),
     ).await;
+    // Helper: restore the forward card to its original state (with buttons) on failure.
+    let restore_card = |db: &Arc<StateDb>, adapters: &Arc<Vec<Arc<dyn crate::channel::ChannelAdapter>>>, admin_channel: &str| {
+        let db = db.clone();
+        let adapters = adapters.clone();
+        let admin_channel = admin_channel.to_string();
+        async move {
+            if let Ok(Some(r)) = db.get_social_inbox(inbox_id) {
+                if let Some(ref fwd_ref) = r.forward_ref {
+                    let card = forward::build_forward_card(&r);
+                    forward::update_forward_card(card, fwd_ref, &admin_channel, &adapters).await;
+                }
+            }
+        }
+    };
+
     if session_result.is_err() {
         warn!(inbox_id, "social auto_reply: session timed out after 5 minutes");
-        db.update_social_inbox_status(inbox_id, "failed")?;
+        db.update_social_inbox_status(inbox_id, "forwarded")?;
+        restore_card(&db, &adapters, &admin_channel).await;
         return Ok(());
     }
 
@@ -571,9 +587,10 @@ async fn execute_auto_reply(
             db.update_social_inbox_status(inbox_id, "draft_ready")?;
             info!(inbox_id, "social auto_reply: draft ready");
         } else {
-            // Session finished but no draft was staged.
+            // Session finished but no draft was staged — restore card so user can retry.
             warn!(inbox_id, "social auto_reply: session ended without staging a draft");
-            db.update_social_inbox_status(inbox_id, "failed")?;
+            db.update_social_inbox_status(inbox_id, "forwarded")?;
+            restore_card(&db, &adapters, &admin_channel).await;
         }
     }
     Ok(())
