@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.2](https://github.com/CatiesGames/catclaw/compare/v0.33.1...v0.33.2) (2026-04-07)
+
+
+### Bug Fixes
+
+* AI 回覆失敗時還原 forward card 讓使用者可重試 ([ec931b8](https://github.com/CatiesGames/catclaw/commit/ec931b8f1b7815bc5aeb4028bcc2a7898c6c8683))
+
 ## [0.33.1](https://github.com/CatiesGames/catclaw/compare/v0.33.0...v0.33.1) (2026-04-04)
 
 
