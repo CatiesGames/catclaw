@@ -88,6 +88,11 @@ impl SessionManager {
         &self.state_db
     }
 
+    /// Get an Arc reference to the state database (for spawning tasks).
+    pub fn state_db_arc(&self) -> Arc<StateDb> {
+        self.state_db.clone()
+    }
+
     /// Read the current mcp_env from config (or empty if no config).
     fn mcp_env(&self) -> HashMap<String, HashMap<String, String>> {
         self.config.as_ref()
@@ -191,7 +196,7 @@ impl SessionManager {
                             message
                         );
                         let args =
-                            agent.claude_args_with_mcp(&new_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env);
+                            agent.claude_args_with_mcp(&new_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env, Some(&self.state_db));
 
                         // Register kill channel so /stop works during BOOT.md execution
                         let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
@@ -258,9 +263,9 @@ impl SessionManager {
 
         // Build args
         let args = if is_resume {
-            agent.claude_resume_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env)
+            agent.claude_resume_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env, Some(&self.state_db))
         } else {
-            agent.claude_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env)
+            agent.claude_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env, Some(&self.state_db))
         };
 
         // Update state to active + register kill channel
@@ -454,9 +459,9 @@ impl SessionManager {
 
         // Build args
         let args = if is_resume {
-            agent.claude_resume_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env)
+            agent.claude_resume_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env, Some(&self.state_db))
         } else {
-            agent.claude_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env)
+            agent.claude_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env, Some(&self.state_db))
         };
 
         // Update state to active + register kill channel

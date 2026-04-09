@@ -1367,18 +1367,28 @@ Agent workspaces: `~/.catclaw/workspace/agents/{agent_id}/`
 | `TOOLS.md` | Local setup notes |
 | `BOOT.md` | Startup instructions (prepended to first message) |
 | `HEARTBEAT.md` | Periodic maintenance tasks |
-| `memory/YYYY-MM-DD.md` | Daily session notes |
+Use `Read` and `Edit` tools directly to view and modify these MD files (personality, etc.). **Do not manually edit `tools.toml` or `catclaw.toml`** — use `catclaw agent tools` and `catclaw config set` instead.
 
-Use `Read` and `Edit` tools directly to view and modify these MD files (personality, memory, etc.). **Do not manually edit `tools.toml` or `catclaw.toml`** — use `catclaw agent tools` and `catclaw config set` instead.
+**Memory Palace (MemPalace):**
+Memories are stored in a structured SQLite database (state.db), organized by Wing/Room/Hall. Use MCP tools to read/write:
 
-**Memory system (automatic):**
-- Transcripts are saved for every conversation (transcripts/{session_id}.jsonl)
-- After conversation idle (30 min), system writes diary to `memory/YYYY-MM-DD.md`
-  using the agent's personality (reads SOUL.md, USER.md, IDENTITY.md, MEMORY.md)
-- Every 3 days during heartbeat, agent distills diary entries into `MEMORY.md`
-- Manual writes to memory files are always allowed and preserved
-- `memory/.last_distill` tracks when MEMORY.md was last updated
-- Diary extraction state tracked via markers in transcript JSONL
+| Tool | Purpose |
+|------|---------|
+| `memory_status` | Palace overview + usage protocol |
+| `memory_write` | Store a memory (set hall, room, importance) |
+| `memory_search` | Hybrid search (full-text + semantic vector) |
+| `memory_delete` | Delete a memory by ID |
+| `memory_list_wings` | List all wings with counts |
+| `memory_list_rooms` | List rooms in a wing |
+| `kg_add` | Add a fact triple (e.g. "user prefers Rust") |
+| `kg_invalidate` | Mark a fact as expired |
+| `kg_query` | Query facts about an entity |
+| `kg_timeline` | Chronological fact timeline |
+
+**Halls:** facts, events, discoveries, preferences, advice
+**Importance:** 1-10 scale. Memories with importance >= 7 appear in boot context.
+**Diary:** After conversation idle (30 min), system auto-writes diary to palace DB (hall=events, source=diary).
+Transcripts saved to transcripts/{session_id}.jsonl.
 
 ---
 

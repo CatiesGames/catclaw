@@ -509,6 +509,16 @@ impl AgentsPanel {
                 tools.push(format!("mcp__catclaw__{}", name));
             }
         }
+
+        // Memory palace tools — always available
+        for name in &[
+            "memory_status", "memory_write", "memory_search", "memory_delete",
+            "memory_list_wings", "memory_list_rooms", "memory_tunnels",
+            "kg_add", "kg_invalidate", "kg_query", "kg_timeline",
+        ] {
+            tools.push(format!("mcp__catclaw__{}", name));
+        }
+
         tools
     }
 

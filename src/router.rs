@@ -165,8 +165,10 @@ impl MessageRouter {
                 // Diary extraction in background (doesn't block the user)
                 let agent_clone = agent.clone();
                 let row = session_row.unwrap(); // safe: is_active implies Some
+                let db = self.session_manager.state_db_arc();
+                let no_embedder: Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>> = None;
                 tokio::spawn(async move {
-                    crate::scheduler::extract_diary_for_session(&agent_clone, &row).await;
+                    crate::scheduler::extract_diary_for_session(&agent_clone, &row, &db, &no_embedder).await;
                 });
 
                 "Session archived. Next message starts a new session.".to_string()

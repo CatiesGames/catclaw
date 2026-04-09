@@ -63,10 +63,40 @@ const SYSTEM_DIRECTIVES: &str = r#"
 - If nothing needs attention, reply exactly: HEARTBEAT_OK
 - If something needs attention, reply with the relevant information — do NOT include HEARTBEAT_OK.
 
-## Memory Recall
-- Before answering questions about prior work, decisions, dates, people, preferences, or todos: check your memory files (MEMORY.md and memory/*.md) first.
-- If you find relevant information, use it. If you searched but found nothing, say so honestly.
-- Proactively save important context, decisions, and user preferences to memory/YYYY-MM-DD.md during conversations.
+## Memory Palace
+Your memories are stored in a structured database (MemPalace). Use the memory_* and kg_* MCP tools — **never write markdown memory files**.
+
+### When to SEARCH (memory_search)
+- Before answering about prior work, decisions, dates, people, preferences, or project context.
+- When the user references something from a previous conversation.
+- When you're unsure about a fact — verify before stating it.
+- If search returns no results: try different keywords or remove room/hall filters. If still nothing, tell the user honestly — never fabricate memories.
+
+### When to WRITE (memory_write)
+- User explicitly says "remember this" or similar.
+- Important decisions, preferences, or facts are revealed during conversation.
+- You discover something significant (a breakthrough, a gotcha, a lesson learned).
+- Use halls: facts (objective truths), preferences (likes/dislikes), discoveries (insights), advice (lessons/gotchas).
+
+### Importance scale
+- 9-10: Identity-level — cannot interact correctly without this (user name, role, core project, language)
+- 7-8: Work-level — affects daily decisions (coding style, tool preferences, project stack)
+- 5-6: Reference — useful but not always needed (specific discussion outcomes, bug fixes)
+- 3-4: Background — only useful when digging deep (general events, routine conversations)
+- Note: the system auto-adjusts importance during post-processing, so approximate is fine.
+
+### When to use Knowledge Graph (kg_add, kg_query)
+- Record entity relationships: "user prefers Rust", "project-x uses PostgreSQL", "Alice is team lead".
+- Before stating facts about people, projects, or tools — call kg_query to verify.
+- When facts change — call kg_invalidate on the old fact, then kg_add the new one.
+
+### Cross-wing search
+- By default, search only your own wing. Use cross_wing=true only when the user asks about another agent's knowledge.
+- Use memory_tunnels to discover rooms shared across multiple agents.
+
+### Automatic behavior (no action needed from you)
+- After conversations end, the system automatically extracts diary entries and facts from transcripts.
+- Summaries and room classification are handled automatically — you don't need to organize memories manually.
 
 ## Group Chats
 - In group channels, respond ONLY when directly mentioned or asked a question, or when you can add genuine value.
@@ -129,7 +159,7 @@ impl Agent {
     ///   2. User-editable MD files (IDENTITY, SOUL, USER, AGENTS, TOOLS)
     ///   3. Memory (MEMORY.md + recent daily notes)
     ///   4. Workspace path info
-    pub fn build_system_prompt(&self) -> String {
+    pub fn build_system_prompt(&self, state_db: Option<&crate::state::StateDb>) -> String {
         let mut prompt = String::new();
 
         // 1. System directives (hardcoded)
@@ -153,33 +183,17 @@ impl Agent {
             }
         }
 
-        // 3. Memory
-        let memory_path = self.workspace.join("MEMORY.md");
-        if let Ok(text) = std::fs::read_to_string(&memory_path) {
-            if !text.trim().is_empty() {
-                prompt.push_str(&format!("\n# MEMORY\n{}\n", text));
-            }
-        }
-
-        // Recent daily notes (today + yesterday, in configured timezone)
-        let now_tz = resolve_now_in_timezone(self.timezone.as_deref());
-        let today = now_tz.date();
-        let yesterday = today - chrono::Duration::days(1);
-        for date in &[yesterday, today] {
-            let filename = format!("{}.md", date.format("%Y-%m-%d"));
-            let path = self.workspace.join("memory").join(&filename);
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                if !text.trim().is_empty() {
-                    prompt.push_str(&format!(
-                        "\n# Daily Notes: {}\n{}\n",
-                        date.format("%Y-%m-%d"),
-                        text
-                    ));
+        // 3. Memory — L1 context from palace DB
+        if let Some(db) = state_db {
+            if let Ok(l1) = crate::memory::context::build_l1_context(db, &self.id, 3200) {
+                if !l1.is_empty() {
+                    prompt.push_str(&l1);
                 }
             }
         }
 
         // 4. Workspace path info + current date
+        let now_tz = resolve_now_in_timezone(self.timezone.as_deref());
         let abs_workspace = std::fs::canonicalize(&self.workspace)
             .unwrap_or_else(|_| self.workspace.clone());
         let tz_label = self
@@ -190,16 +204,14 @@ impl Agent {
             "\n# Workspace\n\
              Current date/time: {} ({})\n\
              Your workspace directory is: {}\n\
-             - Memory files: {}/memory/\n\
-             - Transcripts: {}/transcripts/\n\
-             - Write daily notes to: {}/memory/YYYY-MM-DD.md\n\
-             - Long-term memory: {}/MEMORY.md\n",
+             Your memory wing: \"{}\"\n\
+             - Always use wing=\"{}\" for all memory_* and kg_* tool calls.\n\
+             - Transcripts: {}/transcripts/\n",
             now_tz.format("%Y-%m-%d %H:%M:%S"),
             tz_label,
             abs_workspace.display(),
-            abs_workspace.display(),
-            abs_workspace.display(),
-            abs_workspace.display(),
+            self.id,
+            self.id,
             abs_workspace.display(),
         ));
 
@@ -228,6 +240,7 @@ impl Agent {
     /// `mcp_port`: if set, injects --mcp-config pointing to the built-in MCP server.
     /// `hook_session_key`: if set and agent has approval rules, injects --settings with PreToolUse hook.
     /// `mcp_env`: per-server env vars to inject into user MCP server definitions.
+    #[allow(clippy::too_many_arguments)]
     pub fn claude_args_with_mcp(
         &self,
         session_id: &str,
@@ -236,8 +249,9 @@ impl Agent {
         hook_session_key: Option<&str>,
         config_path: Option<&std::path::Path>,
         mcp_env: &HashMap<String, HashMap<String, String>>,
+        state_db: Option<&crate::state::StateDb>,
     ) -> Vec<String> {
-        let system_prompt = self.build_system_prompt();
+        let system_prompt = self.build_system_prompt(state_db);
 
         let mut args = vec![
             "-p".to_string(),
@@ -423,6 +437,7 @@ impl Agent {
     }
 
     /// Build resume args (uses --resume instead of --session-id).
+    #[allow(clippy::too_many_arguments)]
     pub fn claude_resume_args_with_mcp(
         &self,
         session_id: &str,
@@ -431,8 +446,9 @@ impl Agent {
         hook_session_key: Option<&str>,
         config_path: Option<&std::path::Path>,
         mcp_env: &HashMap<String, HashMap<String, String>>,
+        state_db: Option<&crate::state::StateDb>,
     ) -> Vec<String> {
-        let mut args = self.claude_args_with_mcp(session_id, model_override, mcp_port, hook_session_key, config_path, mcp_env);
+        let mut args = self.claude_args_with_mcp(session_id, model_override, mcp_port, hook_session_key, config_path, mcp_env, state_db);
 
         // Replace --session-id with --resume
         if let Some(pos) = args.iter().position(|a| a == "--session-id") {

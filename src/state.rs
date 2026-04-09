@@ -6,11 +6,26 @@ use std::sync::Mutex;
 
 use crate::error::Result;
 
+/// Register sqlite-vec extension as auto-extension. Must be called before Connection::open().
+/// Safe to call multiple times (idempotent via std::sync::Once).
+static SQLITE_VEC_INIT: std::sync::Once = std::sync::Once::new();
+
+#[allow(clippy::missing_transmute_annotations)]
+fn ensure_sqlite_vec() {
+    SQLITE_VEC_INIT.call_once(|| {
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
+        }
+    });
+}
+
 type OldSessionRow = (String, String, String, String, String, Option<String>, Option<String>, String, String, String, Option<String>);
 
 /// State database backed by SQLite WAL
 pub struct StateDb {
-    conn: Mutex<Connection>,
+    pub(crate) conn: Mutex<Connection>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +66,9 @@ pub struct ScheduledTaskRow {
     /// When true, task reuses the same session across runs (context persists).
     /// Default false: each run starts a fresh session.
     pub keep_context: bool,
+    /// When true, diary extraction runs after task session completes.
+    /// Default false: system-originated sessions skip diary extraction.
+    pub remember: bool,
 }
 
 #[allow(dead_code)]
@@ -126,6 +144,7 @@ impl SessionRow {
 impl StateDb {
     /// Open or create the state database
     pub fn open(path: &Path) -> Result<Self> {
+        ensure_sqlite_vec();
         let conn = Connection::open(path)?;
 
         // Enable WAL mode
@@ -142,6 +161,7 @@ impl StateDb {
 
     /// Open an in-memory database (for testing)
     pub fn open_memory() -> Result<Self> {
+        ensure_sqlite_vec();
         let conn = Connection::open_in_memory()?;
         let db = StateDb {
             conn: Mutex::new(conn),
@@ -273,6 +293,10 @@ impl StateDb {
         let _ = conn.execute_batch(
             "ALTER TABLE scheduled_tasks ADD COLUMN keep_context INTEGER NOT NULL DEFAULT 0;",
         );
+        // Add remember column (default 0 = no memory extraction)
+        let _ = conn.execute_batch(
+            "ALTER TABLE scheduled_tasks ADD COLUMN remember INTEGER NOT NULL DEFAULT 0;",
+        );
 
         // Social inbox tables
         conn.execute_batch(
@@ -332,6 +356,106 @@ impl StateDb {
                 metadata        TEXT,
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL
+            );
+            ",
+        )?;
+
+        // ── Memory Palace tables ─────────────────────────────────────────────
+
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS memory_nodes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                wing        TEXT NOT NULL,
+                room        TEXT NOT NULL DEFAULT 'general',
+                hall        TEXT NOT NULL DEFAULT 'facts',
+                content     TEXT NOT NULL,
+                summary     TEXT,
+                source      TEXT NOT NULL DEFAULT 'agent',
+                importance  INTEGER NOT NULL DEFAULT 5,
+                chunk_index INTEGER,
+                parent_id   INTEGER,
+                created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                metadata    TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_nodes_wing ON memory_nodes(wing);
+            CREATE INDEX IF NOT EXISTS idx_nodes_wing_room ON memory_nodes(wing, room);
+            CREATE INDEX IF NOT EXISTS idx_nodes_wing_hall ON memory_nodes(wing, hall);
+            CREATE INDEX IF NOT EXISTS idx_nodes_importance ON memory_nodes(wing, importance DESC);
+            ",
+        )?;
+
+        // FTS5 full-text search (content-sync'd with memory_nodes)
+        conn.execute_batch(
+            "
+            CREATE VIRTUAL TABLE IF NOT EXISTS memory_nodes_fts USING fts5(
+                content, summary,
+                content=memory_nodes, content_rowid=id,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS memory_nodes_ai AFTER INSERT ON memory_nodes BEGIN
+                INSERT INTO memory_nodes_fts(rowid, content, summary)
+                VALUES (new.id, new.content, new.summary);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memory_nodes_ad AFTER DELETE ON memory_nodes BEGIN
+                INSERT INTO memory_nodes_fts(memory_nodes_fts, rowid, content, summary)
+                VALUES ('delete', old.id, old.content, old.summary);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memory_nodes_au AFTER UPDATE ON memory_nodes BEGIN
+                INSERT INTO memory_nodes_fts(memory_nodes_fts, rowid, content, summary)
+                VALUES ('delete', old.id, old.content, old.summary);
+                INSERT INTO memory_nodes_fts(rowid, content, summary)
+                VALUES (new.id, new.content, new.summary);
+            END;
+            ",
+        )?;
+
+        // sqlite-vec vector index (768 dims for multilingual-e5-base, cosine distance)
+        conn.execute_batch(
+            "
+            CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
+                node_id INTEGER PRIMARY KEY,
+                embedding float[1024] distance_metric=cosine
+            );
+            ",
+        )?;
+
+        // Knowledge graph tables
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS kg_entities (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                wing        TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                entity_type TEXT DEFAULT 'unknown',
+                created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                UNIQUE(wing, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_entities_wing ON kg_entities(wing);
+
+            CREATE TABLE IF NOT EXISTS kg_triples (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                wing            TEXT NOT NULL,
+                subject_id      INTEGER NOT NULL REFERENCES kg_entities(id),
+                predicate       TEXT NOT NULL,
+                object_id       INTEGER NOT NULL REFERENCES kg_entities(id),
+                confidence      REAL NOT NULL DEFAULT 1.0,
+                source_node_id  INTEGER REFERENCES memory_nodes(id),
+                valid_from      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                valid_to        TEXT,
+                created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_triples_wing ON kg_triples(wing);
+            CREATE INDEX IF NOT EXISTS idx_triples_subject ON kg_triples(subject_id);
+            CREATE INDEX IF NOT EXISTS idx_triples_object ON kg_triples(object_id);
+            CREATE INDEX IF NOT EXISTS idx_triples_valid ON kg_triples(valid_to);
+
+            CREATE TABLE IF NOT EXISTS palace_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );
             ",
         )?;
@@ -522,7 +646,7 @@ impl StateDb {
     pub fn list_scheduled_tasks(&self) -> Result<Vec<ScheduledTaskRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context
+            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember
              FROM scheduled_tasks ORDER BY next_run_at",
         )?;
         let rows = stmt
@@ -540,6 +664,7 @@ impl StateDb {
                     enabled: row.get::<_, i32>(9)? != 0,
                     payload: row.get(10)?,
                     keep_context: row.get::<_, i32>(11).unwrap_or(0) != 0,
+                    remember: row.get::<_, i32>(12).unwrap_or(0) != 0,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -549,7 +674,7 @@ impl StateDb {
     pub fn list_due_tasks(&self, now: &str) -> Result<Vec<ScheduledTaskRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context
+            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember
              FROM scheduled_tasks WHERE enabled = 1 AND next_run_at <= ?1 ORDER BY next_run_at",
         )?;
         let rows = stmt
@@ -567,6 +692,7 @@ impl StateDb {
                     enabled: row.get::<_, i32>(9)? != 0,
                     payload: row.get(10)?,
                     keep_context: row.get::<_, i32>(11).unwrap_or(0) != 0,
+                    remember: row.get::<_, i32>(12).unwrap_or(0) != 0,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -576,8 +702,8 @@ impl StateDb {
     pub fn insert_task(&self, task: &ScheduledTaskRow) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO scheduled_tasks (task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO scheduled_tasks (task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 task.task_type,
                 task.agent_id,
@@ -590,6 +716,7 @@ impl StateDb {
                 task.enabled as i32,
                 task.payload,
                 task.keep_context as i32,
+                task.remember as i32,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -643,7 +770,7 @@ impl StateDb {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context
+                "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember
                  FROM scheduled_tasks WHERE id = ?1",
                 params![id],
                 |row| {
@@ -660,6 +787,7 @@ impl StateDb {
                         enabled: row.get::<_, i32>(9)? != 0,
                         payload: row.get(10)?,
                         keep_context: row.get::<_, i32>(11).unwrap_or(0) != 0,
+                        remember: row.get::<_, i32>(12).unwrap_or(0) != 0,
                     })
                 },
             )

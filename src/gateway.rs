@@ -48,6 +48,8 @@ pub struct GatewayHandle {
     pub mcp_tools: Arc<std::sync::RwLock<HashMap<String, Vec<String>>>>,
     /// Channel to inject social SocialItems into the ingest pipeline (webhook + manual poll).
     pub social_item_tx: Arc<tokio::sync::mpsc::UnboundedSender<crate::social::SocialItem>>,
+    /// Embedding model for memory palace (lazy-loaded on first use).
+    pub embedder: Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>,
 }
 
 /// Start gateway services (DB, agents, session manager, channel adapters, scheduler)
@@ -79,6 +81,15 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         config.general.default_fallback_model.as_deref(),
         config.general.timezone.as_deref(),
     )?));
+
+    // 3b. Create shared embedder (lazy-loaded on first use)
+    let embedder: Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>> =
+        Arc::new(tokio::sync::OnceCell::new());
+
+    // 3c. Migrate markdown memories to palace DB (one-time, idempotent)
+    if let Err(e) = crate::memory::migrate::run_migration(&state_db, &config.agents, &config.general.workspace, &embedder) {
+        warn!(error = %e, "memory palace migration warning (non-fatal)");
+    }
 
     let default_agent_id = config
         .default_agent_id()
@@ -233,6 +244,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
             social_item_tx: Some(social_item_tx.clone()),
             social_config: Some(gw_config.clone()),
             log_dir: config.logging.resolve_log_dir(&config.general.workspace),
+            embedder: Some(embedder.clone()),
         };
         let sched_db = state_db.clone();
         let sched_agents = agent_registry.clone();
@@ -470,6 +482,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         event_bus,
         mcp_tools,
         social_item_tx,
+        embedder: embedder.clone(),
     };
 
     // 10. Start gateway server (WS + MCP on single port)

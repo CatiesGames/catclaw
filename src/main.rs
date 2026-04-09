@@ -10,6 +10,7 @@ mod gateway;
 mod logging;
 mod mcp_discovery;
 mod mcp_server;
+mod memory;
 mod pidfile;
 mod router;
 mod scheduler;
@@ -3283,6 +3284,7 @@ fn cmd_task_add(
         enabled: true,
         payload: Some(prompt.to_string()),
         keep_context,
+        remember: false,
     })?;
 
     let next_display = format_utc_to_local(&next_run_at);

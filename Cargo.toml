@@ -90,6 +90,15 @@ hmac = "0.12"
 # Image processing (format conversion for social media uploads)
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 
+# Memory palace: vector search (SQLite extension, pure C, statically linked)
+sqlite-vec = "0.1"
+
+# Memory palace: local embedding model (BGE-M3 for zh+en bilingual)
+fastembed = "5"
+
+# Memory palace: zero-copy Vec<f32> ↔ &[u8] for embedding BLOB storage
+zerocopy = { version = "0.8", features = ["derive"] }
+
 # Hex encoding for HMAC output
 hex = "0.4"
 

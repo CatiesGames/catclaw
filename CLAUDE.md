@@ -127,7 +127,16 @@ Each tool exists in exactly one list: `allowed` (directly usable), `denied` (una
 | `src/tui/config_panel.rs` | TUI Config panel: editable settings including `approval.timeout_secs` |
 | `src/tui/social_inbox.rs` | TUI Social Inbox panel: list/filter/approve/discard inbox items |
 | `src/tui/social_drafts.rs` | TUI Social Drafts panel: outgoing draft queue, filter by status, approve/discard |
-| `src/scheduler.rs` | Heartbeat, cron, archive cleanup, diary extraction, memory distillation, social polling |
+| `src/scheduler.rs` | Heartbeat, cron, archive cleanup, diary extraction (→ palace DB), social polling |
+| `src/memory/mod.rs` | Memory palace data types, chunking logic |
+| `src/memory/db.rs` | StateDb memory CRUD (memory_nodes, vec_memories, kg_*) |
+| `src/memory/embed.rs` | fastembed wrapper (BGE-M3, 1024 dims) |
+| `src/memory/search.rs` | Hybrid search: FTS5 + sqlite-vec cosine + RRF merge |
+| `src/memory/kg.rs` | Knowledge graph: entities, triples, temporal queries |
+| `src/memory/tools.rs` | 11 MCP tool schemas + execute dispatch |
+| `src/memory/analyze.rs` | Haiku post-processing: diary → summary + room + facts + KG |
+| `src/memory/context.rs` | L1 wake-up context generator (top-importance → system prompt) |
+| `src/memory/migrate.rs` | One-time migration: markdown diary/MEMORY.md → palace DB |
 | `src/social/mod.rs` | Social Inbox core types (`SocialItem`, `ResolvedAction`), action router, `run_ingest()` orchestrator |
 | `src/social/instagram.rs` | Instagram Graph API client (`InstagramClient`) — profile, media, comments, insights |
 | `src/social/threads.rs` | Threads API client (`ThreadsClient`) — timeline, replies, two-step post/reply |
@@ -135,13 +144,43 @@ Each tool exists in exactly one list: `allowed` (directly usable), `denied` (una
 | `src/social/poller.rs` | Polling logic for Instagram/Threads feeds, cursor management via `social_cursors` table |
 | `src/social/forward.rs` | Forward card builder (`ForwardCard`) + adapter-specific renderers for Discord/Slack/Telegram |
 
-## Automatic Memory System
+## Memory Palace System (MemPalace)
 
-Two-layer system in `src/scheduler.rs` that transforms transcripts into agent memory:
+Structured memory system in `src/memory/` backed by SQLite (state.db), replacing the old markdown-based diary+distillation system. Based on the MemPalace competition-winning design.
 
-1. **Layer 1 — Diary extraction** (`check_diary_extraction()`): Every scheduler tick, checks idle sessions (idle > 30 min, origin ≠ system, ≥ 2 user turns, has meaningful responses). Spawns a standalone `claude -p --max-turns 1` with the agent's personality files (SOUL/USER/IDENTITY/MEMORY.md) to write a diary entry. Output appended to `memory/YYYY-MM-DD.md`. Tracks state via `diary_extracted`/`diary_skipped` markers in transcript JSONL.
+### Architecture
+- **Spatial organization**: Wing (agent isolation) → Room (topic, auto-classified by Haiku) → Hall (memory type: facts/events/discoveries/preferences/advice)
+- **Verbatim storage**: Raw content in memory_nodes (drawers), AI-generated summary (closets)
+- **Hybrid search**: FTS5 full-text + sqlite-vec cosine similarity, merged via Reciprocal Rank Fusion (RRF). Supports `cross_wing` for multi-agent search.
+- **Knowledge graph**: Temporal entity-relationship triples with valid_from/valid_to
+- **Tunnels**: Rooms shared across multiple wings, discoverable via `memory_tunnels` tool
+- **L1 context**: Top-importance memories (≥7) auto-loaded into system prompt (~800 tokens)
+- **11 MCP tools**: memory_status/write/search/delete/list_wings/list_rooms/tunnels + kg_add/invalidate/query/timeline
+- **Automatic post-processing**: After diary extraction, Haiku analyzes the diary to produce summary (closet), room classification, extracted facts, and KG triples
 
-2. **Layer 2 — Distillation** (`check_distillation_due()` + `execute_heartbeat()`): Every 3 days (tracked by `memory/.last_distill`), appends distillation instructions to the heartbeat message asking the agent to review diary files and update MEMORY.md. Excludes today's diary file (Layer 1 may still be writing). If `.last_distill` is missing, requires oldest diary ≥ 3 days old before first trigger. No extra LLM call — piggybacks on the heartbeat session.
+### Key files
+- `src/memory/mod.rs` — Data types (WriteRequest, MemoryNode, SearchResult, Triple, DiaryAnalysis), chunking
+- `src/memory/db.rs` — StateDb CRUD methods for memory_nodes, vec_memories, kg_*, tunnels
+- `src/memory/embed.rs` — fastembed wrapper (BGE-M3, 1024 dims)
+- `src/memory/search.rs` — Hybrid search (FTS5 + vector + RRF merge), supports cross-wing
+- `src/memory/kg.rs` — Knowledge graph operations on StateDb
+- `src/memory/tools.rs` — MCP tool schemas and dispatch (11 tools)
+- `src/memory/analyze.rs` — Haiku post-processing: diary → summary + room + facts + KG triples
+- `src/memory/context.rs` — L1 wake-up context generator
+- `src/memory/migrate.rs` — One-time migration from old markdown files
+
+### Diary extraction pipeline
+`check_diary_extraction()` in `src/scheduler.rs` runs every 60s tick:
+1. **Diary generation** (agent's model): transcript → diary text → `memory_nodes` (hall=events, source=diary)
+2. **Haiku post-processing** (background, non-blocking): diary text → `analyze_diary()` in `src/memory/analyze.rs`:
+   - Produces summary (closet) and room classification
+   - Extracts facts/preferences/advice as separate `memory_nodes` (source=extraction, importance=7-9)
+   - Creates KG triples for entity relationships
+   - Generates embeddings for diary + facts
+Distillation has been removed — importance field + Haiku extraction replaces it.
+
+### Migration
+On first startup after upgrade, `run_migration()` in gateway.rs imports existing `memory/*.md` diary files and `MEMORY.md` into palace DB. Controlled by `palace_meta.migration_v1` key. Old files are preserved but no longer read by the system.
 
 ## Language Conventions
 

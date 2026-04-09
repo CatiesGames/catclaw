@@ -51,6 +51,9 @@ pub enum CatClawError {
     #[error("social error: {0}")]
     Social(String),
 
+    #[error("memory error: {0}")]
+    Memory(String),
+
     #[error("{0}")]
     Other(String),
 }

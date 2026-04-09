@@ -51,6 +51,7 @@ async fn handle_mcp(
         "tools/list" => {
             let mut tools = build_tool_list(adapters);
             tools.extend(build_social_tools(&gw));
+            tools.extend(crate::memory::tools::build_memory_tools());
             let result = serde_json::json!({ "tools": tools });
             jsonrpc_ok(id, result)
         }
@@ -65,7 +66,33 @@ async fn handle_mcp(
                 .cloned()
                 .unwrap_or(Value::Object(serde_json::Map::new()));
 
-            // Route social tools first, then fall back to adapter tools.
+            // Route memory/kg tools first.
+            if tool_name.starts_with("memory_") || tool_name.starts_with("kg_") {
+                match crate::memory::tools::execute_memory_tool(
+                    &gw.state_db,
+                    &gw.embedder,
+                    tool_name,
+                    arguments,
+                )
+                .await
+                {
+                    Ok(result) => {
+                        let response = serde_json::json!({
+                            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+                        });
+                        return jsonrpc_ok(id, response);
+                    }
+                    Err(e) => {
+                        let response = serde_json::json!({
+                            "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                            "isError": true
+                        });
+                        return jsonrpc_ok(id, response);
+                    }
+                }
+            }
+
+            // Route social tools, then fall back to adapter tools.
             if tool_name.starts_with("instagram_") || tool_name.starts_with("threads_") {
                 match execute_social_tool(&gw, tool_name, arguments).await {
                     Ok(result) => {

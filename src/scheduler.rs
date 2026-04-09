@@ -35,6 +35,8 @@ pub struct SchedulerConfig {
     pub social_config: Option<Arc<std::sync::RwLock<crate::config::Config>>>,
     /// Log directory for scanning ERROR/WARN entries during heartbeat.
     pub log_dir: std::path::PathBuf,
+    /// Embedding model for memory palace (lazy-loaded on first use).
+    pub embedder: Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
 }
 
 impl Default for SchedulerConfig {
@@ -48,6 +50,7 @@ impl Default for SchedulerConfig {
             social_item_tx: None,
             social_config: None,
             log_dir: std::path::PathBuf::from("./workspace/logs"),
+            embedder: None,
         }
     }
 }
@@ -182,10 +185,10 @@ pub async fn run(
         }
 
         // ── System: Diary extraction ──
-        check_diary_extraction(&state_db, &agent_registry, &diary_in_flight).await;
+        check_diary_extraction(&state_db, &agent_registry, &diary_in_flight, &config.embedder).await;
 
         // ── User tasks from DB ──
-        if let Err(e) = tick_user_tasks(&state_db, &agent_registry, &session_manager, &now).await {
+        if let Err(e) = tick_user_tasks(&state_db, &agent_registry, &session_manager, &now, &config.embedder).await {
             error!(error = %e, "scheduler: user task tick failed");
         }
     }
@@ -421,6 +424,7 @@ async fn tick_user_tasks(
     agent_registry: &std::sync::RwLock<AgentRegistry>,
     session_manager: &SessionManager,
     now: &DateTime<Utc>,
+    embedder: &Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
 ) -> crate::error::Result<()> {
     let now_str = now.to_rfc3339();
     let due_tasks = state_db.list_due_tasks(&now_str)?;
@@ -442,7 +446,7 @@ async fn tick_user_tasks(
         );
 
         let prompt = task.payload.as_deref().unwrap_or("(no prompt specified)");
-        execute_prompt(&agent, session_manager, prompt, task.id, task.keep_context).await;
+        execute_prompt(&agent, session_manager, state_db, prompt, task.id, task.keep_context, task.remember, embedder).await;
 
         // Update schedule: calculate next run or disable if one-shot
         let last_run = now.to_rfc3339();
@@ -470,7 +474,7 @@ async fn tick_user_tasks(
     Ok(())
 }
 
-/// Send a heartbeat poll to the agent, optionally including memory distillation instructions
+/// Send a heartbeat poll to the agent.
 async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &SessionManager, log_dir: &Path) {
     let key = SessionKey::new(&agent.id, "system", "heartbeat");
     let sender = SenderInfo::default();
@@ -480,15 +484,7 @@ async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &Sessio
     let last_ts_path = agent.workspace.join("memory").join(".last_heartbeat_log_ts");
     scan_log_issues(log_dir, &issues_path, &last_ts_path).await;
 
-    // Build heartbeat message, appending distillation instructions if due
     let mut message = "Heartbeat poll. Read HEARTBEAT.md and follow its instructions.".to_string();
-    let distillation_requested = if let Some(distill_instructions) = check_distillation_due(agent).await {
-        info!(agent = %agent.id, "heartbeat: memory distillation due, appending instructions");
-        message.push_str(&distill_instructions);
-        true
-    } else {
-        false
-    };
 
     // Append open issues if any
     if let Some(issues_text) = open_issues_summary(&issues_path).await {
@@ -517,18 +513,6 @@ async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &Sessio
             } else {
                 info!(agent = %agent.id, response_len = trimmed.len(), "heartbeat returned action");
             }
-
-            // Write .last_distill from Rust side after heartbeat completes,
-            // regardless of whether the agent successfully updated MEMORY.md.
-            // This prevents distillation from re-triggering every heartbeat on failure.
-            if distillation_requested {
-                let last_distill_path = agent.workspace.join("memory").join(".last_distill");
-                let now_local = crate::agent::resolve_now_in_timezone(agent.timezone.as_deref());
-                let today = now_local.format("%Y-%m-%d").to_string();
-                if let Err(e) = tokio::fs::write(&last_distill_path, &today).await {
-                    warn!(agent = %agent.id, error = %e, "failed to write .last_distill");
-                }
-            }
         }
         Err(e) => {
             error!(agent = %agent.id, error = %e, "heartbeat failed");
@@ -537,12 +521,16 @@ async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &Sessio
 }
 
 /// Send a user-scheduled prompt to the agent
+#[allow(clippy::too_many_arguments)]
 async fn execute_prompt(
     agent: &crate::agent::Agent,
     session_manager: &SessionManager,
+    state_db: &StateDb,
     prompt: &str,
     task_id: i64,
     keep_context: bool,
+    remember: bool,
+    embedder: &Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
 ) {
     let context_id = format!("task-{}", task_id);
     let key = SessionKey::new(&agent.id, "system", &context_id);
@@ -566,6 +554,20 @@ async fn execute_prompt(
                 response_len = response.trim().len(),
                 "user task completed"
             );
+
+            // If remember=true, run diary extraction on this system session.
+            // Note: if diary extraction fails here, it won't be retried by the periodic
+            // check (which skips origin="system" sessions). The task will produce new
+            // content on its next scheduled run.
+            if remember {
+                let session_key = key.to_key_string();
+                if let Ok(Some(session_row)) = state_db.get_session(&session_key) {
+                    info!(agent = %agent.id, task_id, "task: running diary extraction (remember=true)");
+                    // Convert &StateDb to Arc for extract_diary_for_session
+                    let db_arc = session_manager.state_db_arc();
+                    extract_diary_for_session(agent, &session_row, &db_arc, embedder).await;
+                }
+            }
         }
         Err(e) => {
             error!(agent = %agent.id, task_id = task_id, error = %e, "user task failed");
@@ -630,8 +632,8 @@ to understand who you are, who you talk to, and your existing memories:
 # USER.md
 {user}
 
-# MEMORY.md (reference only — do not repeat)
-{memory}
+# Existing Memories (reference only — do not repeat)
+{memory_context}
 
 ---
 
@@ -666,9 +668,10 @@ enum DiaryResult {
 
 /// Check all idle sessions for diary extraction eligibility and process them.
 async fn check_diary_extraction(
-    state_db: &StateDb,
+    state_db: &Arc<StateDb>,
     agent_registry: &std::sync::RwLock<AgentRegistry>,
     in_flight: &DiaryInFlight,
+    embedder: &Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
 ) {
     let sessions = match state_db.list_sessions() {
         Ok(s) => s,
@@ -715,15 +718,23 @@ async fn check_diary_extraction(
         // Mark as in-flight to prevent duplicate extraction on next tick
         in_flight.lock().unwrap().insert(session.session_id.clone());
 
-        extract_diary_for_session(&agent, &session).await;
-
-        // Remove from in-flight set (allows retry on error, or re-check on next tick)
-        in_flight.lock().unwrap().remove(&session.session_id);
+        // Spawn background task so diary extraction does not block the scheduler loop
+        let agent_clone = agent.clone();
+        let session_clone = session.clone();
+        let db_clone = state_db.clone();
+        let emb_clone = embedder.clone();
+        let in_flight_clone = Arc::clone(in_flight);
+        let session_id_clone = session.session_id.clone();
+        tokio::spawn(async move {
+            extract_diary_for_session(&agent_clone, &session_clone, &db_clone, &emb_clone).await;
+            // Remove from in-flight set (allows retry on error, or re-check on next tick)
+            in_flight_clone.lock().unwrap().remove(&session_id_clone);
+        });
     }
 }
 
-/// Extract a diary entry from a single session's transcript and append it to the
-/// agent's daily memory file (`memory/YYYY-MM-DD.md`).
+/// Extract a diary entry from a single session's transcript and store it in the
+/// palace DB as a memory node.
 ///
 /// Reads transcript entries since the last diary marker, validates content quality
 /// (minimum user turns, meaningful responses), generates a diary via `claude -p`,
@@ -731,7 +742,12 @@ async fn check_diary_extraction(
 ///
 /// Safe to call on sessions in any state (idle, active, archived).
 /// Does NOT change session state — caller is responsible for lifecycle management.
-pub async fn extract_diary_for_session(agent: &Agent, session: &SessionRow) {
+pub async fn extract_diary_for_session(
+    agent: &Agent,
+    session: &SessionRow,
+    state_db: &Arc<StateDb>,
+    embedder: &Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
+) {
     let transcript = match TranscriptLog::open_existing(&agent.workspace, &session.session_id).await {
         Some(t) => t,
         None => {
@@ -784,7 +800,7 @@ pub async fn extract_diary_for_session(agent: &Agent, session: &SessionRow) {
     let readable = TranscriptLog::format_readable(&entries);
     let channel_label = build_channel_label(&session.session_key);
     // Format time label in the agent's configured timezone
-    let time_label = entries
+    let _time_label = entries
         .first()
         .and_then(|e| {
             chrono::DateTime::parse_from_rfc3339(&e.timestamp)
@@ -803,34 +819,53 @@ pub async fn extract_diary_for_session(agent: &Agent, session: &SessionRow) {
 
     info!(session = %session.session_key, user_turns, "diary: generating diary entry");
 
-    match generate_diary(agent, &readable).await {
+    match generate_diary(agent, &readable, state_db).await {
         DiaryResult::Entry(diary_text) => {
-            let now_local = crate::agent::resolve_now_in_timezone(agent.timezone.as_deref());
-            let today = now_local.format("%Y-%m-%d").to_string();
-            let diary_path = agent.workspace.join("memory").join(format!("{}.md", today));
+            // Derive room from channel label (e.g. "discord dm" → "discord")
+            let room = channel_label
+                .split_whitespace()
+                .next()
+                .unwrap_or("general")
+                .to_string();
 
-            let memory_dir = agent.workspace.join("memory");
-            if let Err(e) = tokio::fs::create_dir_all(&memory_dir).await {
-                error!(error = %e, "diary: failed to create memory dir");
-                return;
-            }
+            let req = crate::memory::WriteRequest {
+                wing: agent.id.clone(),
+                room,
+                hall: "events".to_string(),
+                content: diary_text,
+                summary: None,
+                source: "diary".to_string(),
+                importance: Some(5),
+            };
 
-            let entry = format!(
-                "\n---\n\n### {} — {}\n\n{}\n",
-                channel_label, time_label, diary_text
-            );
-            if let Err(e) = append_to_file(&diary_path, &entry).await {
-                error!(error = %e, path = %diary_path.display(), "diary: failed to write diary entry");
-                return;
-            }
+            let diary_node_id = match state_db.memory_write(&req) {
+                Ok(id) => id,
+                Err(e) => {
+                    error!(error = %e, "diary: failed to write to palace DB");
+                    return;
+                }
+            };
 
             transcript.log_system("diary_extracted").await;
             info!(
                 agent = %agent.id,
                 session = %session.session_key,
-                path = %diary_path.display(),
-                "diary: entry written"
+                diary_node_id,
+                "diary: entry written to palace DB"
             );
+
+            // Haiku post-processing: extract summary, room, facts, KG triples (background)
+            let wing = agent.id.clone();
+            let text = req.content.clone();
+            let emb = embedder.clone();
+            let db = state_db.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::memory::analyze::analyze_diary(
+                    &db, emb.as_ref(), &wing, diary_node_id, &text,
+                ).await {
+                    warn!(error = %e, "diary: haiku analysis failed (non-fatal)");
+                }
+            });
         }
         DiaryResult::NoDiary => {
             transcript
@@ -846,29 +881,32 @@ pub async fn extract_diary_for_session(agent: &Agent, session: &SessionRow) {
 }
 
 /// Generate a diary entry by calling claude -p with the agent's personality context.
-async fn generate_diary(agent: &Agent, transcript_text: &str) -> DiaryResult {
+async fn generate_diary(agent: &Agent, transcript_text: &str, state_db: &StateDb) -> DiaryResult {
     // Read personality files
     let identity = read_file_or_empty(&agent.workspace.join("IDENTITY.md")).await;
     let soul = read_file_or_empty(&agent.workspace.join("SOUL.md")).await;
     let user_md = read_file_or_empty(&agent.workspace.join("USER.md")).await;
-    let memory = read_file_or_empty(&agent.workspace.join("MEMORY.md")).await;
+
+    // Load L1 context from palace DB (replaces MEMORY.md)
+    let memory_context = crate::memory::context::build_l1_context(state_db, &agent.id, 2000)
+        .unwrap_or_default();
 
     // Build the prompt from template
     let prompt = DIARY_PROMPT
         .replace("{identity}", &identity)
         .replace("{soul}", &soul)
         .replace("{user}", &user_md)
-        .replace("{memory}", &memory)
+        .replace("{memory_context}", &memory_context)
         .replace("{transcript}", transcript_text);
 
-    // Call claude -p --max-turns 1 --output-format text
-    // --tools "" disables all built-in tools; --strict-mcp-config with an empty
-    // config ignores global MCP plugins (pencil, LSP, etc.) so the model has no
-    // callable tools and cannot exceed --max-turns 1.
+    // Call Haiku for diary generation — doesn't need deep reasoning,
+    // just personality-aware journaling. Personality context is in the prompt.
     let result = Command::new("claude")
         .args([
             "-p",
             &prompt,
+            "--model",
+            "claude-haiku-4-5-20251001",
             "--max-turns",
             "1",
             "--output-format",
@@ -929,110 +967,11 @@ async fn read_file_or_empty(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Append text to a file, creating it if it doesn't exist
-async fn append_to_file(path: &Path, content: &str) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await?;
-    file.write_all(content.as_bytes()).await?;
-    Ok(())
-}
 
-// ---------------------------------------------------------------------------
-// Layer 2: Heartbeat distillation — diary files → MEMORY.md
-// ---------------------------------------------------------------------------
-
-/// Check if memory distillation is due and return extra instructions for the heartbeat message.
-/// Returns `None` if distillation is not needed, or `Some(instructions)` to append.
-///
-/// Rules:
-/// - If `.last_distill` exists: trigger when ≥ 3 days since that date
-/// - If `.last_distill` missing: trigger only when the oldest diary file is ≥ 3 days old
-///   (first-day edge case — don't distill on day 1 with only one day of data)
-/// - Always exclude today's diary file (Layer 1 may still be writing to it)
-/// - Only include diary files newer than `.last_distill` date (or all if missing)
-async fn check_distillation_due(agent: &Agent) -> Option<String> {
-    let last_distill_path = agent.workspace.join("memory").join(".last_distill");
-    let now_local = crate::agent::resolve_now_in_timezone(agent.timezone.as_deref());
-    let today = now_local.date();
-
-    // Read last distillation date
-    let last_date = tokio::fs::read_to_string(&last_distill_path)
-        .await
-        .ok()
-        .and_then(|s| chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok());
-
-    // Collect all diary file dates (excluding today)
-    let memory_dir = agent.workspace.join("memory");
-    let mut diary_dates: Vec<chrono::NaiveDate> = Vec::new();
-
-    if let Ok(mut entries) = tokio::fs::read_dir(&memory_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            // Match YYYY-MM-DD.md pattern (exactly 13 chars)
-            if name_str.len() == 13 && name_str.ends_with(".md") {
-                let date_part = &name_str[..10];
-                if let Ok(file_date) = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
-                    // Exclude today — Layer 1 may still be appending
-                    if file_date < today {
-                        diary_dates.push(file_date);
-                    }
-                }
-            }
-        }
-    }
-
-    if diary_dates.is_empty() {
-        return None;
-    }
-
-    diary_dates.sort();
-
-    // Determine if distillation is due
-    let is_due = match last_date {
-        Some(d) => (today - d).num_days() >= 3,
-        None => {
-            // No .last_distill — require oldest diary file to be ≥ 3 days old
-            let oldest = diary_dates[0];
-            (today - oldest).num_days() >= 3
-        }
-    };
-
-    if !is_due {
-        return None;
-    }
-
-    // Filter to only files newer than last distillation
-    let eligible: Vec<String> = diary_dates
-        .iter()
-        .filter(|d| match last_date {
-            Some(ld) => **d > ld,
-            None => true,
-        })
-        .map(|d| format!("memory/{}.md", d.format("%Y-%m-%d")))
-        .collect();
-
-    if eligible.is_empty() {
-        return None;
-    }
-
-    let file_list = eligible
-        .iter()
-        .map(|f| format!("- {}", f))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    Some(format!(
-        "\n\nMEMORY DISTILLATION DUE: Read the following daily diary files and distill \
-         important patterns, preferences, and learnings into MEMORY.md. Remove \
-         outdated entries from MEMORY.md.\n\nFiles to process:\n{}",
-        file_list
-    ))
-}
+// Memory distillation (Layer 2) has been replaced by the palace DB.
+// Diary entries are now stored directly in state.db via memory_write().
+// L1 context is generated dynamically from high-importance memories.
+// The old check_distillation_due() and .last_distill tracking have been removed.
 
 // ---------------------------------------------------------------------------
 // Log issue tracking — scan ERROR/WARN logs, persist to issues.json
