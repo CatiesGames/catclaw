@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0](https://github.com/CatiesGames/catclaw/compare/v0.33.2...v0.34.0) (2026-04-09)
+
+
+### Features
+
+* 記憶宮殿系統 (MemPalace) — 取代 markdown 記憶機制 ([d4589a2](https://github.com/CatiesGames/catclaw/commit/d4589a28146e6174e20d4fafbafe797368f521a5))
+
 ## [0.33.2](https://github.com/CatiesGames/catclaw/compare/v0.33.1...v0.33.2) (2026-04-07)
 
 
