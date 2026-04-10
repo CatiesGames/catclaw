@@ -847,6 +847,16 @@ async fn handle_social_button_action(
 }
 
 /// Fetch parent post text, using cache if available. Returns (text, permalink).
+/// Fetch the original post text for a reply (cached or API call). Public for social module.
+pub async fn fetch_parent_text_pub(
+    platform: &str,
+    media_id: &str,
+    db: &Arc<StateDb>,
+    config: &Arc<std::sync::RwLock<Config>>,
+) -> Option<(String, Option<String>)> {
+    fetch_parent_text(platform, media_id, db, config).await
+}
+
 async fn fetch_parent_text(
     platform: &str,
     media_id: &str,

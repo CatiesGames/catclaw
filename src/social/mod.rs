@@ -259,7 +259,17 @@ pub async fn dispatch_action(
             ) {
                 Ok(Some(row)) => {
                     let inbox_id = row.id;
-                    let card = forward::build_forward_card(&row);
+                    let mut card = forward::build_forward_card(&row);
+                    // Fetch parent post text so the card shows what they're replying to
+                    if let Some(ref mid) = row.media_id {
+                        if let Some((parent_text, _)) = crate::gateway::fetch_parent_text_pub(
+                            &row.platform, mid, db, config,
+                        ).await {
+                            if !parent_text.is_empty() {
+                                card.original_text = Some(parent_text);
+                            }
+                        }
+                    }
                     let adapters_ref: &[Arc<dyn crate::channel::ChannelAdapter>] = adapters;
                     match forward::send_forward_card(card, admin_channel, adapters_ref).await {
                         Ok(Some(msg_ref)) => {
@@ -498,7 +508,8 @@ async fn execute_auto_reply(
         SocialPlatform::Threads => ("mcp__catclaw__threads_reply", "reply_to_id"),
     };
     let author = row.author_name.as_deref().unwrap_or("someone");
-    let original_text = row.text.as_deref().unwrap_or("(no text)");
+    // Use item.text which includes parent context + admin hint, not row.text (reply only)
+    let original_text = item.text.as_deref().unwrap_or("(no text)");
     let reply_to_id = &item.platform_id;
 
     // Mark as auto_replying.
