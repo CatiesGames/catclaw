@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.35.6](https://github.com/CatiesGames/catclaw/compare/v0.35.5...v0.35.6) (2026-04-10)
+
+
+### Bug Fixes
+
+* backfill 分析失敗時標記 empty summary 避免無限重試 ([c7d1639](https://github.com/CatiesGames/catclaw/commit/c7d163902faef116a47dc5646730eb54cbf03339))
+* BGE-M3 下載失敗 — hf-hub 改回 native-tls ([7a1d9ae](https://github.com/CatiesGames/catclaw/commit/7a1d9aee5196af3ec710324d03902a47f54ea8d2))
+* macOS update 後 ad-hoc codesign 減少 TCC 權限彈窗 ([9fad35f](https://github.com/CatiesGames/catclaw/commit/9fad35ff3ba4ed6f28816935923f37fe8cef843a))
+
 ## [0.35.5](https://github.com/CatiesGames/catclaw/compare/v0.35.4...v0.35.5) (2026-04-10)
 
 
