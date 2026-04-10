@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "catclaw"
-version = "0.35.3"
+version = "0.35.4"
 dependencies = [
  "async-trait",
  "atty",
