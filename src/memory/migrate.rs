@@ -306,18 +306,36 @@ async fn backfill_analysis(
     info!(count = missing.len(), "backfill_analysis: analyzing nodes missing summary");
 
     let mut done = 0usize;
+    let mut consecutive_failures = 0usize;
     for (id, wing, content) in &missing {
         match crate::memory::analyze::analyze_diary(state_db, Some(embedder), wing, *id, content).await {
-            Ok(()) => done += 1,
+            Ok(()) => {
+                done += 1;
+                consecutive_failures = 0;
+            }
             Err(e) => {
+                let err_str = e.to_string();
                 warn!(node_id = id, error = %e, "backfill_analysis: failed");
-                // Mark with empty summary so we don't retry this node forever
-                let _ = state_db.memory_update_analysis(*id, "", "general", None);
+                consecutive_failures += 1;
+
+                // If CLI exited with status 1 (likely rate limit or transient error),
+                // don't mark the node — let it retry next startup.
+                // Only mark for permanent failures (parse errors, etc.)
+                if !err_str.contains("exit status") {
+                    let _ = state_db.memory_update_analysis(*id, "", "general", None);
+                }
+
+                if consecutive_failures >= 5 {
+                    warn!(done, total = missing.len(), "backfill_analysis: pausing after 5 consecutive failures (will retry next startup)");
+                    break;
+                }
             }
         }
         if done > 0 && done.is_multiple_of(10) {
             info!(done, total = missing.len(), "backfill_analysis: progress");
         }
+        // Delay between calls to avoid rate limiting
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
 
     info!(done, total = missing.len(), "backfill_analysis: complete");
