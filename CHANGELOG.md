@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.2](https://github.com/CatiesGames/catclaw/compare/v0.35.1...v0.35.2) (2026-04-10)
+
+
+### Bug Fixes
+
+* aarch64-linux 改用 native ARM runner 避免 cross-compile ONNX 問題 ([dfc652d](https://github.com/CatiesGames/catclaw/commit/dfc652dc4504965e29d3bc9fff1662e9e4a54c46))
+
 ## [0.35.1](https://github.com/CatiesGames/catclaw/compare/v0.35.0...v0.35.1) (2026-04-10)
 
 
