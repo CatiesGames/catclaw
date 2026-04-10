@@ -628,6 +628,18 @@ async fn handle_social_button_action(
                     let resolved = forward::build_resolved_card(&base, "已發送");
                     try_update(resolved).await;
                     let _ = db.update_social_draft_sent(card_id, &reply_id);
+
+                    // Also update the original forward card (inbox card) to "已回覆"
+                    if let Some(ref reply_to) = draft.reply_to_id {
+                        if let Ok(Some(inbox_row)) = db.get_social_inbox_by_platform_id(&draft.platform, reply_to) {
+                            if let Some(ref fwd_ref) = inbox_row.forward_ref {
+                                let inbox_card = forward::build_forward_card(&inbox_row);
+                                let inbox_resolved = forward::build_resolved_card(&inbox_card, "已回覆");
+                                forward::update_forward_card(inbox_resolved, fwd_ref, &admin_channel, &adapters).await;
+                            }
+                            let _ = db.update_social_inbox_sent(inbox_row.id, &reply_id);
+                        }
+                    }
                 }
                 Err(e) => {
                     error!(card_id, error = %e, platform = %draft.platform, "social draft_approve: send failed");

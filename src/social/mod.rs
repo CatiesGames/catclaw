@@ -574,23 +574,45 @@ async fn execute_auto_reply(
         return Ok(());
     }
 
-    // After session ends, read the draft from DB.
+    // After session ends, check for staged drafts.
     let updated_row = db.get_social_inbox(inbox_id)?;
     if let Some(ref r) = updated_row {
-        if let Some(ref draft) = r.draft {
-            // Send draft review card to admin channel.
+        if r.draft.is_some() {
+            // Legacy path: draft in inbox table
+            let draft = r.draft.as_deref().unwrap();
             let card = forward::build_draft_card(r, draft);
             let adapters_ref: &[Arc<dyn crate::channel::ChannelAdapter>] = &adapters;
             if let Some(msg_ref) = forward::send_forward_card(card, &admin_channel, adapters_ref).await.ok().flatten() {
                 let _ = db.update_social_inbox_forward_ref(inbox_id, &msg_ref);
             }
             db.update_social_inbox_status(inbox_id, "draft_ready")?;
-            info!(inbox_id, "social auto_reply: draft ready");
+            info!(inbox_id, "social auto_reply: draft ready (inbox)");
         } else {
-            // Session finished but no draft was staged — restore card so user can retry.
-            warn!(inbox_id, "social auto_reply: session ended without staging a draft");
-            db.update_social_inbox_status(inbox_id, "forwarded")?;
-            restore_card(&db, &adapters, &admin_channel).await;
+            // Check social_drafts table — draft may have been staged via approval hook
+            // (status could be "draft", "awaiting_approval", or "failed")
+            let platform_str = item.platform.to_string();
+            let has_draft = {
+                use rusqlite::OptionalExtension;
+                let conn = db.conn.lock().unwrap();
+                conn.query_row(
+                    "SELECT 1 FROM social_drafts WHERE platform=?1 AND reply_to_id=?2 AND status NOT IN ('sent','ignored') LIMIT 1",
+                    rusqlite::params![platform_str, item.platform_id],
+                    |_| Ok(true),
+                ).optional().unwrap_or(None).is_some()
+            };
+
+            if has_draft {
+                // Draft exists in social_drafts — don't restore the forward card.
+                // The draft review card was already sent by the approval hook flow.
+                // Just update inbox status.
+                db.update_social_inbox_status(inbox_id, "draft_ready")?;
+                info!(inbox_id, "social auto_reply: draft staged via approval hook");
+            } else {
+                // No draft anywhere — restore card so user can retry.
+                warn!(inbox_id, "social auto_reply: session ended without staging a draft");
+                db.update_social_inbox_status(inbox_id, "forwarded")?;
+                restore_card(&db, &adapters, &admin_channel).await;
+            }
         }
     }
     Ok(())
