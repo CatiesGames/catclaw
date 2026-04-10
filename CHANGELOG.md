@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.5](https://github.com/CatiesGames/catclaw/compare/v0.35.4...v0.35.5) (2026-04-10)
+
+
+### Bug Fixes
+
+* 空內容由 Haiku 判斷，回傳空 summary 時刪除節點 ([cbd7477](https://github.com/CatiesGames/catclaw/commit/cbd7477c44d2eb545674afc96d2f8283ef8fb1b5))
+
 ## [0.35.4](https://github.com/CatiesGames/catclaw/compare/v0.35.3...v0.35.4) (2026-04-10)
 
 
