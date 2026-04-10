@@ -14,9 +14,12 @@ impl Embedder {
     /// This triggers model download on first run.
     #[allow(dead_code)]
     pub fn new() -> Result<Self> {
+        // Only show download progress when stdout is a TTY (foreground mode).
+        // Background daemon has stdout=null — progress bar can cause download failure.
+        let show_progress = atty::is(atty::Stream::Stdout);
         let model = fastembed::TextEmbedding::try_new(
             fastembed::InitOptions::new(fastembed::EmbeddingModel::BGEM3)
-                .with_show_download_progress(true),
+                .with_show_download_progress(show_progress),
         )
         .map_err(|e| CatClawError::Memory(format!("failed to init embedding model: {}", e)))?;
 
