@@ -32,6 +32,7 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-latest
             binary: catclaw-darwin-arm64
+            codesign: true
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             binary: catclaw-linux-x86_64
@@ -48,6 +49,35 @@ jobs:
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+
+      # macOS: import Apple Developer certificate and codesign the binary
+      - name: Import Apple certificate
+        if: matrix.codesign
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          CERT_PATH=$RUNNER_TEMP/certificate.p12
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+      - name: Codesign binary
+        if: matrix.codesign
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          codesign --force --options runtime --sign "$APPLE_SIGNING_IDENTITY" target/${{ matrix.target }}/release/catclaw
+          codesign --verify --verbose target/${{ matrix.target }}/release/catclaw
 
       - name: Rename binary
         run: cp target/${{ matrix.target }}/release/catclaw ${{ matrix.binary }}

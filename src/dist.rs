@@ -224,15 +224,13 @@ pub async fn perform_update() -> Result<Option<String>, CatClawError> {
         return Err(CatClawError::Update(format!("failed to replace binary: {}", e)));
     }
 
-    // macOS: remove quarantine attribute + ad-hoc codesign to preserve TCC permissions
+    // macOS: remove quarantine attribute.
+    // Binary is codesigned by CI with Developer ID — do NOT re-sign with ad-hoc,
+    // as that would strip the Developer ID signature and break TCC trust.
     #[cfg(target_os = "macos")]
     {
         let _ = std::process::Command::new("xattr")
             .args(["-d", "com.apple.quarantine"])
-            .arg(&current_exe)
-            .output();
-        let _ = std::process::Command::new("codesign")
-            .args(["--force", "--sign", "-"])
             .arg(&current_exe)
             .output();
     }
