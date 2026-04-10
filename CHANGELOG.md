@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.1](https://github.com/CatiesGames/catclaw/compare/v0.36.0...v0.36.1) (2026-04-10)
+
+
+### Bug Fixes
+
+* backfill 加 10s 間隔 + 連續失敗暫停 + 區分錯誤類型 ([097d5d6](https://github.com/CatiesGames/catclaw/commit/097d5d69305a4a1f9d43cef8fc67705490ec8bf7))
+
 ## [0.36.0](https://github.com/CatiesGames/catclaw/compare/v0.35.7...v0.36.0) (2026-04-10)
 
 
