@@ -63,41 +63,6 @@ const SYSTEM_DIRECTIVES: &str = r#"
 - If nothing needs attention, reply exactly: HEARTBEAT_OK
 - If something needs attention, reply with the relevant information — do NOT include HEARTBEAT_OK.
 
-## Memory Palace
-Your memories are stored in a structured database (MemPalace). Use the memory_* and kg_* MCP tools — **never write markdown memory files**.
-
-### When to SEARCH (memory_search)
-- Before answering about prior work, decisions, dates, people, preferences, or project context.
-- When the user references something from a previous conversation.
-- When you're unsure about a fact — verify before stating it.
-- If search returns no results: try different keywords or remove room/hall filters. If still nothing, tell the user honestly — never fabricate memories.
-
-### When to WRITE (memory_write)
-- User explicitly says "remember this" or similar.
-- Important decisions, preferences, or facts are revealed during conversation.
-- You discover something significant (a breakthrough, a gotcha, a lesson learned).
-- Use halls: facts (objective truths), preferences (likes/dislikes), discoveries (insights), advice (lessons/gotchas).
-
-### Importance scale
-- 9-10: Identity-level — cannot interact correctly without this (user name, role, core project, language)
-- 7-8: Work-level — affects daily decisions (coding style, tool preferences, project stack)
-- 5-6: Reference — useful but not always needed (specific discussion outcomes, bug fixes)
-- 3-4: Background — only useful when digging deep (general events, routine conversations)
-- Note: the system auto-adjusts importance during post-processing, so approximate is fine.
-
-### When to use Knowledge Graph (kg_add, kg_query)
-- Record entity relationships: "user prefers Rust", "project-x uses PostgreSQL", "Alice is team lead".
-- Before stating facts about people, projects, or tools — call kg_query to verify.
-- When facts change — call kg_invalidate on the old fact, then kg_add the new one.
-
-### Cross-wing search
-- By default, search only your own wing. Use cross_wing=true only when the user asks about another agent's knowledge.
-- Use memory_tunnels to discover rooms shared across multiple agents.
-
-### Automatic behavior (no action needed from you)
-- After conversations end, the system automatically extracts diary entries and facts from transcripts.
-- Summaries and room classification are handled automatically — you don't need to organize memories manually.
-
 ## Group Chats
 - In group channels, respond ONLY when directly mentioned or asked a question, or when you can add genuine value.
 - If someone else already answered, or the conversation is casual banter between humans, use NO_REPLY.
@@ -150,7 +115,57 @@ When a user sends files from Discord/Telegram, CatClaw downloads them to the wor
 - To schedule tasks, invoke the catclaw skill for usage details on `catclaw task add`.
 "#;
 
+/// Memory Palace directives — injected only when memory tools are not denied.
+const MEMORY_DIRECTIVES: &str = r#"
+## Memory Palace
+Your memories are stored in a structured database (MemPalace). Use the memory_* and kg_* MCP tools — **never write markdown memory files**.
+
+### When to SEARCH (memory_search)
+- Before answering about prior work, decisions, dates, people, preferences, or project context.
+- When the user references something from a previous conversation.
+- When you're unsure about a fact — verify before stating it.
+- If search returns no results: try different keywords or remove room/hall filters. If still nothing, tell the user honestly — never fabricate memories.
+
+### When to WRITE (memory_write)
+- User explicitly says "remember this" or similar.
+- Important decisions, preferences, or facts are revealed during conversation.
+- You discover something significant (a breakthrough, a gotcha, a lesson learned).
+- Use halls: facts (objective truths), preferences (likes/dislikes), discoveries (insights), advice (lessons/gotchas).
+
+### Importance scale
+- 9-10: Identity-level — cannot interact correctly without this (user name, role, core project, language)
+- 7-8: Work-level — affects daily decisions (coding style, tool preferences, project stack)
+- 5-6: Reference — useful but not always needed (specific discussion outcomes, bug fixes)
+- 3-4: Background — only useful when digging deep (general events, routine conversations)
+- Note: the system auto-adjusts importance during post-processing, so approximate is fine.
+
+### When to use Knowledge Graph (kg_add, kg_query)
+- Record entity relationships: "user prefers Rust", "project-x uses PostgreSQL", "Alice is team lead".
+- Before stating facts about people, projects, or tools — call kg_query to verify.
+- When facts change — call kg_invalidate on the old fact, then kg_add the new one.
+
+### Cross-wing search
+- By default, search only your own wing. Use cross_wing=true only when the user asks about another agent's knowledge.
+- Use memory_tunnels to discover rooms shared across multiple agents.
+
+### Automatic behavior (no action needed from you)
+- After conversations end, the system automatically extracts diary entries and facts from transcripts.
+- Summaries and room classification are handled automatically — you don't need to organize memories manually.
+"#;
+
 impl Agent {
+    /// Check if memory is disabled for this agent.
+    /// Disabled only when ALL memory/kg tools are denied.
+    fn memory_disabled(&self) -> bool {
+        const MEMORY_TOOLS: &[&str] = &[
+            "memory_status", "memory_write", "memory_search", "memory_delete",
+            "memory_list_wings", "memory_list_rooms", "memory_tunnels",
+            "kg_add", "kg_invalidate", "kg_query", "kg_timeline",
+        ];
+        MEMORY_TOOLS.iter().all(|tool| {
+            self.tools.denied.iter().any(|d| d.contains(tool))
+        })
+    }
     /// Build the append-system-prompt content.
     /// Called before each interaction so it always reflects the latest MD files.
     ///
@@ -162,8 +177,15 @@ impl Agent {
     pub fn build_system_prompt(&self, state_db: Option<&crate::state::StateDb>) -> String {
         let mut prompt = String::new();
 
+        let memory_enabled = !self.memory_disabled();
+
         // 1. System directives (hardcoded)
         prompt.push_str(SYSTEM_DIRECTIVES);
+
+        // 1b. Memory directives (only if memory tools are not denied)
+        if memory_enabled {
+            prompt.push_str(MEMORY_DIRECTIVES);
+        }
 
         // 2. User-editable MD files
         let files = [
@@ -183,11 +205,13 @@ impl Agent {
             }
         }
 
-        // 3. Memory — L1 context from palace DB
-        if let Some(db) = state_db {
-            if let Ok(l1) = crate::memory::context::build_l1_context(db, &self.id, 3200) {
-                if !l1.is_empty() {
-                    prompt.push_str(&l1);
+        // 3. Memory — L1 context from palace DB (only if memory enabled)
+        if memory_enabled {
+            if let Some(db) = state_db {
+                if let Ok(l1) = crate::memory::context::build_l1_context(db, &self.id, 3200) {
+                    if !l1.is_empty() {
+                        prompt.push_str(&l1);
+                    }
                 }
             }
         }
@@ -200,20 +224,33 @@ impl Agent {
             .timezone
             .as_deref()
             .unwrap_or("UTC");
-        prompt.push_str(&format!(
-            "\n# Workspace\n\
-             Current date/time: {} ({})\n\
-             Your workspace directory is: {}\n\
-             Your memory wing: \"{}\"\n\
-             - Always use wing=\"{}\" for all memory_* and kg_* tool calls.\n\
-             - Transcripts: {}/transcripts/\n",
-            now_tz.format("%Y-%m-%d %H:%M:%S"),
-            tz_label,
-            abs_workspace.display(),
-            self.id,
-            self.id,
-            abs_workspace.display(),
-        ));
+        if memory_enabled {
+            prompt.push_str(&format!(
+                "\n# Workspace\n\
+                 Current date/time: {} ({})\n\
+                 Your workspace directory is: {}\n\
+                 Your memory wing: \"{}\"\n\
+                 - Always use wing=\"{}\" for all memory_* and kg_* tool calls.\n\
+                 - Transcripts: {}/transcripts/\n",
+                now_tz.format("%Y-%m-%d %H:%M:%S"),
+                tz_label,
+                abs_workspace.display(),
+                self.id,
+                self.id,
+                abs_workspace.display(),
+            ));
+        } else {
+            prompt.push_str(&format!(
+                "\n# Workspace\n\
+                 Current date/time: {} ({})\n\
+                 Your workspace directory is: {}\n\
+                 - Transcripts: {}/transcripts/\n",
+                now_tz.format("%Y-%m-%d %H:%M:%S"),
+                tz_label,
+                abs_workspace.display(),
+                abs_workspace.display(),
+            ));
+        }
 
         // 5. Skill index — list enabled skills with their descriptions.
         // Skills are NOT loaded here (too large); use /skill-name to invoke one.
