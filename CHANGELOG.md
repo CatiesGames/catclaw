@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.7](https://github.com/CatiesGames/catclaw/compare/v0.35.6...v0.35.7) (2026-04-10)
+
+
+### Bug Fixes
+
+* 背景執行時關閉 BGE-M3 下載進度條避免失敗 ([0c81ac3](https://github.com/CatiesGames/catclaw/commit/0c81ac38dbbc181d988a9fe0e440bfc2d32c7248))
+
 ## [0.35.6](https://github.com/CatiesGames/catclaw/compare/v0.35.5...v0.35.6) (2026-04-10)
 
 
