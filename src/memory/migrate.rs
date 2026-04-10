@@ -309,7 +309,11 @@ async fn backfill_analysis(
     for (id, wing, content) in &missing {
         match crate::memory::analyze::analyze_diary(state_db, Some(embedder), wing, *id, content).await {
             Ok(()) => done += 1,
-            Err(e) => warn!(node_id = id, error = %e, "backfill_analysis: failed"),
+            Err(e) => {
+                warn!(node_id = id, error = %e, "backfill_analysis: failed");
+                // Mark with empty summary so we don't retry this node forever
+                let _ = state_db.memory_update_analysis(*id, "", "general", None);
+            }
         }
         if done > 0 && done.is_multiple_of(10) {
             info!(done, total = missing.len(), "backfill_analysis: progress");
