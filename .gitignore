@@ -6,3 +6,5 @@
 *.pid
 /workspace
 /my-agents
+*.p12
+*.certSigningRequest
