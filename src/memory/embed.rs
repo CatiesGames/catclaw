@@ -14,11 +14,19 @@ impl Embedder {
     /// This triggers model download on first run.
     #[allow(dead_code)]
     pub fn new() -> Result<Self> {
+        // Use absolute cache dir under ~/.catclaw/models/ to avoid relative path issues
+        // when running as background daemon (cwd may differ).
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let cache_dir = std::path::PathBuf::from(home).join(".catclaw").join("models");
+        if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+            return Err(CatClawError::Memory(format!("failed to create model cache dir: {}", e)));
+        }
+
         // Only show download progress when stdout is a TTY (foreground mode).
-        // Background daemon has stdout=null — progress bar can cause download failure.
         let show_progress = atty::is(atty::Stream::Stdout);
         let model = fastembed::TextEmbedding::try_new(
             fastembed::InitOptions::new(fastembed::EmbeddingModel::BGEM3)
+                .with_cache_dir(cache_dir)
                 .with_show_download_progress(show_progress),
         )
         .map_err(|e| CatClawError::Memory(format!("failed to init embedding model: {}", e)))?;
