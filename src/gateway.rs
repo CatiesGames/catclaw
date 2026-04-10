@@ -85,6 +85,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     // 3b. Initialize embedding model (downloads BGE-M3 on first run, ~560MB)
     let embedder: Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>> =
         Arc::new(tokio::sync::OnceCell::new());
+    info!("memory palace: initializing embedding model (first run downloads ~560MB, may take a few minutes)...");
     match crate::memory::embed::Embedder::new() {
         Ok(emb) => {
             let _ = embedder.set(emb);

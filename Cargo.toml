@@ -94,8 +94,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 sqlite-vec = "0.1"
 
 # Memory palace: local embedding model (BGE-M3 for zh+en bilingual)
-# Use rustls instead of native-tls to avoid OpenSSL dependency for cross-compilation
-fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
+# ort: use rustls to avoid OpenSSL for cross-compilation
+# hf-hub: must use native-tls because hf-hub's rustls-tls only applies to reqwest, not ureq
+fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-native-tls"] }
 
 # Memory palace: zero-copy Vec<f32> ↔ &[u8] for embedding BLOB storage
 zerocopy = { version = "0.8", features = ["derive"] }
