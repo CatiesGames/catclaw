@@ -260,3 +260,115 @@ fn classify_hall(text: &str) -> String {
         "facts".to_string()
     }
 }
+
+/// Backfill missing data at startup: Haiku analysis (summary/room/facts/KG) + embeddings.
+/// Runs as a background task — skips quickly if nothing to do.
+pub async fn backfill_all(
+    state_db: &crate::state::StateDb,
+    embedder: &Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>,
+) {
+    // 1. Backfill Haiku analysis — nodes without summary (never analyzed)
+    backfill_analysis(state_db, embedder).await;
+
+    // 2. Backfill embeddings — nodes not in vec_memories
+    backfill_embeddings(state_db, embedder).await;
+}
+
+/// Find memory nodes that were never analyzed by Haiku (no summary) and run analysis.
+async fn backfill_analysis(
+    state_db: &crate::state::StateDb,
+    embedder: &Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>,
+) {
+    // Find nodes without summary (chunk nodes excluded — only analyze primary nodes)
+    let missing: Vec<(i64, String, String)> = match (|| -> std::result::Result<Vec<_>, rusqlite::Error> {
+        let conn = state_db.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, wing, content FROM memory_nodes
+             WHERE summary IS NULL AND chunk_index IS NULL
+             LIMIT 500",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })() {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "backfill_analysis: query failed");
+            return;
+        }
+    };
+
+    if missing.is_empty() {
+        return;
+    }
+
+    info!(count = missing.len(), "backfill_analysis: analyzing nodes missing summary");
+
+    let mut done = 0usize;
+    for (id, wing, content) in &missing {
+        match crate::memory::analyze::analyze_diary(state_db, Some(embedder), wing, *id, content).await {
+            Ok(()) => done += 1,
+            Err(e) => warn!(node_id = id, error = %e, "backfill_analysis: failed"),
+        }
+        if done > 0 && done.is_multiple_of(10) {
+            info!(done, total = missing.len(), "backfill_analysis: progress");
+        }
+    }
+
+    info!(done, total = missing.len(), "backfill_analysis: complete");
+}
+
+/// Find memory nodes missing embeddings and generate them.
+async fn backfill_embeddings(
+    state_db: &crate::state::StateDb,
+    embedder: &Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>,
+) {
+    let emb = match embedder.get() {
+        Some(e) => e,
+        None => return,
+    };
+
+    let missing: Vec<(i64, String)> = match (|| -> std::result::Result<Vec<(i64, String)>, rusqlite::Error> {
+        let conn = state_db.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.content FROM memory_nodes m
+             WHERE m.id NOT IN (SELECT node_id FROM vec_memories)
+             LIMIT 1000",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    })() {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "backfill_embeddings: query failed");
+            return;
+        }
+    };
+
+    if missing.is_empty() {
+        return;
+    }
+
+    info!(count = missing.len(), "backfill_embeddings: generating missing embeddings");
+
+    let mut done = 0usize;
+    for (id, content) in &missing {
+        match emb.embed_one(content).await {
+            Ok(vec) => {
+                let _ = state_db.memory_insert_embedding(*id, &vec);
+                done += 1;
+            }
+            Err(e) => {
+                warn!(node_id = id, error = %e, "backfill_embeddings: embedding failed");
+            }
+        }
+        if done > 0 && done.is_multiple_of(50) {
+            info!(done, total = missing.len(), "backfill_embeddings: progress");
+        }
+    }
+
+    info!(done, total = missing.len(), "backfill_embeddings: complete");
+}

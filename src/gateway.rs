@@ -82,13 +82,31 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         config.general.timezone.as_deref(),
     )?));
 
-    // 3b. Create shared embedder (lazy-loaded on first use)
+    // 3b. Initialize embedding model (downloads BGE-M3 on first run, ~560MB)
     let embedder: Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>> =
         Arc::new(tokio::sync::OnceCell::new());
+    match crate::memory::embed::Embedder::new() {
+        Ok(emb) => {
+            let _ = embedder.set(emb);
+            info!("memory palace: embedding model ready (BGE-M3)");
+        }
+        Err(e) => {
+            warn!(error = %e, "memory palace: embedding model failed to load, vector search disabled");
+        }
+    }
 
     // 3c. Migrate markdown memories to palace DB (one-time, idempotent)
     if let Err(e) = crate::memory::migrate::run_migration(&state_db, &config.agents, &config.general.workspace, &embedder) {
         warn!(error = %e, "memory palace migration warning (non-fatal)");
+    }
+
+    // 3d. Backfill missing analysis + embeddings (background, non-blocking)
+    {
+        let bf_db = state_db.clone();
+        let bf_emb = embedder.clone();
+        tokio::spawn(async move {
+            crate::memory::migrate::backfill_all(&bf_db, &bf_emb).await;
+        });
     }
 
     let default_agent_id = config

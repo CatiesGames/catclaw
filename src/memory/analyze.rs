@@ -190,8 +190,11 @@ pub async fn classify_memory(
     // Always generate embedding
     if let Some(emb_cell) = embedder {
         if let Some(emb) = emb_cell.get() {
-            if let Ok(vec) = emb.embed_one(content).await {
-                let _ = state_db.memory_insert_embedding(node_id, &vec);
+            match emb.embed_one(content).await {
+                Ok(vec) => {
+                    let _ = state_db.memory_insert_embedding(node_id, &vec);
+                }
+                Err(e) => warn!(error = %e, "classify_memory: embedding failed"),
             }
         }
     }
