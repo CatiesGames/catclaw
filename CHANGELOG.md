@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/CatiesGames/catclaw/compare/v0.34.1...v0.35.0) (2026-04-10)
+
+
+### Features
+
+* 記憶系統可針對指定 agent 關閉 ([f73a624](https://github.com/CatiesGames/catclaw/commit/f73a6243e7a56d1134e90e20897ecd603ba13bef))
+
 ## [0.34.1](https://github.com/CatiesGames/catclaw/compare/v0.34.0...v0.34.1) (2026-04-10)
 
 
