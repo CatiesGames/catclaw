@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.4](https://github.com/CatiesGames/catclaw/compare/v0.35.3...v0.35.4) (2026-04-10)
+
+
+### Bug Fixes
+
+* embedder 啟動初始化 + backfill 補齊分析和 embedding + 跳過空內容 ([3d49f5d](https://github.com/CatiesGames/catclaw/commit/3d49f5d0c5a0ee5702d20ca729af6d8ecf712f72))
+
 ## [0.35.3](https://github.com/CatiesGames/catclaw/compare/v0.35.2...v0.35.3) (2026-04-10)
 
 
