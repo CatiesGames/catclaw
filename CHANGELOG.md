@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.36.0](https://github.com/CatiesGames/catclaw/compare/v0.35.7...v0.36.0) (2026-04-10)
+
+
+### Features
+
+* macOS binary 用 Developer ID 簽名解決 TCC 權限彈窗 ([e15230f](https://github.com/CatiesGames/catclaw/commit/e15230ff81c2daf48c9299a3408675d2f46a951a))
+
+
+### Bug Fixes
+
+* BGE-M3 模型 cache 改用絕對路徑 ~/.catclaw/models/ ([05d8b43](https://github.com/CatiesGames/catclaw/commit/05d8b436f0f3adc2f6952b1d2d13db955ee33637))
+
 ## [0.35.7](https://github.com/CatiesGames/catclaw/compare/v0.35.6...v0.35.7) (2026-04-10)
 
 
