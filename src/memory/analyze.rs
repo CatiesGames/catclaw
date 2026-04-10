@@ -58,6 +58,23 @@ pub async fn analyze_diary(
     diary_node_id: i64,
     diary_text: &str,
 ) -> Result<()> {
+    // Skip content that's just a header with no body (e.g. "### discord — 09:14" with nothing after)
+    let trimmed = diary_text.trim();
+    if trimmed.lines().count() <= 1 {
+        // Still generate embedding if possible
+        if let Some(emb_cell) = embedder {
+            if let Some(emb) = emb_cell.get() {
+                match emb.embed_one(diary_text).await {
+                    Ok(vec) => { let _ = state_db.memory_insert_embedding(diary_node_id, &vec); }
+                    Err(e) => warn!(error = %e, "analyze: embedding failed for short content"),
+                }
+            }
+        }
+        // Set a minimal summary so backfill doesn't retry this node
+        let _ = state_db.memory_update_analysis(diary_node_id, trimmed, "general", None);
+        return Ok(());
+    }
+
     // 1. Fetch existing rooms across ALL wings for consistent naming (enables tunnels)
     let rooms = state_db.memory_all_room_names()?;
     let rooms_list = if rooms.is_empty() {
