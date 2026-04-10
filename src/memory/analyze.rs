@@ -47,7 +47,8 @@ Rules:
   5-6: Reference — specific discussion outcomes, bug fixes, routine work
   3-4: Background — general events, casual conversations
 - subject/predicate/object: for knowledge graph triples, use lowercase. Omit if not applicable.
-- If no facts worth extracting, return empty facts array"#;
+- If no facts worth extracting, return empty facts array
+- If the content is too short, just a header, or has no meaningful information, return: {"summary": "", "room": "general", "diary_importance": 1, "facts": []}"#;
 
 /// Analyze a diary entry using Haiku to extract summary, room, and facts.
 /// Runs as a background task after diary extraction — failures are non-fatal.
@@ -58,23 +59,6 @@ pub async fn analyze_diary(
     diary_node_id: i64,
     diary_text: &str,
 ) -> Result<()> {
-    // Skip content that's just a header with no body (e.g. "### discord — 09:14" with nothing after)
-    let trimmed = diary_text.trim();
-    if trimmed.lines().count() <= 1 {
-        // Still generate embedding if possible
-        if let Some(emb_cell) = embedder {
-            if let Some(emb) = emb_cell.get() {
-                match emb.embed_one(diary_text).await {
-                    Ok(vec) => { let _ = state_db.memory_insert_embedding(diary_node_id, &vec); }
-                    Err(e) => warn!(error = %e, "analyze: embedding failed for short content"),
-                }
-            }
-        }
-        // Set a minimal summary so backfill doesn't retry this node
-        let _ = state_db.memory_update_analysis(diary_node_id, trimmed, "general", None);
-        return Ok(());
-    }
-
     // 1. Fetch existing rooms across ALL wings for consistent naming (enables tunnels)
     let rooms = state_db.memory_all_room_names()?;
     let rooms_list = if rooms.is_empty() {
@@ -86,7 +70,13 @@ pub async fn analyze_diary(
     // 2. Call Haiku subprocess
     let analysis = call_haiku(diary_text, &rooms_list).await?;
 
-    // 3. Update diary node with summary + corrected room + Haiku-assessed importance
+    // 3. If Haiku returned empty summary, content is not meaningful — delete the node
+    if analysis.summary.is_empty() && analysis.facts.is_empty() {
+        let _ = state_db.memory_delete(wing, diary_node_id);
+        return Ok(());
+    }
+
+    // 4. Update diary node with summary + corrected room + Haiku-assessed importance
     state_db.memory_update_analysis(
         diary_node_id,
         &analysis.summary,
@@ -94,7 +84,7 @@ pub async fn analyze_diary(
         Some(analysis.diary_importance.clamp(1, 10)),
     )?;
 
-    // 4. Generate embedding for the diary node
+    // 5. Generate embedding for the diary node
     if let Some(emb_cell) = embedder {
         if let Some(emb) = emb_cell.get() {
             match emb.embed_one(diary_text).await {
