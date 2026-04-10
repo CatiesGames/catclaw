@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.1](https://github.com/CatiesGames/catclaw/compare/v0.35.0...v0.35.1) (2026-04-10)
+
+
+### Bug Fixes
+
+* fastembed 改用 rustls 避免 cross-compile OpenSSL 依賴 ([34d3bee](https://github.com/CatiesGames/catclaw/commit/34d3beee72b59a9bab02b249ca158db2e1adfe05))
+
 ## [0.35.0](https://github.com/CatiesGames/catclaw/compare/v0.34.1...v0.35.0) (2026-04-10)
 
 
