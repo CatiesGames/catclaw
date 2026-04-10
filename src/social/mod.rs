@@ -494,8 +494,8 @@ async fn execute_auto_reply(
     let inbox_id = row.id;
     let platform_str = item.platform.to_string();
     let (publish_tool, reply_id_param) = match item.platform {
-        SocialPlatform::Instagram => ("instagram_reply_comment", "comment_id"),
-        SocialPlatform::Threads => ("threads_reply", "reply_to_id"),
+        SocialPlatform::Instagram => ("mcp__catclaw__instagram_reply_comment", "comment_id"),
+        SocialPlatform::Threads => ("mcp__catclaw__threads_reply", "reply_to_id"),
     };
     let author = row.author_name.as_deref().unwrap_or("someone");
     let original_text = row.text.as_deref().unwrap_or("(no text)");
@@ -511,9 +511,10 @@ async fn execute_auto_reply(
          Event type: {event_type}\n\
          From: @{author}\n\
          Content: {text}\n\n\
-         Call `{publish_tool}` to reply:\n\
-         - {reply_id_param}: {reply_to_id}\n\
-         - message/text: <your reply text>\n\n\
+         IMPORTANT: You MUST call the `{publish_tool}` MCP tool to reply. Do NOT output text — use the tool.\n\
+         Parameters:\n\
+         - {reply_id_param}: \"{reply_to_id}\"\n\
+         - message (or text): your reply text\n\n\
          The tool auto-stages a draft. It may be auto-approved or may require human review.\n\
          If it requires human review, you will receive a block signal — do NOT retry.",
         platform = platform_str,
