@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.34.1](https://github.com/CatiesGames/catclaw/compare/v0.34.0...v0.34.1) (2026-04-10)
+
+
+### Bug Fixes
+
+* auto_reply prompt 用 MCP tool 全名 + 強制呼叫 ([f3dec9f](https://github.com/CatiesGames/catclaw/commit/f3dec9f481aac8c2a2f7c067cf253015279fd26f))
+* forward card 按鈕在 AI 回覆後恢復的問題 ([21f32a1](https://github.com/CatiesGames/catclaw/commit/21f32a1336fd30329e63233b5b92c0d857d117bd))
+* forward card 顯示原文 + auto_reply 傳遞原文 context ([a02d611](https://github.com/CatiesGames/catclaw/commit/a02d6110eb56374fd4b63a1763c2f3ccd09a951f))
+
 ## [0.34.0](https://github.com/CatiesGames/catclaw/compare/v0.33.2...v0.34.0) (2026-04-09)
 
 
