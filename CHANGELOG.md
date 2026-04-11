@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.0](https://github.com/CatiesGames/catclaw/compare/v0.36.1...v0.37.0) (2026-04-11)
+
+
+### Features
+
+* catclaw memory status/reset/remigrate + update --version + system session 不寫 transcript ([f2ccafa](https://github.com/CatiesGames/catclaw/commit/f2ccafa2e8216b0fd37868fedefef9b60a156d1a))
+
 ## [0.36.1](https://github.com/CatiesGames/catclaw/compare/v0.36.0...v0.36.1) (2026-04-10)
 
 
