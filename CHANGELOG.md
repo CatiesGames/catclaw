@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.3](https://github.com/CatiesGames/catclaw/compare/v0.37.2...v0.37.3) (2026-04-11)
+
+
+### Bug Fixes
+
+* 驗證 Haiku room 名稱必須 kebab-case + 加 memory fix-rooms 命令 ([d6be264](https://github.com/CatiesGames/catclaw/commit/d6be264b90da620a75400da5e4fefa77bcaf9c70))
+
 ## [0.37.2](https://github.com/CatiesGames/catclaw/compare/v0.37.1...v0.37.2) (2026-04-11)
 
 
