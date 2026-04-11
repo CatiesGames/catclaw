@@ -274,6 +274,7 @@ async fn backfill_analysis(
         let mut stmt = conn.prepare(
             "SELECT id, wing, content FROM memory_nodes
              WHERE summary IS NULL AND chunk_index IS NULL
+               AND source != 'extraction'
              LIMIT 500",
         )?;
         let rows = stmt.query_map([], |row| {

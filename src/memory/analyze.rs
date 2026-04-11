@@ -109,7 +109,7 @@ pub async fn analyze_diary(
             room: fact_room.to_string(),
             hall,
             content: fact.content.clone(),
-            summary: None,
+            summary: Some(fact.content.clone()), // Facts are already concise; set summary to avoid backfill re-analysis
             source: "extraction".to_string(),
             importance: Some(fact.importance.clamp(1, 10)),
         };
