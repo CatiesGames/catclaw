@@ -38,6 +38,7 @@ impl StateDb {
 
     /// Add a fact triple. Returns the triple ID.
     /// If an identical active triple already exists, returns its ID without duplicating.
+    #[allow(clippy::too_many_arguments)]
     pub fn kg_add_triple(
         &self,
         wing: &str,
@@ -46,6 +47,7 @@ impl StateDb {
         object_id: i64,
         valid_from: Option<&str>,
         confidence: f64,
+        source_node_id: Option<i64>,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let pred = predicate.to_lowercase().replace(' ', "_");
@@ -65,29 +67,11 @@ impl StateDb {
             return Ok(id);
         }
 
-        let mut sql = String::from(
-            "INSERT INTO kg_triples (wing, subject_id, predicate, object_id, confidence",
-        );
-        if valid_from.is_some() {
-            sql.push_str(", valid_from");
-        }
-        sql.push_str(") VALUES (?1, ?2, ?3, ?4, ?5");
-        if valid_from.is_some() {
-            sql.push_str(", ?6");
-        }
-        sql.push(')');
-
-        if let Some(vf) = valid_from {
-            conn.execute(
-                &sql,
-                params![wing, subject_id, pred, object_id, confidence, vf],
-            )?;
-        } else {
-            conn.execute(
-                &sql,
-                params![wing, subject_id, pred, object_id, confidence],
-            )?;
-        }
+        conn.execute(
+            "INSERT INTO kg_triples (wing, subject_id, predicate, object_id, confidence, source_node_id, valid_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, strftime('%Y-%m-%dT%H:%M:%fZ','now')))",
+            params![wing, subject_id, pred, object_id, confidence, source_node_id, valid_from],
+        )?;
         Ok(conn.last_insert_rowid())
     }
 

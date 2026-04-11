@@ -3457,11 +3457,10 @@ fn cmd_memory_remigrate(state_db: &state::StateDb) {
         [],
     ).unwrap_or(0);
 
-    // Clean up orphaned KG entities/triples that were linked to deleted nodes
-    let deleted_triples = conn.execute(
-        "DELETE FROM kg_triples WHERE source_node_id IS NOT NULL AND source_node_id NOT IN (SELECT id FROM memory_nodes)",
-        [],
-    ).unwrap_or(0);
+    // Clean up all KG data — will be rebuilt by backfill.
+    // Agent-manual triples are rare in remigrate scenarios; fresh start is cleaner.
+    let deleted_triples = conn.execute("DELETE FROM kg_triples", []).unwrap_or(0);
+    let deleted_entities = conn.execute("DELETE FROM kg_entities", []).unwrap_or(0);
 
     // Clean up orphaned embeddings
     let deleted_embeddings = conn.execute(
@@ -3475,6 +3474,7 @@ fn cmd_memory_remigrate(state_db: &state::StateDb) {
     println!("Cleared migration data:");
     println!("  - {} memory nodes deleted", deleted_nodes);
     println!("  - {} KG triples deleted", deleted_triples);
+    println!("  - {} KG entities deleted", deleted_entities);
     println!("  - {} embeddings deleted", deleted_embeddings);
     println!("  - migration marker removed");
     println!("\nRestart gateway to re-run migration with improved parser.");

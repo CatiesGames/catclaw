@@ -352,7 +352,7 @@ pub async fn execute_memory_tool(
             let sub_id = state_db.kg_get_or_create_entity(wing, subject, None)?;
             let obj_id = state_db.kg_get_or_create_entity(wing, object, None)?;
             let triple_id =
-                state_db.kg_add_triple(wing, sub_id, predicate, obj_id, valid_from, confidence)?;
+                state_db.kg_add_triple(wing, sub_id, predicate, obj_id, valid_from, confidence, None)?;
 
             Ok(serde_json::json!({
                 "success": true,

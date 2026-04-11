@@ -122,7 +122,7 @@ pub async fn analyze_diary(
             if !subj.is_empty() && !pred.is_empty() && !obj.is_empty() {
                 let sub_id = state_db.kg_get_or_create_entity(wing, subj, None)?;
                 let obj_id = state_db.kg_get_or_create_entity(wing, obj, None)?;
-                let _ = state_db.kg_add_triple(wing, sub_id, pred, obj_id, None, 1.0);
+                let _ = state_db.kg_add_triple(wing, sub_id, pred, obj_id, None, 1.0, Some(fact_id));
             }
         }
 
