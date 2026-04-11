@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.1](https://github.com/CatiesGames/catclaw/compare/v0.37.0...v0.37.1) (2026-04-11)
+
+
+### Bug Fixes
+
+* backfill 不分析 extraction nodes 避免無限循環 ([f917234](https://github.com/CatiesGames/catclaw/commit/f917234412fac1718f57b0f0f0aff5f851628418))
+
 ## [0.37.0](https://github.com/CatiesGames/catclaw/compare/v0.36.1...v0.37.0) (2026-04-11)
 
 
