@@ -77,6 +77,52 @@ struct ReleaseAsset {
     url: String,
 }
 
+/// Fetch a specific release by tag from GitHub.
+async fn fetch_release_by_tag(tag: &str) -> Result<(String, Vec<ReleaseAsset>), CatClawError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/tags/{}",
+        GITHUB_REPO, tag
+    );
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .header("User-Agent", format!("catclaw/{}", env!("CARGO_PKG_VERSION")))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| CatClawError::Update(format!("failed to fetch release info: {}", e)))?;
+
+    if !resp.status().is_success() {
+        return Err(CatClawError::Update(format!(
+            "release '{}' not found (GitHub API returned {})", tag, resp.status()
+        )));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| CatClawError::Update(format!("failed to parse release JSON: {}", e)))?;
+
+    let release_tag = body["tag_name"]
+        .as_str()
+        .ok_or_else(|| CatClawError::Update("missing tag_name in release".into()))?
+        .to_string();
+
+    let assets = body["assets"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|a| {
+            Some(ReleaseAsset {
+                name: a["name"].as_str()?.to_string(),
+                url: a["browser_download_url"].as_str()?.to_string(),
+            })
+        })
+        .collect();
+
+    Ok((release_tag, assets))
+}
+
 /// Parse version from tag (strip leading 'v').
 fn parse_version(tag: &str) -> &str {
     tag.strip_prefix('v').unwrap_or(tag)
@@ -118,12 +164,19 @@ fn version_gt(a: &str, b: &str) -> bool {
 }
 
 /// Download, verify, and replace the current binary. Returns Some(new_version) or None if up to date.
-pub async fn perform_update() -> Result<Option<String>, CatClawError> {
-    let (tag, assets) = fetch_latest_release().await?;
+/// Perform an update. If `target_version` is Some, install that specific version
+/// (e.g. "v0.35.7" or "0.35.7"). If None, install the latest version.
+pub async fn perform_update(target_version: Option<&str>) -> Result<Option<String>, CatClawError> {
+    let (tag, assets) = if let Some(ver) = target_version {
+        let tag = if ver.starts_with('v') { ver.to_string() } else { format!("v{}", ver) };
+        fetch_release_by_tag(&tag).await?
+    } else {
+        fetch_latest_release().await?
+    };
     let remote = parse_version(&tag);
     let current = env!("CARGO_PKG_VERSION");
 
-    if !version_gt(remote, current) {
+    if target_version.is_none() && !version_gt(remote, current) {
         return Ok(None);
     }
 

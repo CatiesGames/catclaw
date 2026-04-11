@@ -140,6 +140,9 @@ enum Commands {
         /// Only check for updates, don't install
         #[arg(long)]
         check: bool,
+        /// Install a specific version (e.g. v0.35.7 or 0.35.7). Allows downgrading.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
         /// Send a notification after restart (format: <type>:<channel_id>, e.g. slack:C0A9FFY7QAZ)
         #[arg(long, value_name = "CHANNEL_SPEC")]
         notify: Option<String>,
@@ -174,6 +177,12 @@ enum Commands {
     Issues {
         #[command(subcommand)]
         command: IssuesCommands,
+    },
+
+    /// Memory palace status and diagnostics
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
     },
 }
 
@@ -539,6 +548,20 @@ enum IssuesCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum MemoryCommands {
+    /// Show memory palace status and diagnostics
+    Status {
+        /// Filter by wing (agent ID). If omitted, shows all wings.
+        #[arg(long)]
+        wing: Option<String>,
+    },
+    /// Reset failed backfill entries so they can be retried
+    Reset,
+    /// Clear all migrated data and re-run migration from markdown files
+    Remigrate,
+}
+
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -591,7 +614,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        Some(Commands::Update { check, notify, notify_message }) => {
+        Some(Commands::Update { check, version, notify, notify_message }) => {
             if check {
                 match dist::check_update().await {
                     Ok(Some(version)) => {
@@ -607,7 +630,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             } else {
-                match dist::perform_update().await {
+                match dist::perform_update(version.as_deref()).await {
                     Ok(Some(version)) => {
                         cli_ui::status_msg("✅", &format!("Updated to v{}", version));
 
@@ -1632,6 +1655,22 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         Ok(_) => println!("Issue '{}' resolved and removed.", id),
                         Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
                     }
+                }
+            }
+        }
+
+        Some(Commands::Memory { command }) => {
+            let config = Config::load(&cli.config)?;
+            let state_db = state::StateDb::open(&config.general.state_db)?;
+            match command {
+                MemoryCommands::Status { wing } => {
+                    cmd_memory_status(&state_db, wing.as_deref());
+                }
+                MemoryCommands::Reset => {
+                    cmd_memory_reset(&state_db);
+                }
+                MemoryCommands::Remigrate => {
+                    cmd_memory_remigrate(&state_db);
                 }
             }
         }
@@ -3331,4 +3370,112 @@ fn cmd_agent_delete(config: &mut Config, config_path: &Path, name: &str) -> Resu
     println!("Delete manually if needed: rm -rf {}", agent.workspace.display());
 
     Ok(())
+}
+
+fn cmd_memory_status(state_db: &state::StateDb, wing: Option<&str>) {
+    let conn = state_db.conn.lock().unwrap();
+
+    // Total nodes
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM memory_nodes", [], |r| r.get(0)).unwrap_or(0);
+    let no_summary: i64 = conn.query_row("SELECT COUNT(*) FROM memory_nodes WHERE summary IS NULL", [], |r| r.get(0)).unwrap_or(0);
+    let empty_summary: i64 = conn.query_row("SELECT COUNT(*) FROM memory_nodes WHERE summary = ''", [], |r| r.get(0)).unwrap_or(0);
+
+    // KG stats
+    let entities: i64 = conn.query_row("SELECT COUNT(*) FROM kg_entities", [], |r| r.get(0)).unwrap_or(0);
+    let triples: i64 = conn.query_row("SELECT COUNT(*) FROM kg_triples", [], |r| r.get(0)).unwrap_or(0);
+    let active_triples: i64 = conn.query_row("SELECT COUNT(*) FROM kg_triples WHERE valid_to IS NULL", [], |r| r.get(0)).unwrap_or(0);
+
+    // Migration status
+    let migrated = conn.query_row("SELECT value FROM palace_meta WHERE key = 'migration_v1'", [], |r| r.get::<_, String>(0)).ok();
+
+    // Embedding stats (vec_memories uses vec0 which sqlite3 CLI can't read, but we can count from within catclaw)
+    let has_embedding: i64 = conn.query_row("SELECT COUNT(*) FROM vec_memories", [], |r| r.get(0)).unwrap_or(0);
+
+    println!("╭─ Memory Palace Status ─────────────────────╮");
+    println!("│ Total memories:     {:>6}                  │", total);
+    println!("│ Pending analysis:   {:>6} (no summary)     │", no_summary);
+    println!("│ Failed analysis:    {:>6} (empty summary)  │", empty_summary);
+    println!("│ With embedding:     {:>6}                  │", has_embedding);
+    println!("│ Missing embedding:  {:>6}                  │", total - has_embedding);
+    println!("│ KG entities:        {:>6}                  │", entities);
+    println!("│ KG triples:         {:>6} ({} active)     │", triples, active_triples);
+    println!("│ Migration:          {}│", if migrated.is_some() { "complete                    " } else { "not yet                     " });
+    println!("╰─────────────────────────────────────────────╯");
+
+    // Wing breakdown
+    let mut stmt = conn.prepare(
+        "SELECT wing, COUNT(*), SUM(CASE WHEN summary IS NULL THEN 1 ELSE 0 END) FROM memory_nodes GROUP BY wing ORDER BY wing"
+    ).unwrap();
+    let wings: Vec<(String, i64, i64)> = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+    }).unwrap().filter_map(|r| r.ok()).collect();
+
+    if !wings.is_empty() {
+        println!("\nWings:");
+        for (name, count, pending) in &wings {
+            if let Some(w) = wing {
+                if name != w { continue; }
+            }
+            let pending_str = if *pending > 0 { format!(" ({} pending)", pending) } else { String::new() };
+            println!("  {} — {} memories{}", name, count, pending_str);
+        }
+    }
+
+    // Room breakdown (optionally filtered by wing)
+    let room_sql = if wing.is_some() {
+        "SELECT room, COUNT(*) FROM memory_nodes WHERE wing = ?1 GROUP BY room ORDER BY COUNT(*) DESC LIMIT 20"
+    } else {
+        "SELECT room, COUNT(*) FROM memory_nodes GROUP BY room ORDER BY COUNT(*) DESC LIMIT 20"
+    };
+    let mut stmt = conn.prepare(room_sql).unwrap();
+    let rooms: Vec<(String, i64)> = if let Some(w) = wing {
+        stmt.query_map(rusqlite::params![w], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).unwrap().filter_map(|r| r.ok()).collect()
+    } else {
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    if !rooms.is_empty() {
+        println!("\nRooms (top 20):");
+        for (name, count) in &rooms {
+            println!("  {} — {}", name, count);
+        }
+    }
+}
+
+fn cmd_memory_reset(state_db: &state::StateDb) {
+    let conn = state_db.conn.lock().unwrap();
+    let count = conn.execute("UPDATE memory_nodes SET summary = NULL WHERE summary = ''", []).unwrap_or(0);
+    println!("Reset {} entries with empty summary → will be re-analyzed on next startup.", count);
+}
+
+fn cmd_memory_remigrate(state_db: &state::StateDb) {
+    let conn = state_db.conn.lock().unwrap();
+
+    // Delete all migrated data (source = 'migration' or 'extraction' from previous migration)
+    let deleted_nodes = conn.execute(
+        "DELETE FROM memory_nodes WHERE source IN ('migration', 'extraction')",
+        [],
+    ).unwrap_or(0);
+
+    // Clean up orphaned KG entities/triples that were linked to deleted nodes
+    let deleted_triples = conn.execute(
+        "DELETE FROM kg_triples WHERE source_node_id IS NOT NULL AND source_node_id NOT IN (SELECT id FROM memory_nodes)",
+        [],
+    ).unwrap_or(0);
+
+    // Clean up orphaned embeddings
+    let deleted_embeddings = conn.execute(
+        "DELETE FROM vec_memories WHERE node_id NOT IN (SELECT id FROM memory_nodes)",
+        [],
+    ).unwrap_or(0);
+
+    // Remove migration marker so it re-runs on next startup
+    let _ = conn.execute("DELETE FROM palace_meta WHERE key = 'migration_v1'", []);
+
+    println!("Cleared migration data:");
+    println!("  - {} memory nodes deleted", deleted_nodes);
+    println!("  - {} KG triples deleted", deleted_triples);
+    println!("  - {} embeddings deleted", deleted_embeddings);
+    println!("  - migration marker removed");
+    println!("\nRestart gateway to re-run migration with improved parser.");
 }

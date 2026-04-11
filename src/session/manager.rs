@@ -224,8 +224,8 @@ impl SessionManager {
                             .as_deref()
                             .unwrap_or(&new_id);
 
-                        // Log transcript
-                        {
+                        // Log transcript (skip for system sessions)
+                        if !session_key.contains(":system:") {
                             let label = super::transcript::label_from_session_key(&session_key);
                             let transcript =
                                 TranscriptLog::open_with_label(&agent.workspace, final_id, Some(&label)).await?;
@@ -315,8 +315,9 @@ impl SessionManager {
             .as_deref()
             .unwrap_or(&session_id);
 
-        // Log transcript
-        {
+        // Log transcript (skip for system-originated sessions: heartbeat, cron tasks)
+        let is_system = session_key.contains(":system:");
+        if !is_system {
             let label = if !is_resume {
                 Some(super::transcript::label_from_session_key(&session_key))
             } else {
@@ -500,8 +501,11 @@ impl SessionManager {
             let mut stopped = false;
             let mut tool_uses: Vec<super::transcript::ToolUseEntry> = Vec::new();
 
-            // Open transcript log and write user message
-            let transcript = {
+            // Open transcript log and write user message (skip for system sessions)
+            let is_system = session_key_owned.contains(":system:");
+            let transcript = if is_system {
+                None
+            } else {
                 let label = if !is_resume {
                     Some(super::transcript::label_from_session_key(&session_key_owned))
                 } else {

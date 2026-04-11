@@ -129,6 +129,19 @@ pub fn run_migration(
 
 /// Import a daily diary file (memory/YYYY-MM-DD.md).
 /// Each `### channel — time` section becomes one memory_node.
+/// Diary format:
+/// ```
+/// ---
+///
+/// ### channel context_id — HH:MM
+///
+/// (diary content here, may span many lines)
+///
+/// ---
+///
+/// ### another channel — HH:MM
+/// ...
+/// ```
 fn import_diary_file(state_db: &StateDb, wing: &str, path: &Path) -> Result<Vec<MigratedNode>> {
     let content = std::fs::read_to_string(path)?;
     if content.trim().is_empty() {
@@ -137,53 +150,67 @@ fn import_diary_file(state_db: &StateDb, wing: &str, path: &Path) -> Result<Vec<
 
     let mut nodes = Vec::new();
 
-    // Split on "---" delimiters that precede ### headers
-    let sections: Vec<&str> = content.split("\n---\n").collect();
-    for section in sections {
-        let trimmed = section.trim();
-        if trimmed.is_empty() {
+    // Split on "### " headers — each section starts with a ### line
+    let mut current_room = "general".to_string();
+    let mut current_body = String::new();
+
+    for line in content.lines() {
+        let trimmed_line = line.trim();
+
+        // Skip standalone "---" delimiters
+        if trimmed_line == "---" {
             continue;
         }
 
-        // Extract room from "### channel — time" header
-        let room = if let Some(header_line) = trimmed.lines().next() {
-            if header_line.starts_with("###") {
-                header_line
-                    .trim_start_matches('#')
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("general")
-                    .to_string()
-            } else {
-                "general".to_string()
+        // New section starts with ###
+        if trimmed_line.starts_with("### ") {
+            // Save previous section if any
+            let body = current_body.trim().to_string();
+            if !body.is_empty() {
+                let req = WriteRequest {
+                    wing: wing.to_string(),
+                    room: current_room.clone(),
+                    hall: "events".to_string(),
+                    content: body.clone(),
+                    summary: None,
+                    source: "migration".to_string(),
+                    importance: Some(5),
+                };
+                let node_id = state_db.memory_write(&req)?;
+                nodes.push(MigratedNode {
+                    wing: wing.to_string(),
+                    node_id,
+                    content: body,
+                });
             }
+
+            // Parse new header: "### discord 123.chat — 13:04"
+            current_room = trimmed_line
+                .trim_start_matches('#')
+                .split_whitespace()
+                .next()
+                .unwrap_or("general")
+                .to_string();
+            current_body.clear();
         } else {
-            "general".to_string()
-        };
-
-        // Content is everything after the header line
-        let body: String = trimmed
-            .lines()
-            .skip(1)
-            .collect::<Vec<&str>>()
-            .join("\n")
-            .trim()
-            .to_string();
-
-        if body.is_empty() {
-            continue;
+            // Accumulate body lines
+            current_body.push_str(line);
+            current_body.push('\n');
         }
+    }
 
+    // Save last section
+    let body = current_body.trim().to_string();
+    if !body.is_empty() {
         let req = WriteRequest {
             wing: wing.to_string(),
-            room,
+            room: current_room,
             hall: "events".to_string(),
             content: body.clone(),
             summary: None,
             source: "migration".to_string(),
             importance: Some(5),
         };
-
         let node_id = state_db.memory_write(&req)?;
         nodes.push(MigratedNode {
             wing: wing.to_string(),
@@ -195,70 +222,32 @@ fn import_diary_file(state_db: &StateDb, wing: &str, path: &Path) -> Result<Vec<
     Ok(nodes)
 }
 
-/// Import MEMORY.md — distilled long-term memories.
-/// Each paragraph becomes a memory_node with heuristic hall classification.
+/// Import MEMORY.md — store as a single node, let Haiku analyze and extract facts.
+/// MEMORY.md format varies (user-written), so we don't try to parse it ourselves.
 fn import_memory_md(state_db: &StateDb, wing: &str, path: &Path) -> Result<Vec<MigratedNode>> {
     let content = std::fs::read_to_string(path)?;
-    if content.trim().is_empty() {
+    let trimmed = content.trim().to_string();
+    if trimmed.is_empty() {
         return Ok(vec![]);
     }
 
-    let mut nodes = Vec::new();
+    // Store as one node — Haiku's analyze_diary will extract summary, room, facts, and KG
+    let req = WriteRequest {
+        wing: wing.to_string(),
+        room: "general".to_string(),
+        hall: "facts".to_string(),
+        content: trimmed.clone(),
+        summary: None,
+        source: "migration".to_string(),
+        importance: Some(7), // Survived distillation = important
+    };
 
-    // Split into paragraphs (double newline separated)
-    let paragraphs: Vec<&str> = content.split("\n\n").collect();
-    for para in paragraphs {
-        let trimmed = para.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            // Skip headers — they're organizational, not content
-            continue;
-        }
-
-        let hall = classify_hall(trimmed);
-
-        let req = WriteRequest {
-            wing: wing.to_string(),
-            room: "general".to_string(),
-            hall,
-            content: trimmed.to_string(),
-            summary: None,
-            source: "migration".to_string(),
-            importance: Some(7), // Survived distillation = important
-        };
-
-        let node_id = state_db.memory_write(&req)?;
-        nodes.push(MigratedNode {
-            wing: wing.to_string(),
-            node_id,
-            content: trimmed.to_string(),
-        });
-    }
-
-    Ok(nodes)
-}
-
-/// Heuristic hall classification for MEMORY.md paragraphs.
-fn classify_hall(text: &str) -> String {
-    let lower = text.to_lowercase();
-    if lower.contains("prefer") || lower.contains("like") || lower.contains("want")
-        || lower.contains("style") || lower.contains("偏好") || lower.contains("喜歡")
-    {
-        "preferences".to_string()
-    } else if lower.contains("learned") || lower.contains("discovered") || lower.contains("found that")
-        || lower.contains("學到") || lower.contains("發現")
-    {
-        "discoveries".to_string()
-    } else if lower.contains("lesson") || lower.contains("remember to") || lower.contains("don't forget")
-        || lower.contains("never") || lower.contains("always") || lower.contains("注意") || lower.contains("記得")
-    {
-        "advice".to_string()
-    } else if lower.contains("happened") || lower.contains("decided") || lower.contains("meeting")
-        || lower.contains("2025") || lower.contains("2026") || lower.contains("發生") || lower.contains("決定")
-    {
-        "events".to_string()
-    } else {
-        "facts".to_string()
-    }
+    let node_id = state_db.memory_write(&req)?;
+    Ok(vec![MigratedNode {
+        wing: wing.to_string(),
+        node_id,
+        content: trimmed,
+    }])
 }
 
 /// Backfill missing data at startup: Haiku analysis (summary/room/facts/KG) + embeddings.
