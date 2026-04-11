@@ -560,6 +560,8 @@ enum MemoryCommands {
     Reset,
     /// Clear all migrated data and re-run migration from markdown files
     Remigrate,
+    /// Fix invalid room names (non-kebab-case) by reassigning to "general" for re-classification
+    FixRooms,
 }
 
 #[tokio::main]
@@ -1671,6 +1673,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 }
                 MemoryCommands::Remigrate => {
                     cmd_memory_remigrate(&state_db);
+                }
+                MemoryCommands::FixRooms => {
+                    cmd_memory_fix_rooms(&state_db);
                 }
             }
         }
@@ -3446,6 +3451,40 @@ fn cmd_memory_reset(state_db: &state::StateDb) {
     let conn = state_db.conn.lock().unwrap();
     let count = conn.execute("UPDATE memory_nodes SET summary = NULL WHERE summary = ''", []).unwrap_or(0);
     println!("Reset {} entries with empty summary → will be re-analyzed on next startup.", count);
+}
+
+fn cmd_memory_fix_rooms(state_db: &state::StateDb) {
+    use crate::memory::analyze::validate_room;
+
+    let rooms = state_db.memory_all_room_names().unwrap_or_default();
+    let invalid_rooms: Vec<&String> = rooms.iter().filter(|r| validate_room(r) == "general" && r.as_str() != "general").collect();
+
+    if invalid_rooms.is_empty() {
+        println!("All room names are valid kebab-case. Nothing to fix.");
+        return;
+    }
+
+    println!("Found {} invalid room name(s):", invalid_rooms.len());
+    for room in &invalid_rooms {
+        println!("  - {}", room);
+    }
+    println!();
+
+    let mut total = 0;
+    for room in &invalid_rooms {
+        match state_db.memory_reassign_room(room, "general") {
+            Ok(count) => {
+                println!("  {} → general ({} nodes)", room, count);
+                total += count;
+            }
+            Err(e) => {
+                eprintln!("  Failed to reassign '{}': {}", room, e);
+            }
+        }
+    }
+
+    println!("\nDone: {} nodes reassigned to 'general' (summaries cleared for re-analysis).", total);
+    println!("Restart gateway to trigger backfill (Haiku will re-classify rooms).");
 }
 
 fn cmd_memory_remigrate(state_db: &state::StateDb) {

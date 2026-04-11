@@ -495,6 +495,17 @@ impl StateDb {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Reassign all memory nodes in `old_room` to `new_room`, clearing summaries
+    /// (so backfill re-analyzes them). Returns count of affected rows.
+    pub fn memory_reassign_room(&self, old_room: &str, new_room: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE memory_nodes SET room = ?1, summary = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE room = ?2",
+            params![new_room, old_room],
+        )?;
+        Ok(count)
+    }
+
     /// List all room names across ALL wings (for Haiku cross-wing room context).
     /// Returns deduplicated, sorted room names so Haiku can reuse names consistently.
     pub fn memory_all_room_names(&self) -> Result<Vec<String>> {

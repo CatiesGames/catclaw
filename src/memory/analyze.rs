@@ -60,7 +60,11 @@ pub async fn analyze_diary(
     diary_text: &str,
 ) -> Result<()> {
     // 1. Fetch existing rooms across ALL wings for consistent naming (enables tunnels)
-    let rooms = state_db.memory_all_room_names()?;
+    // Filter out invalid room names so Haiku doesn't reuse them
+    let rooms: Vec<String> = state_db.memory_all_room_names()?
+        .into_iter()
+        .filter(|r| validate_room(r) != "general" || r == "general")
+        .collect();
     let rooms_list = if rooms.is_empty() {
         "none yet".to_string()
     } else {
@@ -77,10 +81,11 @@ pub async fn analyze_diary(
     }
 
     // 4. Update diary node with summary + corrected room + Haiku-assessed importance
+    let diary_room = validate_room(&analysis.room);
     state_db.memory_update_analysis(
         diary_node_id,
         &analysis.summary,
-        &analysis.room,
+        diary_room,
         Some(analysis.diary_importance.clamp(1, 10)),
     )?;
 
@@ -103,7 +108,8 @@ pub async fn analyze_diary(
             .room
             .as_deref()
             .filter(|r| !r.is_empty())
-            .unwrap_or(&analysis.room);
+            .map(validate_room)
+            .unwrap_or(diary_room);
         let req = WriteRequest {
             wing: wing.to_string(),
             room: fact_room.to_string(),
@@ -169,7 +175,10 @@ pub async fn classify_memory(
 
     // Call Haiku for room classification (if "general") and/or summary (if long) and importance adjustment
     if needs_room || needs_summary {
-        let rooms = state_db.memory_all_room_names()?;
+        let rooms: Vec<String> = state_db.memory_all_room_names()?
+            .into_iter()
+            .filter(|r| validate_room(r) != "general" || r == "general")
+            .collect();
         let rooms_list = if rooms.is_empty() {
             "none yet".to_string()
         } else {
@@ -178,7 +187,7 @@ pub async fn classify_memory(
 
         match call_haiku(content, &rooms_list).await {
             Ok(analysis) => {
-                let new_room = if needs_room { &analysis.room } else { current_room };
+                let new_room = if needs_room { validate_room(&analysis.room) } else { current_room };
                 let summary = if needs_summary { &analysis.summary } else { "" };
                 // Only override importance if agent used the default (5) — respect agent-set values
                 let importance = if original_importance == 5 {
@@ -285,5 +294,25 @@ fn validate_hall(hall: &str) -> String {
     match hall {
         "facts" | "events" | "discoveries" | "preferences" | "advice" => hall.to_string(),
         _ => "facts".to_string(),
+    }
+}
+
+/// Validate room name: must be kebab-case (lowercase ASCII letters, digits, hyphens).
+/// Returns the room name if valid, or "general" if not.
+pub fn validate_room(room: &str) -> &str {
+    if room.is_empty() {
+        return "general";
+    }
+    let is_kebab = room
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !room.starts_with('-')
+        && !room.ends_with('-')
+        && !room.contains("--");
+    if is_kebab {
+        room
+    } else {
+        tracing::warn!(room, "Haiku returned non-kebab-case room name, falling back to 'general'");
+        "general"
     }
 }
