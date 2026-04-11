@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.2](https://github.com/CatiesGames/catclaw/compare/v0.37.1...v0.37.2) (2026-04-11)
+
+
+### Bug Fixes
+
+* kg_add_triple 加 source_node_id + remigrate 全清 KG ([c8cb7a7](https://github.com/CatiesGames/catclaw/commit/c8cb7a70552946ce93c4bdae4f424b75d1d7cf8a))
+
 ## [0.37.1](https://github.com/CatiesGames/catclaw/compare/v0.37.0...v0.37.1) (2026-04-11)
 
 
