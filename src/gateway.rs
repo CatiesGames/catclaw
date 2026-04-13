@@ -608,9 +608,36 @@ async fn handle_social_button_action(
             info!(card_id, platform = %draft.platform, "social draft_discard: deleted");
             let workspace = config.read().unwrap().general.workspace.clone();
             crate::social::cleanup_draft_media(&workspace, &draft.media_urls);
-            let base = forward::build_social_draft_card(&draft);
-            let resolved = forward::build_resolved_card(&base, "已捨棄");
-            try_update_draft_card(resolved).await;
+
+            // If this draft shares its forward card with an inbox item (unified-card
+            // flow), restore the original incoming forward card so the user can pick
+            // a different action (AI 回覆 / 手動回覆 / 忽略). Otherwise, mark the
+            // standalone draft card as resolved 已捨棄.
+            let mut restored_inbox_card = false;
+            if draft.draft_type == "reply" {
+                if let Some(ref rid) = draft.reply_to_id {
+                    if let Ok(Some(inbox)) = db.get_social_inbox_by_platform_id(&draft.platform, rid) {
+                        if inbox.forward_ref.is_some()
+                            && inbox.forward_ref == draft.forward_ref
+                            && !admin_channel.is_empty()
+                        {
+                            let card = forward::build_forward_card(&inbox);
+                            if let Some(ref fwd_ref) = inbox.forward_ref {
+                                forward::update_forward_card(card, fwd_ref, &admin_channel, adapters).await;
+                            }
+                            // Reset inbox row so it looks unprocessed again. Keep
+                            // forward_ref so the next AI 回覆 reuses the same message.
+                            let _ = db.update_social_inbox_status(inbox.id, "pending");
+                            restored_inbox_card = true;
+                        }
+                    }
+                }
+            }
+            if !restored_inbox_card {
+                let base = forward::build_social_draft_card(&draft);
+                let resolved = forward::build_resolved_card(&base, "已捨棄");
+                try_update_draft_card(resolved).await;
+            }
             let _ = db.delete_social_draft(card_id);
             return;
         }
@@ -648,13 +675,21 @@ async fn handle_social_button_action(
                     try_update(resolved).await;
                     let _ = db.update_social_draft_sent(card_id, &reply_id);
 
-                    // Also update the original forward card (inbox card) to "已回覆"
+                    // Update the inbox row's status (+ reply_id). Only edit the
+                    // inbox card separately when it lives on a different message
+                    // than the draft card — under the unified-card flow they share
+                    // a forward_ref, and `try_update(resolved)` above has already
+                    // updated that single message to 已發送.
                     if let Some(ref reply_to) = draft.reply_to_id {
                         if let Ok(Some(inbox_row)) = db.get_social_inbox_by_platform_id(&draft.platform, reply_to) {
-                            if let Some(ref fwd_ref) = inbox_row.forward_ref {
-                                let inbox_card = forward::build_forward_card(&inbox_row);
-                                let inbox_resolved = forward::build_resolved_card(&inbox_card, "已回覆");
-                                forward::update_forward_card(inbox_resolved, fwd_ref, &admin_channel, &adapters).await;
+                            let same_card = inbox_row.forward_ref.is_some()
+                                && inbox_row.forward_ref == draft.forward_ref;
+                            if !same_card {
+                                if let Some(ref fwd_ref) = inbox_row.forward_ref {
+                                    let inbox_card = forward::build_forward_card(&inbox_row);
+                                    let inbox_resolved = forward::build_resolved_card(&inbox_card, "已回覆");
+                                    forward::update_forward_card(inbox_resolved, fwd_ref, &admin_channel, &adapters).await;
+                                }
                             }
                             let _ = db.update_social_inbox_sent(inbox_row.id, &reply_id);
                         }

@@ -1739,8 +1739,15 @@ fn stage_draft_from_tool(
         .map(parse_string_or_array)
         .unwrap_or_default();
 
-    // Check if a matching draft already exists (idempotency for retries).
-    if let Ok(Some(existing)) = db.find_latest_draft_for_tool(platform, draft_type, reply_to_id.as_deref()) {
+    // Reuse any non-terminal draft for the same target so retries don't leave
+    // zombie rows behind. Refresh the content + media with the agent's new output,
+    // and reset status to 'draft' so the submit handler can transition it cleanly.
+    if let Ok(Some(mut existing)) = db.find_latest_draft_for_tool(platform, draft_type, reply_to_id.as_deref()) {
+        let _ = db.update_social_draft_content(existing.id, content, &media_urls);
+        let _ = db.update_social_draft_status(existing.id, "draft");
+        existing.content = content.to_string();
+        existing.media_urls = media_urls;
+        existing.status = "draft".to_string();
         return Ok(existing);
     }
 
@@ -1824,30 +1831,52 @@ async fn handle_social_draft_submit(req: &WsRequest, gw: &Arc<GatewayHandle>) ->
         );
     }
 
-    // Build and send draft approval card.
-    let card = crate::social::forward::build_social_draft_card(&draft);
-    match crate::social::forward::send_forward_card(card, &admin_channel, &gw.adapters_list).await {
-        Ok(Some(msg_id)) => {
-            let _ = gw.state_db.update_social_draft_forward_ref(draft.id, &msg_id);
+    // For reply drafts that originated from an inbox item, edit the inbox forward
+    // card in place instead of sending a brand new card. The whole lifecycle of
+    // one incoming reply (forward → AI processing → draft review → sent) then
+    // lives on a single message in the admin channel.
+    let mut reused = false;
+    if draft.draft_type == "reply" {
+        if let Some(ref rid) = draft.reply_to_id {
+            if let Ok(Some(inbox)) = gw.state_db.get_social_inbox_by_platform_id(&draft.platform, rid) {
+                if let Some(fwd_ref) = inbox.forward_ref.clone() {
+                    let card = crate::social::forward::build_social_draft_card(&draft);
+                    crate::social::forward::update_forward_card(
+                        card, &fwd_ref, &admin_channel, &gw.adapters_list,
+                    ).await;
+                    let _ = gw.state_db.update_social_draft_forward_ref(draft.id, &fwd_ref);
+                    reused = true;
+                }
+            }
         }
-        Ok(None) => {
-            warn!("social.draft.submit_for_approval: no adapter sent the card (admin_channel={})", admin_channel);
-            let _ = gw.state_db.update_social_draft_status(draft.id, "failed");
-            return WsResponse::err(
-                req.id, -1,
-                format!(
-                    "no adapter found for admin_channel '{}' — draft {} set to failed",
-                    admin_channel, draft.id,
-                ),
-            );
-        }
-        Err(e) => {
-            warn!(error = %e, "social.draft.submit_for_approval: failed to send card");
-            let _ = gw.state_db.update_social_draft_status(draft.id, "failed");
-            return WsResponse::err(
-                req.id, -1,
-                format!("failed to send approval card: {} — draft {} set to failed", e, draft.id),
-            );
+    }
+
+    if !reused {
+        // No inbox source (DM, proactive post, …) — send a new card.
+        let card = crate::social::forward::build_social_draft_card(&draft);
+        match crate::social::forward::send_forward_card(card, &admin_channel, &gw.adapters_list).await {
+            Ok(Some(msg_id)) => {
+                let _ = gw.state_db.update_social_draft_forward_ref(draft.id, &msg_id);
+            }
+            Ok(None) => {
+                warn!("social.draft.submit_for_approval: no adapter sent the card (admin_channel={})", admin_channel);
+                let _ = gw.state_db.update_social_draft_status(draft.id, "failed");
+                return WsResponse::err(
+                    req.id, -1,
+                    format!(
+                        "no adapter found for admin_channel '{}' — draft {} set to failed",
+                        admin_channel, draft.id,
+                    ),
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "social.draft.submit_for_approval: failed to send card");
+                let _ = gw.state_db.update_social_draft_status(draft.id, "failed");
+                return WsResponse::err(
+                    req.id, -1,
+                    format!("failed to send approval card: {} — draft {} set to failed", e, draft.id),
+                );
+            }
         }
     }
 

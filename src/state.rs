@@ -1074,6 +1074,19 @@ impl StateDb {
         Ok(())
     }
 
+    /// Refresh the content + media of an existing draft. Used when a reused draft
+    /// (from `find_latest_draft_for_tool`) needs to pick up new agent output on retry.
+    pub fn update_social_draft_content(&self, id: i64, content: &str, media_urls: &[String]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let encoded = encode_media_urls(media_urls);
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE social_drafts SET content=?1, media_url=?2, updated_at=?3 WHERE id=?4",
+            params![content, encoded, now, id],
+        )?;
+        Ok(())
+    }
+
     /// Find the latest staged draft matching platform + draft_type (+ optional reply_to_id).
     /// Used after a publish tool call to associate the draft.
     pub fn find_latest_draft_for_tool(
@@ -1085,16 +1098,18 @@ impl StateDb {
         const COLS: &str = "id,platform,draft_type,content,media_url,reply_to_id,original_text,\
                             original_author,status,reply_id,forward_ref,agent_id,session_key,\
                             metadata,created_at,updated_at";
+        // Reuse any non-terminal draft for the same target so retries / re-approvals
+        // do not leave zombie rows. Terminal statuses (sent, ignored) are excluded.
         let conn = self.conn.lock().unwrap();
         let row = if let Some(rid) = reply_to_id {
             conn.query_row(
-                &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND reply_to_id=?3 AND status='draft' ORDER BY created_at DESC LIMIT 1"),
+                &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND reply_to_id=?3 AND status IN ('draft','awaiting_approval','failed') ORDER BY created_at DESC LIMIT 1"),
                 params![platform, draft_type, rid],
                 social_draft_row_mapper,
             ).optional()?
         } else {
             conn.query_row(
-                &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND status='draft' ORDER BY created_at DESC LIMIT 1"),
+                &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND status IN ('draft','awaiting_approval','failed') ORDER BY created_at DESC LIMIT 1"),
                 params![platform, draft_type],
                 social_draft_row_mapper,
             ).optional()?
