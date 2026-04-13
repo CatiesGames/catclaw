@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.0](https://github.com/CatiesGames/catclaw/compare/v0.37.3...v0.38.0) (2026-04-13)
+
+
+### Features
+
+* **social:** 統一 reply 卡片生命週期 + 修復 AI 重試殭屍 draft ([41a3f7b](https://github.com/CatiesGames/catclaw/commit/41a3f7b3a6d86649cfb1918e7e247b7544cc0c8c))
+
 ## [0.37.3](https://github.com/CatiesGames/catclaw/compare/v0.37.2...v0.37.3) (2026-04-11)
 
 
