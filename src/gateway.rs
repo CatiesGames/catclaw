@@ -228,24 +228,30 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 info!("slack adapter started");
             }
             "backend" => {
-                let ba = BackendAdapter::from_config(channel_config)?;
-                adapter_filters.push(Arc::new(std::sync::RwLock::new(
-                    AdapterFilter::from_config(channel_config),
-                )));
-                let adapter = Arc::new(ba);
+                match BackendAdapter::from_config(channel_config) {
+                    Ok(ba) => {
+                        adapter_filters.push(Arc::new(std::sync::RwLock::new(
+                            AdapterFilter::from_config(channel_config),
+                        )));
+                        let adapter = Arc::new(ba);
 
-                // No approval/social receivers for backend adapter
-                adapters.push(adapter.clone());
-                backend_adapter = Some(adapter.clone());
+                        // No approval/social receivers for backend adapter
+                        adapters.push(adapter.clone());
+                        backend_adapter = Some(adapter.clone());
 
-                let tx = msg_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = adapter.start(tx).await {
-                        error!(error = %e, "backend adapter error");
+                        let tx = msg_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = adapter.start(tx).await {
+                                error!(error = %e, "backend adapter error");
+                            }
+                        });
+
+                        info!("backend adapter started");
                     }
-                });
-
-                info!("backend adapter started");
+                    Err(e) => {
+                        warn!(error = %e, "backend adapter not started (missing config), skipping");
+                    }
+                }
             }
             other => {
                 warn!(adapter = other, "unknown channel adapter type, skipping");
