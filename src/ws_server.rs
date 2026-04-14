@@ -28,6 +28,7 @@ pub fn spawn(addr: String, gw: GatewayHandle) -> tokio::task::JoinHandle<()> {
         let webhook_router = crate::social::webhook::build_router(gw.clone());
         let app = Router::new()
             .route("/ws", get(ws_handler))
+            .route("/ws/backend", get(ws_backend_handler))
             .route("/health", get(|| async { "ok" }))
             .route("/media/{filename}", get(serve_media))
             .merge(mcp_server::router())
@@ -55,6 +56,29 @@ async fn ws_handler(
     State(gw): State<Arc<GatewayHandle>>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_connection(socket, gw))
+}
+
+/// WebSocket handler for backend channel connections.
+async fn ws_backend_handler(
+    ws: WebSocketUpgrade,
+    State(gw): State<Arc<GatewayHandle>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| async move {
+        let adapter = match &gw.backend_adapter {
+            Some(a) => a.clone(),
+            None => {
+                warn!("backend WS connection rejected: no backend adapter configured");
+                return;
+            }
+        };
+        crate::channel::backend::handle_backend_ws(
+            socket,
+            adapter,
+            gw.session_manager.clone(),
+            gw.agent_registry.clone(),
+        )
+        .await;
+    })
 }
 
 /// Serve a file from `{workspace}/media_tmp/{filename}`.

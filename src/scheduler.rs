@@ -715,6 +715,11 @@ async fn check_diary_extraction(
             None => continue,
         };
 
+        // Skip agents with memory disabled (all memory tools denied in tools.toml)
+        if agent.memory_disabled() {
+            continue;
+        }
+
         // Mark as in-flight to prevent duplicate extraction on next tick
         in_flight.lock().unwrap().insert(session.session_id.clone());
 

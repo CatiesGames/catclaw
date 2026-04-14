@@ -1410,6 +1410,8 @@ catclaw bind <pattern> <agent>
 | `discord:*` | All Discord messages |
 | `telegram:dm:<user_id>` | Specific Telegram DM |
 | `telegram:*` | All Telegram messages |
+| `backend:channel:<tenant_id>` | Specific backend tenant |
+| `backend:*` | All backend tenants |
 | `*` | All platforms (global fallback) |
 
 **Without bindings:** all messages go to the default agent (the one with `default: true` in config, or the first agent).
@@ -1614,9 +1616,63 @@ catclaw channel list           # List configured channel adapters
 catclaw channel add discord --token-env DISCORD_TOKEN --guilds "123,456" --activation mention
 catclaw channel add telegram --token-env TELEGRAM_TOKEN
 catclaw channel add slack --token-env SLACK_BOT_TOKEN --app-token-env SLACK_APP_TOKEN
+catclaw channel add backend --token-env BACKEND_SHARED_SECRET
 ```
 
 `--activation`: `mention` (respond only when @mentioned) or `all` (respond to everything)
+
+### Backend Channel
+
+The backend channel allows external servers (web apps, mobile backends, etc.) to connect via WebSocket and route messages from multiple end-users to CatClaw agents. Unlike Discord/Telegram/Slack, one backend connection multiplexes many users via `tenant_id` + `user_id`.
+
+**Endpoint:** `ws://<gateway>:<port>/ws/backend` (separate from the TUI `/ws` endpoint)
+
+**Setup:**
+1. Set a shared secret env var (e.g. `export BACKEND_SHARED_SECRET=my-secret-token`)
+2. Add the channel: `catclaw channel add backend --token-env BACKEND_SHARED_SECRET`
+3. Bind a tenant to an agent: `catclaw bind "backend:channel:<tenant_id>" <agent>`
+
+**Protocol (JSON over WebSocket):**
+
+The backend server connects and authenticates first, then sends messages on behalf of users:
+
+```json
+// 1. Auth (first message, required)
+{"type": "auth", "secret": "<shared_secret>"}
+
+// 2. Session start (when a user connects — carries context + history)
+{"type": "session_start", "tenant_id": "myapp", "user_id": "u123",
+ "user_name": "Alice", "user_role": "member",
+ "metadata": {"plan": "pro"},
+ "history": [
+   {"role": "user", "content": "hello", "timestamp": "2026-04-10T14:30:00Z"},
+   {"role": "assistant", "content": "hi there!"}
+ ]}
+
+// 3. Message (user sends a chat message)
+{"type": "message", "tenant_id": "myapp", "user_id": "u123", "text": "how do I reset my password?"}
+
+// 4. Context event (behavioural trigger, not a user message)
+{"type": "context_event", "tenant_id": "myapp", "user_id": "u123",
+ "user_name": "Alice", "event": "page_idle",
+ "data": {"page": "/pricing", "seconds": 90}}
+
+// 5. Disconnect (user left)
+{"type": "disconnect", "tenant_id": "myapp", "user_id": "u123"}
+```
+
+**CatClaw responds with:**
+```json
+{"type": "response", "tenant_id": "myapp", "user_id": "u123", "text": "You can reset..."}
+{"type": "typing", "tenant_id": "myapp", "user_id": "u123", "active": true}
+```
+
+**Session lifecycle:**
+- `session_start` archives any existing session for that user and stores context (metadata + history) to prepend to the first message
+- Each user gets an independent CatClaw session: `catclaw:<agent>:backend:<tenant>.user.<uid>`
+- `disconnect` cleans up the user mapping (session idles/archives naturally)
+
+**Memory:** Backend-connected agents typically have all memory tools denied (no diary extraction, no Memory Palace). Conversation history is managed by the backend server and injected via `session_start.history`.
 
 ---
 

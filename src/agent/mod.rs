@@ -156,7 +156,8 @@ Your memories are stored in a structured database (MemPalace). Use the memory_* 
 impl Agent {
     /// Check if memory is disabled for this agent.
     /// Disabled only when ALL memory/kg tools are denied.
-    fn memory_disabled(&self) -> bool {
+    /// Used by build_system_prompt() and scheduler diary extraction.
+    pub fn memory_disabled(&self) -> bool {
         const MEMORY_TOOLS: &[&str] = &[
             "memory_status", "memory_write", "memory_search", "memory_delete",
             "memory_list_wings", "memory_list_rooms", "memory_tunnels",

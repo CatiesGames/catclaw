@@ -94,7 +94,10 @@ impl MessageRouter {
         } else {
             ""
         };
-        let context_id = if ctx.is_direct_message {
+        let context_id = if ctx.channel_type == crate::channel::ChannelType::Backend {
+            // Backend adapter pre-builds the context_id as peer_id: "{tenant}.user.{uid}"
+            ctx.peer_id.clone()
+        } else if ctx.is_direct_message {
             format!("dm.{}", ctx.sender_name)
         } else if let Some(ref thread_id) = ctx.thread_id {
             let channel_name = ctx

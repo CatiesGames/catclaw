@@ -1,3 +1,4 @@
+pub mod backend;
 pub mod discord;
 pub mod reaction;
 pub mod slack;
@@ -16,6 +17,7 @@ pub enum ChannelType {
     Telegram,
     Slack,
     Tui,
+    Backend,
 }
 
 impl ChannelType {
@@ -25,6 +27,7 @@ impl ChannelType {
             ChannelType::Telegram => "telegram",
             ChannelType::Slack => "slack",
             ChannelType::Tui => "tui",
+            ChannelType::Backend => "backend",
         }
     }
 }

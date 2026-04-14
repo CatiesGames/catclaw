@@ -8,6 +8,7 @@ use crate::approval::PendingApproval;
 use dashmap::DashMap;
 
 use crate::agent::{AgentLoader, AgentRegistry};
+use crate::channel::backend::BackendAdapter;
 use crate::channel::discord::DiscordAdapter;
 use crate::channel::slack::SlackAdapter;
 use crate::channel::telegram::TelegramAdapter;
@@ -50,6 +51,9 @@ pub struct GatewayHandle {
     pub social_item_tx: Arc<tokio::sync::mpsc::UnboundedSender<crate::social::SocialItem>>,
     /// Embedding model for memory palace (lazy-loaded on first use).
     pub embedder: Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>,
+    /// Backend channel adapter (if configured). Stored as concrete type
+    /// so the WS handler can call `handle_backend_ws` directly.
+    pub backend_adapter: Option<Arc<BackendAdapter>>,
 }
 
 /// Start gateway services (DB, agents, session manager, channel adapters, scheduler)
@@ -147,6 +151,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     // 7. Start channel adapters
     let mut adapters: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
     let mut adapter_filters: Vec<Arc<std::sync::RwLock<AdapterFilter>>> = Vec::new();
+    let mut backend_adapter: Option<Arc<BackendAdapter>> = None;
 
     for channel_config in &config.channels {
         match channel_config.channel_type.as_str() {
@@ -221,6 +226,26 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 });
 
                 info!("slack adapter started");
+            }
+            "backend" => {
+                let ba = BackendAdapter::from_config(channel_config)?;
+                adapter_filters.push(Arc::new(std::sync::RwLock::new(
+                    AdapterFilter::from_config(channel_config),
+                )));
+                let adapter = Arc::new(ba);
+
+                // No approval/social receivers for backend adapter
+                adapters.push(adapter.clone());
+                backend_adapter = Some(adapter.clone());
+
+                let tx = msg_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = adapter.start(tx).await {
+                        error!(error = %e, "backend adapter error");
+                    }
+                });
+
+                info!("backend adapter started");
             }
             other => {
                 warn!(adapter = other, "unknown channel adapter type, skipping");
@@ -502,6 +527,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         mcp_tools,
         social_item_tx,
         embedder: embedder.clone(),
+        backend_adapter,
     };
 
     // 10. Start gateway server (WS + MCP on single port)
