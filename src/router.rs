@@ -73,7 +73,19 @@ impl MessageRouter {
         let _typing = adapter.start_typing(&ctx.channel_id, &ctx.peer_id).await?;
 
         // 2. Resolve agent
-        let agent_id = self.resolve_agent(ctx);
+        let (agent_id, is_explicit_binding) = self.resolve_agent(ctx);
+
+        // Backend channel requires an explicit binding — never fall through to
+        // the default agent, which may have elevated permissions.
+        if ctx.channel_type == crate::channel::ChannelType::Backend && !is_explicit_binding {
+            tracing::warn!(
+                tenant = %ctx.channel_id,
+                "backend message rejected: no binding for tenant (configure with: catclaw bind \"backend:channel:{}\" <agent>)",
+                ctx.channel_id,
+            );
+            return Ok(());
+        }
+
         let agent = {
             let registry = self.agent_registry.read().unwrap();
             registry
@@ -323,7 +335,9 @@ impl MessageRouter {
     }
 
     /// Resolve which agent handles this message using binding table
-    fn resolve_agent(&self, ctx: &MsgContext) -> String {
+    /// Resolve which agent should handle a message.
+    /// Returns (agent_id, is_explicit_binding).
+    fn resolve_agent(&self, ctx: &MsgContext) -> (String, bool) {
         let channel_type = ctx.channel_type.as_str();
 
         // Build candidate patterns from most specific to least
@@ -349,12 +363,12 @@ impl MessageRouter {
         for candidate in candidates.into_iter().flatten() {
             for binding in &self.bindings {
                 if binding.pattern == candidate {
-                    return binding.agent_id.clone();
+                    return (binding.agent_id.clone(), true);
                 }
             }
         }
 
-        self.default_agent_id.clone()
+        (self.default_agent_id.clone(), false)
     }
 }
 

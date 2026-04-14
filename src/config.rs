@@ -283,41 +283,41 @@ pub struct ChannelConfig {
 
     pub token_env: String,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guilds: Vec<String>,
 
-    #[serde(default = "default_activation")]
+    #[serde(default = "default_activation", skip_serializing_if = "is_default_activation")]
     pub activation: String,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<ChannelOverride>,
 
     /// DM policy: "open" (default), "allowlist", or "disabled"
-    #[serde(default = "default_dm_policy")]
+    #[serde(default = "default_dm_policy", skip_serializing_if = "is_default_dm_policy")]
     pub dm_policy: String,
 
     /// Sender IDs allowed to DM (only used when dm_policy = "allowlist")
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dm_allow: Vec<String>,
 
     /// Sender IDs denied from DM (checked before allow; works in any policy)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dm_deny: Vec<String>,
 
     /// Group policy: "open" (default) or "allowlist"
-    #[serde(default = "default_group_policy")]
+    #[serde(default = "default_group_policy", skip_serializing_if = "is_default_group_policy")]
     pub group_policy: String,
 
     /// Sender IDs allowed in groups (only used when group_policy = "allowlist")
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_allow: Vec<String>,
 
     /// Sender IDs denied in groups (checked before allow; works in any policy)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_deny: Vec<String>,
 
     /// Environment variable name for the app-level token (Slack Socket Mode only).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_token_env: Option<String>,
 }
 
@@ -484,11 +484,20 @@ fn default_streaming() -> bool {
 fn default_activation() -> String {
     "mention".to_string()
 }
+fn is_default_activation(v: &str) -> bool {
+    v == "mention"
+}
 fn default_dm_policy() -> String {
     "open".to_string()
 }
+fn is_default_dm_policy(v: &str) -> bool {
+    v == "open"
+}
 fn default_group_policy() -> String {
     "open".to_string()
+}
+fn is_default_group_policy(v: &str) -> bool {
+    v == "open"
 }
 fn default_embedding_provider() -> String {
     "ollama".to_string()
