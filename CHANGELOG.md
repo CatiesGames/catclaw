@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.3](https://github.com/CatiesGames/catclaw/compare/v0.40.2...v0.40.3) (2026-04-14)
+
+
+### Bug Fixes
+
+* backend channel requires explicit binding, skip empty config fields ([0457f12](https://github.com/CatiesGames/catclaw/commit/0457f12ffbe00ed31629823b5269f2a50b46acea))
+
 ## [0.40.2](https://github.com/CatiesGames/catclaw/compare/v0.40.1...v0.40.2) (2026-04-14)
 
 
