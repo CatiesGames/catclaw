@@ -384,13 +384,20 @@ impl EventHandler for Handler {
                     } else {
                         tracing::warn!(custom_id = %custom_id, "discord: malformed social_draft button ID");
                     }
-                    let _ = comp.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await;
+                    // Strip the buttons immediately so the user gets instant feedback
+                    // even if the gateway-side card update is delayed or fails. The
+                    // gateway will follow up with a richer Resolved/Publishing render.
+                    let response = CreateInteractionResponse::UpdateMessage(
+                        CreateInteractionResponseMessage::new().components(vec![]),
+                    );
+                    let _ = comp.create_response(&ctx.http, response).await;
                     return;
                 }
 
                 // Social inbox button: social:{action}:{card_id}
                 if let Some(rest) = custom_id.strip_prefix("social:") {
                     let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    let mut strip_buttons = false;
                     if parts.len() == 2 {
                         if let Ok(card_id) = parts[1].parse::<i64>() {
                             let action = parts[0];
@@ -412,14 +419,20 @@ impl EventHandler for Handler {
                                 ).await;
                                 return;
                             }
+                            // Strip buttons for terminal actions; keep them for view_original
+                            // (which augments the card without ending its lifecycle).
+                            strip_buttons = matches!(action, "ai_reply" | "manual_reply" | "ignore");
                             let _ = self.social_action_tx.send((card_id, action.to_string(), None));
                         }
                     }
-                    // Acknowledge without modifying the message
-                    let _ = comp.create_response(
-                        &ctx.http,
-                        CreateInteractionResponse::Acknowledge,
-                    ).await;
+                    let response = if strip_buttons {
+                        CreateInteractionResponse::UpdateMessage(
+                            CreateInteractionResponseMessage::new().components(vec![]),
+                        )
+                    } else {
+                        CreateInteractionResponse::Acknowledge
+                    };
+                    let _ = comp.create_response(&ctx.http, response).await;
                     return;
                 }
 

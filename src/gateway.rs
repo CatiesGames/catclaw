@@ -589,13 +589,23 @@ async fn handle_social_button_action(
             }.unwrap_or_default()
         };
 
+        let draft_id_for_log = draft.id;
         let try_update_draft_card = |card: forward::ForwardCard| {
             let fwd_ref = draft.forward_ref.clone();
             let ch = admin_channel.clone();
             let ads = adapters.clone();
             async move {
-                if let (Some(msg_ref), false) = (fwd_ref, ch.is_empty()) {
-                    forward::update_forward_card(card, &msg_ref, &ch, &ads).await;
+                match (fwd_ref, ch.is_empty()) {
+                    (Some(msg_ref), false) => {
+                        if let Err(e) = forward::update_forward_card(card, &msg_ref, &ch, &ads).await {
+                            warn!(draft_id = draft_id_for_log, msg_ref = %msg_ref, error = %e,
+                                "draft card update failed");
+                        }
+                    }
+                    (None, _) => warn!(draft_id = draft_id_for_log,
+                        "draft card update skipped: forward_ref is None"),
+                    (_, true) => warn!(draft_id = draft_id_for_log,
+                        "draft card update skipped: admin_channel is empty"),
                 }
             }
         };
@@ -623,7 +633,10 @@ async fn handle_social_button_action(
                         {
                             let card = forward::build_forward_card(&inbox);
                             if let Some(ref fwd_ref) = inbox.forward_ref {
-                                forward::update_forward_card(card, fwd_ref, &admin_channel, adapters).await;
+                                if let Err(e) = forward::update_forward_card(card, fwd_ref, &admin_channel, adapters).await {
+                                    warn!(card_id, msg_ref = %fwd_ref, error = %e,
+                                        "draft_discard: failed to restore inbox card");
+                                }
                             }
                             // Reset inbox row so it looks unprocessed again. Keep
                             // forward_ref so the next AI 回覆 reuses the same message.
@@ -664,7 +677,10 @@ async fn handle_social_button_action(
                 let ads = adapters.clone();
                 async move {
                     if let (Some(msg_ref), false) = (fwd_ref, ch.is_empty()) {
-                        forward::update_forward_card(card, &msg_ref, &ch, &ads).await;
+                        if let Err(e) = forward::update_forward_card(card, &msg_ref, &ch, &ads).await {
+                            warn!(card_id, msg_ref = %msg_ref, error = %e,
+                                "draft_approve: card update failed");
+                        }
                     }
                 }
             };
@@ -688,7 +704,10 @@ async fn handle_social_button_action(
                                 if let Some(ref fwd_ref) = inbox_row.forward_ref {
                                     let inbox_card = forward::build_forward_card(&inbox_row);
                                     let inbox_resolved = forward::build_resolved_card(&inbox_card, "已回覆");
-                                    forward::update_forward_card(inbox_resolved, fwd_ref, &admin_channel, &adapters).await;
+                                    if let Err(e) = forward::update_forward_card(inbox_resolved, fwd_ref, &admin_channel, &adapters).await {
+                                        warn!(card_id, msg_ref = %fwd_ref, error = %e,
+                                            "draft_approve: legacy inbox card update failed");
+                                    }
                                 }
                             }
                             let _ = db.update_social_inbox_sent(inbox_row.id, &reply_id);
@@ -737,7 +756,10 @@ async fn handle_social_button_action(
         let ads = adapters.clone();
         async move {
             if let (Some(msg_ref), false) = (fwd_ref, ch.is_empty()) {
-                forward::update_forward_card(card, &msg_ref, &ch, &ads).await;
+                if let Err(e) = forward::update_forward_card(card, &msg_ref, &ch, &ads).await {
+                    warn!(card_id, msg_ref = %msg_ref, error = %e,
+                        "inbox card update failed");
+                }
             }
         }
     };

@@ -573,7 +573,10 @@ async fn execute_auto_reply(
             if let Ok(Some(r)) = db.get_social_inbox(inbox_id) {
                 if let Some(ref fwd_ref) = r.forward_ref {
                     let card = forward::build_forward_card(&r);
-                    forward::update_forward_card(card, fwd_ref, &admin_channel, &adapters).await;
+                    if let Err(e) = forward::update_forward_card(card, fwd_ref, &admin_channel, &adapters).await {
+                        warn!(inbox_id, msg_ref = %fwd_ref, error = %e,
+                            "auto_reply restore_card: update failed");
+                    }
                 }
             }
         }

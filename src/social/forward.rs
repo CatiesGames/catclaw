@@ -473,24 +473,29 @@ pub async fn send_forward_card(
 
 /// Update an existing forward card in-place (e.g., after a button action).
 /// `message_id` is the platform message ID stored in `forward_ref`.
+/// Returns `Ok(true)` if an adapter handled the edit, `Ok(false)` if no adapter
+/// matched, and `Err` if the adapter's edit call failed.
 pub async fn update_forward_card(
     card: ForwardCard,
     message_id: &str,
     admin_channel: &str,
     adapters: &[Arc<dyn ChannelAdapter>],
-) {
+) -> Result<bool> {
     let (platform, channel_id) = match parse_admin_channel(admin_channel) {
         Some(pc) => pc,
-        None => return,
+        None => {
+            warn!(admin_channel, "update_forward_card: invalid admin_channel");
+            return Ok(false);
+        }
     };
     for adapter in adapters {
         if adapter.platform_name() == platform {
-            if let Err(e) = adapter.update_social_card(&channel_id, message_id, &card).await {
-                warn!(error = %e, "update_forward_card: failed to edit card");
-            }
-            return;
+            adapter.update_social_card(&channel_id, message_id, &card).await?;
+            return Ok(true);
         }
     }
+    warn!(platform = %platform, "update_forward_card: no adapter matched");
+    Ok(false)
 }
 
 // ── Button helpers ────────────────────────────────────────────────────────────

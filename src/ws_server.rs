@@ -1579,9 +1579,12 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
         if !admin_channel.is_empty() {
             let base = crate::social::forward::build_social_draft_card(&draft);
             let publishing = crate::social::forward::build_publishing_card(&base);
-            crate::social::forward::update_forward_card(
+            if let Err(e) = crate::social::forward::update_forward_card(
                 publishing, fwd_ref, &admin_channel, &gw.adapters_list,
-            ).await;
+            ).await {
+                warn!(id, msg_ref = %fwd_ref, error = %e,
+                    "ws social.draft.approve: publishing card update failed");
+            }
         }
     }
 
@@ -1594,9 +1597,12 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
                 if !admin_channel.is_empty() {
                     let base = crate::social::forward::build_social_draft_card(&draft);
                     let resolved = crate::social::forward::build_resolved_card(&base, "已發送");
-                    crate::social::forward::update_forward_card(
+                    if let Err(e) = crate::social::forward::update_forward_card(
                         resolved, fwd_ref, &admin_channel, &gw.adapters_list,
-                    ).await;
+                    ).await {
+                        warn!(id, msg_ref = %fwd_ref, error = %e,
+                            "ws social.draft.approve: resolved card update failed");
+                    }
                 }
             }
             WsResponse::ok(req.id, json!({ "status": "sent", "reply_id": reply_id }))
@@ -1608,9 +1614,12 @@ async fn handle_social_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -
                 if !admin_channel.is_empty() {
                     let base = crate::social::forward::build_social_draft_card(&draft);
                     let failed = crate::social::forward::build_failed_card(&base, "發送失敗，點擊重試");
-                    crate::social::forward::update_forward_card(
+                    if let Err(uerr) = crate::social::forward::update_forward_card(
                         failed, fwd_ref, &admin_channel, &gw.adapters_list,
-                    ).await;
+                    ).await {
+                        warn!(id, msg_ref = %fwd_ref, error = %uerr,
+                            "ws social.draft.approve: failed-card update failed");
+                    }
                 }
             }
             WsResponse::err(req.id, -1, format!("publish failed: {}", e))
@@ -1649,9 +1658,12 @@ async fn handle_social_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -
         if !admin_channel.is_empty() {
             let base = crate::social::forward::build_social_draft_card(&draft);
             let resolved = crate::social::forward::build_resolved_card(&base, "已捨棄");
-            crate::social::forward::update_forward_card(
+            if let Err(e) = crate::social::forward::update_forward_card(
                 resolved, fwd_ref, &admin_channel, &gw.adapters_list,
-            ).await;
+            ).await {
+                warn!(id, msg_ref = %fwd_ref, error = %e,
+                    "ws social.draft.discard: card update failed");
+            }
         }
     }
 
@@ -1841,11 +1853,18 @@ async fn handle_social_draft_submit(req: &WsRequest, gw: &Arc<GatewayHandle>) ->
             if let Ok(Some(inbox)) = gw.state_db.get_social_inbox_by_platform_id(&draft.platform, rid) {
                 if let Some(fwd_ref) = inbox.forward_ref.clone() {
                     let card = crate::social::forward::build_social_draft_card(&draft);
-                    crate::social::forward::update_forward_card(
+                    match crate::social::forward::update_forward_card(
                         card, &fwd_ref, &admin_channel, &gw.adapters_list,
-                    ).await;
-                    let _ = gw.state_db.update_social_draft_forward_ref(draft.id, &fwd_ref);
-                    reused = true;
+                    ).await {
+                        Ok(_) => {
+                            let _ = gw.state_db.update_social_draft_forward_ref(draft.id, &fwd_ref);
+                            reused = true;
+                        }
+                        Err(e) => {
+                            warn!(draft_id = draft.id, msg_ref = %fwd_ref, error = %e,
+                                "submit_for_approval: failed to reuse inbox card, falling back to new card");
+                        }
+                    }
                 }
             }
         }
