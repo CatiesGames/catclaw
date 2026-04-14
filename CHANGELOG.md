@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.38.1](https://github.com/CatiesGames/catclaw/compare/v0.38.0...v0.38.1) (2026-04-14)
+
+
+### Bug Fixes
+
+* **social:** 修復 Discord 草稿捨棄無反應 + 結構化錯誤診斷 ([819ac1d](https://github.com/CatiesGames/catclaw/commit/819ac1d04268a3e94082d21a97d92c39db478654))
+
 ## [0.38.0](https://github.com/CatiesGames/catclaw/compare/v0.37.3...v0.38.0) (2026-04-13)
 
 
