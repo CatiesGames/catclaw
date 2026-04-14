@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.1](https://github.com/CatiesGames/catclaw/compare/v0.40.0...v0.40.1) (2026-04-14)
+
+
+### Bug Fixes
+
+* don't crash gateway when backend adapter config is missing ([3bdc034](https://github.com/CatiesGames/catclaw/commit/3bdc034b852bec4e0a6dc31a3b620d3104900a8f))
+
 ## [0.40.0](https://github.com/CatiesGames/catclaw/compare/v0.39.0...v0.40.0) (2026-04-14)
 
 
