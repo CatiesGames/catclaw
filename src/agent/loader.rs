@@ -1616,7 +1616,7 @@ catclaw channel list           # List configured channel adapters
 catclaw channel add discord --token-env DISCORD_TOKEN --guilds "123,456" --activation mention
 catclaw channel add telegram --token-env TELEGRAM_TOKEN
 catclaw channel add slack --token-env SLACK_BOT_TOKEN --app-token-env SLACK_APP_TOKEN
-catclaw channel add backend --token-env BACKEND_SHARED_SECRET
+catclaw channel add backend --token-env "my-shared-secret"
 ```
 
 `--activation`: `mention` (respond only when @mentioned) or `all` (respond to everything)
@@ -1628,9 +1628,9 @@ The backend channel allows external servers (web apps, mobile backends, etc.) to
 **Endpoint:** `ws://<gateway>:<port>/ws/backend` (separate from the TUI `/ws` endpoint)
 
 **Setup:**
-1. Set a shared secret env var (e.g. `export BACKEND_SHARED_SECRET=my-secret-token`)
-2. Add the channel: `catclaw channel add backend --token-env BACKEND_SHARED_SECRET`
-3. Bind a tenant to an agent: `catclaw bind "backend:channel:<tenant_id>" <agent>`
+1. Add the channel with a shared secret: `catclaw channel add backend --token-env "my-secret-token"`
+   (The `--token-env` value is used directly as the secret. If it matches an env var name, that env var's value is used instead.)
+2. Bind a tenant to an agent: `catclaw bind "backend:channel:<tenant_id>" <agent>`
 
 **Protocol (JSON over WebSocket):**
 
