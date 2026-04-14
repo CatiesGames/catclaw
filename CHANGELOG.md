@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.0](https://github.com/CatiesGames/catclaw/compare/v0.39.0...v0.40.0) (2026-04-14)
+
+
+### Features
+
+* **channel:** add backend channel adapter for multi-tenant agent routing ([e56f997](https://github.com/CatiesGames/catclaw/commit/e56f997df745bca40873ba07b36e5490ce2bcc70))
+
 ## [0.39.0](https://github.com/CatiesGames/catclaw/compare/v0.38.1...v0.39.0) (2026-04-14)
 
 
