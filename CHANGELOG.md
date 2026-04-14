@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.2](https://github.com/CatiesGames/catclaw/compare/v0.40.1...v0.40.2) (2026-04-14)
+
+
+### Bug Fixes
+
+* backend adapter token_env supports direct secret value ([e351152](https://github.com/CatiesGames/catclaw/commit/e3511520f7cb91774d29a09af252c63adf84dc43))
+
 ## [0.40.1](https://github.com/CatiesGames/catclaw/compare/v0.40.0...v0.40.1) (2026-04-14)
 
 
