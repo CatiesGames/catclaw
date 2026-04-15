@@ -1142,10 +1142,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                     Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
                                 }
                             } else {
+                                // Gateway offline — write to toml + .env directly
                                 let mut config = config;
-                                config.env.insert(key.clone(), value);
+                                config.env.insert(key.clone(), value.clone());
                                 config.save(&cli.config)?;
-                                println!("Set {} (saved to file)", key);
+                                write_dotenv_file(&key, &value);
+                                println!("Set {} (saved to toml + .env)", key);
                             }
                         }
                         EnvCommands::Remove { key } => {
@@ -1159,7 +1161,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                                 let mut config = config;
                                 config.env.remove(&key);
                                 config.save(&cli.config)?;
-                                println!("Removed {} (saved to file)", key);
+                                remove_dotenv_file(&key);
+                                println!("Removed {} (saved to toml + .env)", key);
                             }
                         }
                     }
@@ -3517,4 +3520,49 @@ fn cmd_memory_remigrate(state_db: &state::StateDb) {
     println!("  - {} embeddings deleted", deleted_embeddings);
     println!("  - migration marker removed");
     println!("\nRestart gateway to re-run migration with improved parser.");
+}
+
+/// Write a key=value pair to ~/.catclaw/.env (create or update).
+fn write_dotenv_file(key: &str, value: &str) {
+    let env_path = dotenv_file_path();
+    let mut lines: Vec<String> = if env_path.exists() {
+        std::fs::read_to_string(&env_path)
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let prefix = format!("{}=", key);
+    if let Some(pos) = lines.iter().position(|l| l.starts_with(&prefix)) {
+        lines[pos] = format!("{}={}", key, value);
+    } else {
+        lines.push(format!("{}={}", key, value));
+    }
+    if let Some(parent) = env_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&env_path, lines.join("\n") + "\n");
+}
+
+/// Remove a key from ~/.catclaw/.env.
+fn remove_dotenv_file(key: &str) {
+    let env_path = dotenv_file_path();
+    if !env_path.exists() {
+        return;
+    }
+    let prefix = format!("{}=", key);
+    let lines: Vec<String> = std::fs::read_to_string(&env_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.starts_with(&prefix))
+        .map(String::from)
+        .collect();
+    let _ = std::fs::write(&env_path, lines.join("\n") + "\n");
+}
+
+fn dotenv_file_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".catclaw").join(".env")
 }

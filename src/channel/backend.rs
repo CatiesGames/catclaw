@@ -161,14 +161,19 @@ pub struct BackendAdapter {
 
 impl BackendAdapter {
     /// Create a BackendAdapter from channel config.
-    /// `token_env` is used directly as the shared secret value.
+    /// `token_env` is the env var name holding the shared secret.
     pub fn from_config(config: &crate::config::ChannelConfig) -> Result<Self> {
         if config.token_env.is_empty() {
             return Err(CatClawError::Config(
-                "backend adapter: token_env (shared secret) not set".into(),
+                "backend adapter: token_env not set".into(),
             ));
         }
-        let secret = config.token_env.clone();
+        let secret = std::env::var(&config.token_env).map_err(|_| {
+            CatClawError::Config(format!(
+                "backend adapter: env var '{}' not set (use: catclaw config env set {} <value>)",
+                config.token_env, config.token_env
+            ))
+        })?;
         Ok(Self {
             secret,
             connections: Arc::new(RwLock::new(HashMap::new())),

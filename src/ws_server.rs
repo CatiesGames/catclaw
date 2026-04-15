@@ -1210,10 +1210,11 @@ fn handle_env_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         None => return WsResponse::err(req.id, -32602, "missing param: value"),
     };
 
+    // 1. Write to catclaw.toml [env] section (for subprocess injection)
     let serialized = {
         let config = gw.config.read().unwrap();
         let mut full = config.clone();
-        full.env.insert(key.clone(), value);
+        full.env.insert(key.clone(), value.clone());
         match toml::to_string_pretty(&full) {
             Ok(s) => s,
             Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
@@ -1231,7 +1232,13 @@ fn handle_env_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         }
     }
 
-    info!(key = %key, "env set");
+    // 2. Write to ~/.catclaw/.env (so gateway process can read via std::env::var)
+    write_dotenv(&key, &value);
+
+    // 3. Set in current process env (immediate effect without restart)
+    std::env::set_var(&key, &value);
+
+    info!(key = %key, "env set (toml + .env + process)");
     WsResponse::ok(req.id, json!({"key": key}))
 }
 
@@ -1262,8 +1269,62 @@ fn handle_env_remove(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         }
     }
 
-    info!(key = %key, "env removed");
+    // Remove from .env and process env
+    remove_dotenv(&key);
+    std::env::remove_var(&key);
+
+    info!(key = %key, "env removed (toml + .env + process)");
     WsResponse::ok(req.id, json!({"key": key}))
+}
+
+/// Write a key=value pair to ~/.catclaw/.env (create or update).
+fn write_dotenv(key: &str, value: &str) {
+    let env_path = dotenv_path();
+    let mut lines: Vec<String> = if env_path.exists() {
+        std::fs::read_to_string(&env_path)
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let prefix = format!("{}=", key);
+    if let Some(pos) = lines.iter().position(|l| l.starts_with(&prefix)) {
+        lines[pos] = format!("{}={}", key, value);
+    } else {
+        lines.push(format!("{}={}", key, value));
+    }
+    if let Some(parent) = env_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&env_path, lines.join("\n") + "\n") {
+        warn!(error = %e, "failed to write .env");
+    }
+}
+
+/// Remove a key from ~/.catclaw/.env.
+fn remove_dotenv(key: &str) {
+    let env_path = dotenv_path();
+    if !env_path.exists() {
+        return;
+    }
+    let prefix = format!("{}=", key);
+    let lines: Vec<String> = std::fs::read_to_string(&env_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.starts_with(&prefix))
+        .map(String::from)
+        .collect();
+    if let Err(e) = std::fs::write(&env_path, lines.join("\n") + "\n") {
+        warn!(error = %e, "failed to write .env");
+    }
+}
+
+/// Path to ~/.catclaw/.env
+fn dotenv_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".catclaw").join(".env")
 }
 
 // ── MCP Tools handler ──
