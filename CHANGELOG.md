@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.5](https://github.com/CatiesGames/catclaw/compare/v0.40.4...v0.40.5) (2026-04-15)
+
+
+### Bug Fixes
+
+* config env set/remove now writes to .env + process env ([ef3175d](https://github.com/CatiesGames/catclaw/commit/ef3175d3c806ad3ce0cc8c6ee80ffb93e139a5a8))
+
 ## [0.40.4](https://github.com/CatiesGames/catclaw/compare/v0.40.3...v0.40.4) (2026-04-15)
 
 
