@@ -314,7 +314,6 @@ impl StateDb {
                 action        TEXT,
                 draft         TEXT,
                 reply_id      TEXT,
-                session_key   TEXT,
                 forward_ref   TEXT,
                 metadata      TEXT,
                 created_at    TEXT NOT NULL,
@@ -803,13 +802,13 @@ impl StateDb {
         let affected = conn.execute(
             "INSERT OR IGNORE INTO social_inbox
              (platform, platform_id, event_type, author_id, author_name, media_id, text,
-              status, action, draft, reply_id, session_key, forward_ref, metadata, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+              status, action, draft, reply_id, forward_ref, metadata, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 row.platform, row.platform_id, row.event_type,
                 row.author_id, row.author_name, row.media_id, row.text,
                 row.status, row.action, row.draft, row.reply_id,
-                row.session_key, row.forward_ref, row.metadata,
+                row.forward_ref, row.metadata,
                 row.created_at, row.updated_at,
             ],
         )?;
@@ -820,7 +819,7 @@ impl StateDb {
         let conn = self.conn.lock().unwrap();
         let row = conn.query_row(
             "SELECT id,platform,platform_id,event_type,author_id,author_name,media_id,text,
-                    status,action,draft,reply_id,session_key,forward_ref,metadata,created_at,updated_at
+                    status,action,draft,reply_id,forward_ref,metadata,created_at,updated_at
              FROM social_inbox WHERE platform=?1 AND platform_id=?2",
             params![platform, platform_id],
             social_inbox_row_mapper,
@@ -832,7 +831,7 @@ impl StateDb {
         let conn = self.conn.lock().unwrap();
         let row = conn.query_row(
             "SELECT id,platform,platform_id,event_type,author_id,author_name,media_id,text,
-                    status,action,draft,reply_id,session_key,forward_ref,metadata,created_at,updated_at
+                    status,action,draft,reply_id,forward_ref,metadata,created_at,updated_at
              FROM social_inbox WHERE id=?1",
             params![id],
             social_inbox_row_mapper,
@@ -841,7 +840,7 @@ impl StateDb {
     }
 
     pub fn list_social_inbox(&self, platform_filter: Option<&str>, status_filter: Option<&str>, limit: i64) -> Result<Vec<SocialInboxRow>> {
-        const COLS: &str = "id,platform,platform_id,event_type,author_id,author_name,media_id,text,status,action,draft,reply_id,session_key,forward_ref,metadata,created_at,updated_at";
+        const COLS: &str = "id,platform,platform_id,event_type,author_id,author_name,media_id,text,status,action,draft,reply_id,forward_ref,metadata,created_at,updated_at";
         let conn = self.conn.lock().unwrap();
         let rows: Vec<SocialInboxRow> = match (platform_filter, status_filter) {
             (Some(p), Some(s)) => {
@@ -878,13 +877,13 @@ impl StateDb {
         Ok(())
     }
 
-    /// Reset an inbox item for reprocessing: clear draft/reply/forward/session and set status=pending.
+    /// Reset an inbox item for reprocessing: clear draft/reply/forward and set status=pending.
     pub fn reset_social_inbox_for_reprocess(&self, id: i64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE social_inbox SET status='pending', action=NULL, draft=NULL, reply_id=NULL, \
-             session_key=NULL, forward_ref=NULL, updated_at=?1 WHERE id=?2",
+             forward_ref=NULL, updated_at=?1 WHERE id=?2",
             params![now, id],
         )?;
         Ok(())
@@ -916,16 +915,6 @@ impl StateDb {
         conn.execute(
             "UPDATE social_inbox SET reply_id=?1, status='sent', updated_at=?2 WHERE id=?3",
             params![reply_id, now, id],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_social_inbox_session(&self, id: i64, session_key: &str) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE social_inbox SET session_key=?1, status='auto_replying', updated_at=?2 WHERE id=?3",
-            params![session_key, now, id],
         )?;
         Ok(())
     }
@@ -1098,8 +1087,15 @@ impl StateDb {
         const COLS: &str = "id,platform,draft_type,content,media_url,reply_to_id,original_text,\
                             original_author,status,reply_id,forward_ref,agent_id,session_key,\
                             metadata,created_at,updated_at";
-        // Reuse any non-terminal draft for the same target so retries / re-approvals
-        // do not leave zombie rows. Terminal statuses (sent, ignored) are excluded.
+        // Reuse rules:
+        //   reply / dm — have a precise alignment key (reply_to_id), so reuse any
+        //                non-terminal draft for that target (retries + re-approvals
+        //                should land on the same row).
+        //   post / carousel — no alignment key, multiple concurrent posts share the
+        //                same (platform, draft_type). Only reuse 'failed' rows so a
+        //                retry from a failed card still goes through, without letting
+        //                a new unrelated post overwrite a pending awaiting_approval
+        //                draft from a different task.
         let conn = self.conn.lock().unwrap();
         let row = if let Some(rid) = reply_to_id {
             conn.query_row(
@@ -1109,7 +1105,7 @@ impl StateDb {
             ).optional()?
         } else {
             conn.query_row(
-                &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND status IN ('draft','awaiting_approval','failed') ORDER BY created_at DESC LIMIT 1"),
+                &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND status='failed' ORDER BY created_at DESC LIMIT 1"),
                 params![platform, draft_type],
                 social_draft_row_mapper,
             ).optional()?
@@ -1202,7 +1198,6 @@ pub struct SocialInboxRow {
     pub action: Option<String>,
     pub draft: Option<String>,
     pub reply_id: Option<String>,
-    pub session_key: Option<String>,
     pub forward_ref: Option<String>,
     pub metadata: Option<String>,
     pub created_at: String,
@@ -1225,7 +1220,6 @@ impl SocialInboxRow {
             action: None,
             draft: None,
             reply_id: None,
-            session_key: None,
             forward_ref: None,
             metadata: None,
             created_at: now.clone(),
@@ -1248,11 +1242,10 @@ fn social_inbox_row_mapper(row: &rusqlite::Row) -> rusqlite::Result<SocialInboxR
         action: row.get(9)?,
         draft: row.get(10)?,
         reply_id: row.get(11)?,
-        session_key: row.get(12)?,
-        forward_ref: row.get(13)?,
-        metadata: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        forward_ref: row.get(12)?,
+        metadata: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
 

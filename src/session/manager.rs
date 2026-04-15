@@ -364,6 +364,43 @@ impl SessionManager {
         Ok(response)
     }
 
+    /// Run claude one-shot without creating a persistent session row.
+    ///
+    /// Used for transient tasks (e.g. social AI auto-reply) where the whole
+    /// execution is a single prompt → single tool call pattern and no resume,
+    /// transcript, or diary is wanted. The `hook_session_key` is passed through
+    /// to the PreToolUse hook so approval rules still resolve the right agent,
+    /// but nothing is inserted into the `sessions` table.
+    ///
+    /// Acquires the global concurrency permit so ephemeral calls queue behind
+    /// regular sessions instead of overwhelming the claude subprocess pool.
+    pub async fn ephemeral_run(
+        &self,
+        agent: &Agent,
+        prompt: &str,
+        hook_session_key: &str,
+        priority: Priority,
+    ) -> Result<String> {
+        let mcp_env = self.mcp_env();
+        let subprocess_env = self.subprocess_env();
+
+        let _permit = self.queue.acquire(priority).await;
+
+        let session_id = Uuid::new_v4().to_string();
+        let args = agent.claude_args_with_mcp(
+            &session_id,
+            None,
+            self.mcp_port,
+            Some(hook_session_key),
+            self.config_path.as_deref(),
+            &mcp_env,
+            Some(&self.state_db),
+        );
+
+        let mut handle = ClaudeHandle::spawn_with_prompt(args, prompt, &subprocess_env).await?;
+        handle.wait_for_result(None).await
+    }
+
     /// Send a message to a session with streaming events.
     /// Returns a receiver of SessionEvent for incremental updates.
     /// Used by TUI/WebUI streaming mode only.

@@ -9,8 +9,8 @@ pub mod forward;
 use std::collections::HashMap;
 use crate::agent::AgentRegistry;
 use crate::config::{InstagramConfig, SocialRule, ThreadsConfig};
-use crate::session::manager::{SenderInfo, SessionManager};
-use crate::session::{Priority, SessionKey};
+use crate::session::manager::SessionManager;
+use crate::session::Priority;
 use crate::state::{SocialInboxRow, StateDb};
 use crate::error::Result;
 use std::sync::Arc;
@@ -513,7 +513,7 @@ async fn execute_auto_reply(
     let reply_to_id = &item.platform_id;
 
     // Mark as auto_replying.
-    db.update_social_inbox_session(inbox_id, &format!("social:{}", inbox_id))?;
+    db.update_social_inbox_status(inbox_id, "auto_replying")?;
 
     // Build system prompt: guide agent to call the publish tool (which auto-stages a draft).
     let system_prompt = format!(
@@ -550,19 +550,16 @@ async fn execute_auto_reply(
         }
     };
 
-    let key = SessionKey::new(agent_id.clone(), "social", format!("{}", inbox_id));
-    let sender = SenderInfo {
-        sender_id: None,
-        sender_name: None,
-        channel_id: Some(admin_channel.clone()),
-        thread_id: None,
-    };
+    // Synthetic hook session_key so the PreToolUse hook can resolve the agent's
+    // approval rules. Nothing is inserted into the sessions table — this string
+    // only travels through the hook's --session-key argument and is parsed there.
+    let hook_session_key = format!("catclaw:{}:social:{}", agent_id, inbox_id);
 
-    info!(inbox_id, agent_id = %agent_id, "social auto_reply: spawning session");
-    // Cap session time so hanging agents don't accumulate tasks indefinitely.
+    info!(inbox_id, agent_id = %agent_id, "social auto_reply: running ephemeral claude");
+    // Cap execution time so hanging agents don't accumulate tasks indefinitely.
     let session_result = tokio::time::timeout(
         std::time::Duration::from_secs(300), // 5-minute hard cap
-        session_manager.send_and_wait(&key, &agent, &system_prompt, Priority::Channel, &sender, None, None),
+        session_manager.ephemeral_run(&agent, &system_prompt, &hook_session_key, Priority::Channel),
     ).await;
     // Helper: restore the forward card to its original state (with buttons) on failure.
     let restore_card = |db: &Arc<StateDb>, adapters: &Arc<Vec<Arc<dyn crate::channel::ChannelAdapter>>>, admin_channel: &str| {
@@ -582,11 +579,19 @@ async fn execute_auto_reply(
         }
     };
 
-    if session_result.is_err() {
-        warn!(inbox_id, "social auto_reply: session timed out after 5 minutes");
-        db.update_social_inbox_status(inbox_id, "forwarded")?;
-        restore_card(&db, &adapters, &admin_channel).await;
-        return Ok(());
+    match session_result {
+        Err(_) => {
+            warn!(inbox_id, "social auto_reply: ephemeral run timed out after 5 minutes");
+            db.update_social_inbox_status(inbox_id, "forwarded")?;
+            restore_card(&db, &adapters, &admin_channel).await;
+            return Ok(());
+        }
+        Ok(Err(e)) => {
+            warn!(inbox_id, error = %e, "social auto_reply: ephemeral run failed");
+            // Fall through — check below if the agent managed to stage a draft
+            // before failing (e.g. hook denied after successful tool call).
+        }
+        Ok(Ok(_)) => {}
     }
 
     // After session ends, check for staged drafts.
