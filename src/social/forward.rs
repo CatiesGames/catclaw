@@ -20,11 +20,11 @@
 use crate::channel::ChannelAdapter;
 use crate::config::parse_admin_channel;
 use crate::error::{CatClawError, Result};
-use crate::state::{SocialDraftRow, SocialInboxRow};
+use crate::state::{SocialDraftRow, SocialInboxRow, StateDb};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{error, warn};
 
 // ── Forward card ──────────────────────────────────────────────────────────────
 
@@ -496,6 +496,102 @@ pub async fn update_forward_card(
     }
     warn!(platform = %platform, "update_forward_card: no adapter matched");
     Ok(false)
+}
+
+/// Self-healing inbox card restore: guarantees that after this call the inbox
+/// item has a live card with action buttons in `admin_channel`, or returns an
+/// error that callers can surface to the admin.
+///
+/// Tries `update_forward_card` on the existing `forward_ref` first (cheap path).
+/// If editing fails (message too old, rate limit, deleted, etc.) it falls back
+/// to sending a brand new card and updates `social_inbox.forward_ref` so future
+/// edits target the new message.
+///
+/// Callers that want to enrich the card (e.g. attach parent post text) should
+/// use `ensure_inbox_card_restored_with`.
+pub async fn ensure_inbox_card_restored(
+    inbox: &SocialInboxRow,
+    admin_channel: &str,
+    adapters: &[Arc<dyn ChannelAdapter>],
+    db: &StateDb,
+) -> Result<()> {
+    ensure_inbox_card_restored_with(inbox, build_forward_card(inbox), admin_channel, adapters, db)
+        .await
+}
+
+/// Variant that lets the caller supply a pre-built card (e.g. with
+/// `original_text` enrichment). Other semantics match `ensure_inbox_card_restored`.
+pub async fn ensure_inbox_card_restored_with(
+    inbox: &SocialInboxRow,
+    card: ForwardCard,
+    admin_channel: &str,
+    adapters: &[Arc<dyn ChannelAdapter>],
+    db: &StateDb,
+) -> Result<()> {
+    if admin_channel.is_empty() {
+        return Err(CatClawError::Social(
+            "admin_channel is empty, cannot restore inbox card".to_string(),
+        ));
+    }
+
+    if let Some(ref fwd_ref) = inbox.forward_ref {
+        match update_forward_card(card.clone(), fwd_ref, admin_channel, adapters).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                warn!(inbox_id = inbox.id, msg_ref = %fwd_ref,
+                    "ensure_inbox_card_restored: no adapter handled edit, falling back to new card");
+            }
+            Err(e) => {
+                warn!(inbox_id = inbox.id, msg_ref = %fwd_ref, error = %e,
+                    "ensure_inbox_card_restored: edit failed, falling back to new card");
+            }
+        }
+    }
+
+    match send_forward_card(card, admin_channel, adapters).await? {
+        Some(msg_ref) => {
+            if let Err(e) = db.update_social_inbox_forward_ref(inbox.id, &msg_ref) {
+                error!(inbox_id = inbox.id, error = %e,
+                    "ensure_inbox_card_restored: sent new card but failed to persist forward_ref");
+            }
+            Ok(())
+        }
+        None => Err(CatClawError::Social(format!(
+            "no adapter handled send for admin_channel '{}'",
+            admin_channel
+        ))),
+    }
+}
+
+/// Best-effort admin alert. Sends a plain notification message to
+/// `admin_channel` when something has gone wrong that the human needs to see.
+/// Failures here are logged and swallowed — the caller already has an error.
+pub async fn notify_admin(
+    admin_channel: &str,
+    text: &str,
+    adapters: &[Arc<dyn ChannelAdapter>],
+) {
+    let Some((platform, channel_id)) = parse_admin_channel(admin_channel) else {
+        warn!(admin_channel, "notify_admin: invalid admin_channel");
+        return;
+    };
+    for adapter in adapters {
+        if adapter.platform_name() == platform {
+            let msg = crate::channel::OutboundMessage {
+                channel_type: crate::channel::ChannelType::Tui,
+                channel_id: channel_id.clone(),
+                peer_id: String::new(),
+                text: text.to_string(),
+                thread_id: None,
+                reply_to_message_id: None,
+            };
+            if let Err(e) = adapter.send(msg).await {
+                warn!(admin_channel, error = %e, "notify_admin: send failed");
+            }
+            return;
+        }
+    }
+    warn!(admin_channel, "notify_admin: no adapter matched");
 }
 
 // ── Button helpers ────────────────────────────────────────────────────────────

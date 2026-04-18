@@ -498,6 +498,13 @@ enum SocialCommands {
         /// Mode: webhook | polling | off
         mode: String,
     },
+    /// Reprocess an inbox item — resets draft state, restores card with buttons,
+    /// and re-runs the action router. Use when a card got stuck in a resolved
+    /// state without buttons (e.g. after a failed edit).
+    Reprocess {
+        /// social_inbox.id
+        id: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1591,6 +1598,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         _ => eprintln!("Unknown platform '{}'. Use: instagram | threads", platform),
+                    }
+                }
+                SocialCommands::Reprocess { id } => {
+                    let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+                    match crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await {
+                        Ok((client, _rx)) => {
+                            match client.request("social.inbox.reprocess", serde_json::json!({"id": id})).await {
+                                Ok(_) => println!("Reprocess queued for inbox id {}. A fresh card should appear in admin_channel shortly.", id),
+                                Err(e) => eprintln!("Reprocess failed: {}", e),
+                            }
+                        }
+                        Err(e) => eprintln!("Cannot connect to gateway at {}: {}", ws_url, e),
                     }
                 }
             }

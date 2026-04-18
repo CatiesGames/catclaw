@@ -1730,7 +1730,11 @@ catclaw social poll instagram                     # Trigger a manual poll now
 catclaw social poll threads
 catclaw social mode instagram webhook             # Switch mode (webhook/polling/off)
 catclaw social mode threads polling
+catclaw social reprocess <id>                     # Reset inbox item + restore card with buttons
+                                                   # (use when a card lost its buttons / got stuck)
 ```
+
+TUI 對等操作：Social Inbox panel (`Alt+9`) 選中該 row 後按 `r`。Discord 也可用 `/social-reprocess id:<id>` slash command。
 
 ### Issue Tracking
 

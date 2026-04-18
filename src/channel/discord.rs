@@ -238,6 +238,16 @@ impl EventHandler for Handler {
         let commands = vec![
             CreateCommand::new("stop").description("Stop the current session"),
             CreateCommand::new("new").description("Start a new session (archives current)"),
+            CreateCommand::new("social-reprocess")
+                .description("Reprocess a social inbox item (restores card with buttons)")
+                .add_option(
+                    serenity::all::CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "id",
+                        "social_inbox.id",
+                    )
+                    .required(true),
+                ),
         ];
         for attempt in 1..=3 {
             match Command::set_global_commands(&ctx.http, commands.clone()).await {
@@ -261,6 +271,63 @@ impl EventHandler for Handler {
         match interaction {
             Interaction::Command(cmd) => {
                 let name = cmd.data.name.as_str();
+                if name == "social-reprocess" {
+                    // Guild/sender filter (same as other slash commands)
+                    {
+                        let filter = self.filter.read().unwrap();
+                        if let Some(guild_id) = cmd.guild_id {
+                            if !filter.guilds.is_empty()
+                                && !filter.guilds.contains(&guild_id.get())
+                            {
+                                return;
+                            }
+                        }
+                        let is_dm = cmd.guild_id.is_none();
+                        let sender_id = cmd.user.id.get().to_string();
+                        if !filter.is_sender_allowed(is_dm, &sender_id) {
+                            return;
+                        }
+                    }
+                    let id_opt = cmd
+                        .data
+                        .options
+                        .iter()
+                        .find(|o| o.name == "id")
+                        .and_then(|o| match &o.value {
+                            serenity::all::CommandDataOptionValue::Integer(n) => Some(*n),
+                            _ => None,
+                        });
+                    let Some(inbox_id) = id_opt else {
+                        let _ = cmd
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("missing `id`")
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    };
+                    let _ = cmd
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content(format!(
+                                        "reprocessing inbox id {} — a fresh card should appear shortly.",
+                                        inbox_id
+                                    ))
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    let _ = self
+                        .social_action_tx
+                        .send((inbox_id, "reprocess".to_string(), None));
+                    return;
+                }
                 if name == "stop" || name == "new" {
                     // Check guild filter and sender policy (same checks as message handler)
                     {

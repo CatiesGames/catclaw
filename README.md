@@ -484,7 +484,11 @@ catclaw social inbox --platform instagram         # Filter by platform
 catclaw social inbox --status pending             # Filter by status
 catclaw social poll instagram                     # Trigger manual poll
 catclaw social mode instagram polling             # Switch mode (hot-reload)
+catclaw social reprocess <id>                     # Reset inbox item, restore card with buttons,
+                                                   # re-run the action router (recovery tool for stuck cards)
 ```
+
+Discord also exposes `/social-reprocess id:<id>` as a slash command for the same purpose.
 
 ### TUI
 

@@ -597,6 +597,90 @@ async fn handle_social_button_action(
 ) {
     use crate::social::{dispatch_action, forward, ResolvedAction, SocialItem, SocialPlatform};
 
+    // ── Reprocess (from Discord /social-reprocess or any adapter reprocess button) ──
+    // Resets draft/reply state, then re-runs the action router. The router's
+    // Forward arm uses ensure_inbox_card_restored_with() which reuses or resends
+    // the card as needed — no separate restore call here.
+    if action == "reprocess" {
+        let row = match db.get_social_inbox(card_id) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                warn!(card_id, "social reprocess: inbox item not found");
+                return;
+            }
+            Err(e) => {
+                error!(card_id, error = %e, "social reprocess: db error");
+                return;
+            }
+        };
+        if let Err(e) = db.reset_social_inbox_for_reprocess(card_id) {
+            error!(card_id, error = %e, "social reprocess: reset failed");
+            return;
+        }
+        let row = match db.get_social_inbox(card_id) {
+            Ok(Some(r)) => r,
+            _ => row,
+        };
+        let platform = match row.platform.as_str() {
+            "instagram" => SocialPlatform::Instagram,
+            "threads" => SocialPlatform::Threads,
+            p => {
+                warn!(card_id, platform = p, "social reprocess: unknown platform");
+                return;
+            }
+        };
+        let item = SocialItem {
+            platform,
+            platform_id: row.platform_id.clone(),
+            event_type: row.event_type.clone(),
+            author_id: row.author_id.clone(),
+            author_name: row.author_name.clone(),
+            media_id: row.media_id.clone(),
+            text: row.text.clone(),
+            metadata: row
+                .metadata
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(serde_json::json!({})),
+        };
+        let (resolved, admin_channel_opt) = {
+            let cfg = config.read().unwrap();
+            match item.platform {
+                SocialPlatform::Instagram => {
+                    if let Some(ig_cfg) = &cfg.social.instagram {
+                        let (rules, templates, default_agent) =
+                            crate::social::instagram_rule_set(ig_cfg);
+                        let action = crate::social::resolve_action(
+                            &item, rules, templates, default_agent,
+                        );
+                        (action, Some(ig_cfg.admin_channel.clone()))
+                    } else {
+                        (ResolvedAction::Ignore, None)
+                    }
+                }
+                SocialPlatform::Threads => {
+                    if let Some(th_cfg) = &cfg.social.threads {
+                        let (rules, templates, default_agent) =
+                            crate::social::threads_rule_set(th_cfg);
+                        let action = crate::social::resolve_action(
+                            &item, rules, templates, default_agent,
+                        );
+                        (action, Some(th_cfg.admin_channel.clone()))
+                    } else {
+                        (ResolvedAction::Ignore, None)
+                    }
+                }
+            }
+        };
+        if let Some(ch) = admin_channel_opt {
+            dispatch_action(
+                resolved, item, db, config, adapters, session_manager, agent_registry, &ch,
+            )
+            .await;
+        }
+        return;
+    }
+
     // ── Draft button actions (social_draft: prefix → "draft_approve" / "draft_discard") ──
     if action == "draft_approve" || action == "draft_discard" {
         let draft = match db.get_social_draft(card_id) {
@@ -656,24 +740,34 @@ async fn handle_social_button_action(
             // a different action (AI 回覆 / 手動回覆 / 忽略). Otherwise, mark the
             // standalone draft card as resolved 已捨棄.
             let mut restored_inbox_card = false;
+            let mut linked_inbox_id: Option<i64> = None;
             if draft.draft_type == "reply" {
                 if let Some(ref rid) = draft.reply_to_id {
                     if let Ok(Some(inbox)) = db.get_social_inbox_by_platform_id(&draft.platform, rid) {
+                        linked_inbox_id = Some(inbox.id);
                         if inbox.forward_ref.is_some()
                             && inbox.forward_ref == draft.forward_ref
                             && !admin_channel.is_empty()
                         {
-                            let card = forward::build_forward_card(&inbox);
-                            if let Some(ref fwd_ref) = inbox.forward_ref {
-                                if let Err(e) = forward::update_forward_card(card, fwd_ref, &admin_channel, adapters).await {
-                                    warn!(card_id, msg_ref = %fwd_ref, error = %e,
-                                        "draft_discard: failed to restore inbox card");
+                            match forward::ensure_inbox_card_restored(
+                                &inbox, &admin_channel, adapters, db,
+                            ).await {
+                                Ok(()) => {
+                                    restored_inbox_card = true;
+                                }
+                                Err(e) => {
+                                    error!(card_id, inbox_id = inbox.id, error = %e,
+                                        "draft_discard: failed to restore inbox card (edit+resend both failed)");
+                                    forward::notify_admin(
+                                        &admin_channel,
+                                        &format!(
+                                            "⚠️ 捨棄草稿後無法恢復 inbox 卡片 (inbox id {}): {}. 請用 TUI 的 reprocess 或重啟 gateway 後重試。",
+                                            inbox.id, e
+                                        ),
+                                        adapters,
+                                    ).await;
                                 }
                             }
-                            // Reset inbox row so it looks unprocessed again. Keep
-                            // forward_ref so the next AI 回覆 reuses the same message.
-                            let _ = db.update_social_inbox_status(inbox.id, "pending");
-                            restored_inbox_card = true;
                         }
                     }
                 }
@@ -682,6 +776,11 @@ async fn handle_social_button_action(
                 let base = forward::build_social_draft_card(&draft);
                 let resolved = forward::build_resolved_card(&base, "已捨棄");
                 try_update_draft_card(resolved).await;
+            }
+            // Always reset the linked inbox row when its draft is discarded, so it
+            // doesn't stay in `draft_ready`/`auto_replying` pointing at a deleted draft.
+            if let Some(inbox_id) = linked_inbox_id {
+                let _ = db.update_social_inbox_status(inbox_id, "pending");
             }
             let _ = db.delete_social_draft(card_id);
             return;

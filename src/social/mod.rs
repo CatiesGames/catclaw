@@ -258,33 +258,25 @@ pub async fn dispatch_action(
                 &item.platform_id,
             ) {
                 Ok(Some(row)) => {
-                    let inbox_id = row.id;
+                    let parent_text = if let Some(ref mid) = row.media_id {
+                        crate::gateway::fetch_parent_text_pub(&row.platform, mid, db, config)
+                            .await
+                            .map(|(t, _)| t)
+                            .filter(|t| !t.is_empty())
+                    } else {
+                        None
+                    };
                     let mut card = forward::build_forward_card(&row);
-                    // Fetch parent post text so the card shows what they're replying to
-                    if let Some(ref mid) = row.media_id {
-                        if let Some((parent_text, _)) = crate::gateway::fetch_parent_text_pub(
-                            &row.platform, mid, db, config,
-                        ).await {
-                            if !parent_text.is_empty() {
-                                card.original_text = Some(parent_text);
-                            }
-                        }
-                    }
-                    let adapters_ref: &[Arc<dyn crate::channel::ChannelAdapter>] = adapters;
-                    match forward::send_forward_card(card, admin_channel, adapters_ref).await {
-                        Ok(Some(msg_ref)) => {
-                            let _ = db.update_social_inbox_forward_ref(inbox_id, &msg_ref);
-                        }
-                        Ok(None) => {
-                            let _ = db.set_inbox_status(
-                                &item.platform.to_string(),
-                                &item.platform_id,
-                                "forwarded",
-                            );
-                        }
-                        Err(e) => {
-                            error!(error = %e, "social: failed to send forward card");
-                        }
+                    card.original_text = parent_text;
+                    // If this inbox row already has a forward_ref (reprocess, or earlier
+                    // restore), reuse it; otherwise send a new one. The helper handles
+                    // edit-then-fallback transparently and updates forward_ref on resend,
+                    // so there's no double-send.
+                    if let Err(e) = forward::ensure_inbox_card_restored_with(
+                        &row, card, admin_channel, adapters, db,
+                    ).await {
+                        error!(inbox_id = row.id, error = %e,
+                            "social Forward: card restore/send failed");
                     }
                 }
                 Ok(None) => error!("social: inbox row not found after insert"),
@@ -562,18 +554,24 @@ async fn execute_auto_reply(
         session_manager.ephemeral_run(&agent, &system_prompt, &hook_session_key, Priority::Channel),
     ).await;
     // Helper: restore the forward card to its original state (with buttons) on failure.
+    // Uses ensure_inbox_card_restored so edit failures auto-fallback to sending a new card.
     let restore_card = |db: &Arc<StateDb>, adapters: &Arc<Vec<Arc<dyn crate::channel::ChannelAdapter>>>, admin_channel: &str| {
         let db = db.clone();
         let adapters = adapters.clone();
         let admin_channel = admin_channel.to_string();
         async move {
             if let Ok(Some(r)) = db.get_social_inbox(inbox_id) {
-                if let Some(ref fwd_ref) = r.forward_ref {
-                    let card = forward::build_forward_card(&r);
-                    if let Err(e) = forward::update_forward_card(card, fwd_ref, &admin_channel, &adapters).await {
-                        warn!(inbox_id, msg_ref = %fwd_ref, error = %e,
-                            "auto_reply restore_card: update failed");
-                    }
+                if let Err(e) = forward::ensure_inbox_card_restored(&r, &admin_channel, &adapters, &db).await {
+                    error!(inbox_id, error = %e,
+                        "auto_reply restore_card: edit+resend both failed");
+                    forward::notify_admin(
+                        &admin_channel,
+                        &format!(
+                            "⚠️ AI 回覆流程失敗後無法恢復 inbox 卡片 (inbox id {}): {}. 請用 TUI 的 reprocess。",
+                            inbox_id, e
+                        ),
+                        &adapters,
+                    ).await;
                 }
             }
         }
