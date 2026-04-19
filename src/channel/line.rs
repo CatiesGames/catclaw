@@ -21,8 +21,8 @@ use tokio::sync::{mpsc, Mutex, OnceCell, RwLock};
 use tracing::{debug, info, warn};
 
 use super::{
-    ActionInfo, AdapterFilter, ChannelAdapter, ChannelCapabilities, ChannelType, MsgContext,
-    OutboundMessage, TypingGuard,
+    ActionInfo, AdapterFilter, Attachment, ChannelAdapter, ChannelCapabilities, ChannelType,
+    MsgContext, OutboundMessage, TypingGuard,
 };
 use crate::error::{CatClawError, Result};
 
@@ -122,67 +122,106 @@ impl LineAdapter {
                 .insert(user_id.to_string(), (rt.to_string(), expires));
         }
 
+        let source_type = source.get("type").and_then(|v| v.as_str()).unwrap_or("user");
+        let is_dm = source_type == "user";
+        let channel_id = match source_type {
+            "user" => user_id.to_string(),
+            "group" => source.get("groupId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            "room" => source.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            _ => user_id.to_string(),
+        };
+
+        let sender_name = self
+            .get_display_name(user_id, source_type, &channel_id)
+            .await
+            .unwrap_or_else(|| user_id.to_string());
+
+        let mk_ctx = |text: String, attachments: Vec<Attachment>, message_id: Option<String>| MsgContext {
+            channel_type: channel_type_for_line(),
+            channel_id: channel_id.clone(),
+            peer_id: user_id.to_string(),
+            sender_id: user_id.to_string(),
+            sender_name: sender_name.clone(),
+            text,
+            attachments,
+            reply_to: None,
+            thread_id: None,
+            is_direct_message: is_dm,
+            raw_event: event.clone(),
+            channel_name: Some(format!("line:{}", &channel_id)),
+            guild_id: None,
+            message_id,
+        };
+
         match event_type {
             "message" => {
                 let message = event.get("message")?;
                 let msg_type = message.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if msg_type != "text" {
-                    debug!(msg_type, "line webhook: non-text message (Stage 5)");
-                    return None;
+                let message_id = message.get("id").and_then(|v| v.as_str()).map(String::from);
+                match msg_type {
+                    "text" => {
+                        let text = message
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        Some(mk_ctx(text, vec![], message_id))
+                    }
+                    "image" | "video" | "audio" | "file" => {
+                        let mid = message_id.clone().unwrap_or_default();
+                        let url = format!("{}/message/{}/content", LINE_DATA_API, mid);
+                        let filename = match msg_type {
+                            "image" => format!("{}.jpg", mid),
+                            "video" => format!("{}.mp4", mid),
+                            "audio" => format!("{}.m4a", mid),
+                            "file" => message
+                                .get("fileName")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .unwrap_or_else(|| mid.clone()),
+                            _ => mid.clone(),
+                        };
+                        let size = message.get("fileSize").and_then(|v| v.as_u64());
+                        let auth = format!("Bearer {}", self.token);
+                        let att = Attachment {
+                            filename,
+                            url,
+                            content_type: Some(msg_type.to_string()),
+                            size,
+                            auth_header: Some(auth),
+                        };
+                        Some(mk_ctx(format!("[{}]", msg_type), vec![att], message_id))
+                    }
+                    other => {
+                        debug!(msg_type = other, "line: unsupported message subtype");
+                        None
+                    }
                 }
-                let text = message.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let message_id = message
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                let source_type = source.get("type").and_then(|v| v.as_str()).unwrap_or("user");
-                let is_dm = source_type == "user";
-                let channel_id = match source_type {
-                    "user" => user_id.to_string(),
-                    "group" => source.get("groupId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    "room" => source.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    _ => user_id.to_string(),
-                };
-
-                // Fetch sender display name (best-effort).
-                let sender_name = self
-                    .get_display_name(user_id, source_type, &channel_id)
-                    .await
-                    .unwrap_or_else(|| user_id.to_string());
-
-                Some(MsgContext {
-                    channel_type: ChannelType::Tui, // placeholder — see channel_type_for_line
-                    channel_id: channel_id.clone(),
-                    peer_id: user_id.to_string(),
-                    sender_id: user_id.to_string(),
-                    sender_name,
-                    text,
-                    attachments: vec![],
-                    reply_to: None,
-                    thread_id: None,
-                    is_direct_message: is_dm,
-                    raw_event: event.clone(),
-                    channel_name: Some(format!("line:{}", &channel_id)),
-                    guild_id: None,
-                    message_id,
-                })
-                .map(|mut c| {
-                    c.channel_type = channel_type_for_line();
-                    c
-                })
             }
             "follow" => {
-                info!(user_id, "line follow event");
-                None
+                info!(user_id, "line follow event — surfacing as system text");
+                Some(mk_ctx(
+                    "[LINE follow event] 用戶剛加你為好友。可用 contacts_create + contacts_bind_channel 加為個案。".to_string(),
+                    vec![],
+                    None,
+                ))
             }
             "unfollow" => {
-                info!(user_id, "line unfollow event");
-                None
+                info!(user_id, "line unfollow event — surfacing as system text");
+                Some(mk_ctx(
+                    "[LINE unfollow event] 用戶封鎖或刪除你。".to_string(),
+                    vec![],
+                    None,
+                ))
             }
             "postback" => {
-                debug!(data = ?event.get("postback"), "line postback (Stage 5)");
-                None
+                let data = event
+                    .get("postback")
+                    .and_then(|p| p.get("data"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(mk_ctx(format!("[LINE postback] {}", data), vec![], None))
             }
             other => {
                 debug!(event_type = other, "line: unhandled event type");
@@ -254,6 +293,136 @@ impl LineAdapter {
             )));
         }
         Ok(())
+    }
+
+    /// Send a Flex message either via reply token or push.
+    async fn send_flex(&self, target: &str, alt_text: &str, contents: Value) -> Result<Value> {
+        let body = serde_json::json!({
+            "to": target,
+            "messages": [{
+                "type": "flex",
+                "altText": alt_text,
+                "contents": contents,
+            }]
+        });
+        let resp = self
+            .http
+            .post(format!("{}/message/push", LINE_API))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CatClawError::Channel(format!("line flex push: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let txt = resp.text().await.unwrap_or_default();
+            return Err(CatClawError::Channel(format!(
+                "line flex push failed: {} {}", status, txt
+            )));
+        }
+        Ok(serde_json::json!({"sent": true, "target": target}))
+    }
+
+    async fn show_loading(&self, user_id: &str, seconds: u32) -> Result<Value> {
+        let body = serde_json::json!({
+            "chatId": user_id,
+            "loadingSeconds": seconds.min(60),
+        });
+        let resp = self
+            .http
+            .post(format!("{}/chat/loading/start", LINE_API))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CatClawError::Channel(format!("line loading: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(CatClawError::Channel(format!(
+                "line loading failed: {}", resp.status()
+            )));
+        }
+        Ok(serde_json::json!({"started": true}))
+    }
+
+    async fn line_get(&self, path: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{}{}", LINE_API, path))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| CatClawError::Channel(format!("line GET {path}: {e}")))?;
+        let status = resp.status();
+        let json: Value = resp.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            return Err(CatClawError::Channel(format!(
+                "line GET {path} failed: {} {}", status, json
+            )));
+        }
+        Ok(json)
+    }
+
+    async fn line_post_json(&self, path: &str, body: Value) -> Result<Value> {
+        let resp = self
+            .http
+            .post(format!("{}{}", LINE_API, path))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CatClawError::Channel(format!("line POST {path}: {e}")))?;
+        let status = resp.status();
+        let json: Value = resp.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            return Err(CatClawError::Channel(format!(
+                "line POST {path} failed: {} {}", status, json
+            )));
+        }
+        Ok(json)
+    }
+
+    async fn line_delete(&self, path: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .delete(format!("{}{}", LINE_API, path))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| CatClawError::Channel(format!("line DELETE {path}: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(CatClawError::Channel(format!(
+                "line DELETE {path} failed: {}", resp.status()
+            )));
+        }
+        Ok(serde_json::json!({"deleted": true}))
+    }
+
+    async fn rich_menu_upload_image(&self, menu_id: &str, image_path: &str) -> Result<Value> {
+        let bytes = std::fs::read(image_path)
+            .map_err(|e| CatClawError::Channel(format!("read image '{image_path}': {e}")))?;
+        let content_type = if image_path.to_lowercase().ends_with(".png") {
+            "image/png"
+        } else {
+            "image/jpeg"
+        };
+        let url = format!("https://api-data.line.me/v2/bot/richmenu/{menu_id}/content");
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .header("Content-Type", content_type)
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|e| CatClawError::Channel(format!("line rich menu upload: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let txt = resp.text().await.unwrap_or_default();
+            return Err(CatClawError::Channel(format!(
+                "line rich menu upload failed: {} {}", status, txt
+            )));
+        }
+        Ok(serde_json::json!({"uploaded": true, "menu_id": menu_id}))
     }
 
     async fn push_text(&self, user_id: &str, text: &str) -> Result<()> {
@@ -346,12 +515,222 @@ impl ChannelAdapter for LineAdapter {
     }
 
     fn supported_actions(&self) -> Vec<ActionInfo> {
-        // line_* tools added in Stage 5 (rich menu, profile, quota, flex).
-        vec![]
+        line_actions()
+    }
+
+    async fn execute(&self, action: &str, params: Value) -> Result<Value> {
+        execute_line_action(self, action, params).await
     }
 
     fn platform_name(&self) -> &str {
         "line"
+    }
+}
+
+// ── LINE-specific MCP actions ─────────────────────────────────────────────────
+
+fn line_actions() -> Vec<ActionInfo> {
+    vec![
+        ActionInfo {
+            name: "rich_menu_create".into(),
+            description: "Create a LINE rich menu. Returns menu_id. Use rich_menu_upload_image next \
+                          to attach the background image, then rich_menu_link_user to apply to a user."
+                .into(),
+            params_schema: serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "name":{"type":"string"},
+                    "chat_bar_text":{"type":"string","description":"Text shown on the chat bar (max 14 chars)"},
+                    "size":{"type":"object","properties":{"width":{"type":"integer"},"height":{"type":"integer"}},"description":"Standard sizes: 2500x1686 (full) or 2500x843 (compact)"},
+                    "areas":{"type":"array","description":"Tap area definitions: [{bounds:{x,y,width,height}, action:{type,...}}]"},
+                    "selected":{"type":"boolean","description":"Default visibility (default true)"}
+                },
+                "required":["name","chat_bar_text","size","areas"]
+            }),
+        },
+        ActionInfo {
+            name: "rich_menu_upload_image".into(),
+            description: "Upload background image (JPEG/PNG) for a rich menu. image_path must be an absolute local path.".into(),
+            params_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"menu_id":{"type":"string"},"image_path":{"type":"string"}},
+                "required":["menu_id","image_path"]
+            }),
+        },
+        ActionInfo {
+            name: "rich_menu_list".into(),
+            description: "List all rich menus on this LINE OA.".into(),
+            params_schema: serde_json::json!({"type":"object","properties":{},"required":[]}),
+        },
+        ActionInfo {
+            name: "rich_menu_delete".into(),
+            description: "Delete a rich menu.".into(),
+            params_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"menu_id":{"type":"string"}},
+                "required":["menu_id"]
+            }),
+        },
+        ActionInfo {
+            name: "rich_menu_set_default".into(),
+            description: "Set a rich menu as the OA-wide default (shown to users without per-user override).".into(),
+            params_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"menu_id":{"type":"string"}},
+                "required":["menu_id"]
+            }),
+        },
+        ActionInfo {
+            name: "rich_menu_link_user".into(),
+            description: "Apply a rich menu to a specific user (overrides default). Use this to \
+                          differentiate admin vs client menus.".into(),
+            params_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"menu_id":{"type":"string"},"line_user_id":{"type":"string"}},
+                "required":["menu_id","line_user_id"]
+            }),
+        },
+        ActionInfo {
+            name: "rich_menu_unlink_user".into(),
+            description: "Remove the per-user rich menu override (user falls back to default).".into(),
+            params_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"line_user_id":{"type":"string"}},
+                "required":["line_user_id"]
+            }),
+        },
+        ActionInfo {
+            name: "get_quota".into(),
+            description: "Get LINE message quota (push API monthly limit + usage).".into(),
+            params_schema: serde_json::json!({"type":"object","properties":{},"required":[]}),
+        },
+        ActionInfo {
+            name: "get_profile".into(),
+            description: "Get a LINE user's display name + picture URL.".into(),
+            params_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"line_user_id":{"type":"string"}},
+                "required":["line_user_id"]
+            }),
+        },
+        ActionInfo {
+            name: "send_flex".into(),
+            description: "Send a Flex message (rich UI) to a user/group/room. `contents` follows LINE Flex Message JSON schema.".into(),
+            params_schema: serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "target":{"type":"string","description":"LINE userId / groupId / roomId"},
+                    "alt_text":{"type":"string","description":"Fallback text shown in notifications"},
+                    "contents":{"type":"object","description":"Flex Message contents (Bubble or Carousel)"}
+                },
+                "required":["target","alt_text","contents"]
+            }),
+        },
+        ActionInfo {
+            name: "show_loading".into(),
+            description: "Show a loading animation in a 1:1 chat for up to 60 seconds.".into(),
+            params_schema: serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "line_user_id":{"type":"string"},
+                    "seconds":{"type":"integer","description":"5-60, rounded to nearest 5 by LINE"}
+                },
+                "required":["line_user_id"]
+            }),
+        },
+    ]
+}
+
+async fn execute_line_action(adapter: &LineAdapter, action: &str, params: Value) -> Result<Value> {
+    let s = |k: &str| -> Result<String> {
+        params.get(k).and_then(|v| v.as_str()).map(String::from).ok_or_else(|| {
+            CatClawError::Channel(format!("missing arg '{}' for line.{}", k, action))
+        })
+    };
+    match action {
+        "rich_menu_create" => {
+            let name = s("name")?;
+            let chat_bar_text = s("chat_bar_text")?;
+            let size = params
+                .get("size")
+                .cloned()
+                .ok_or_else(|| CatClawError::Channel("missing 'size'".into()))?;
+            let areas = params
+                .get("areas")
+                .cloned()
+                .ok_or_else(|| CatClawError::Channel("missing 'areas'".into()))?;
+            let selected = params
+                .get("selected")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let body = serde_json::json!({
+                "size": size,
+                "selected": selected,
+                "name": name,
+                "chatBarText": chat_bar_text,
+                "areas": areas,
+            });
+            adapter.line_post_json("/richmenu", body).await
+        }
+        "rich_menu_upload_image" => {
+            let menu_id = s("menu_id")?;
+            let image_path = s("image_path")?;
+            adapter.rich_menu_upload_image(&menu_id, &image_path).await
+        }
+        "rich_menu_list" => adapter.line_get("/richmenu/list").await,
+        "rich_menu_delete" => {
+            let menu_id = s("menu_id")?;
+            adapter.line_delete(&format!("/richmenu/{}", menu_id)).await
+        }
+        "rich_menu_set_default" => {
+            let menu_id = s("menu_id")?;
+            adapter
+                .line_post_json(&format!("/user/all/richmenu/{}", menu_id), serde_json::json!({}))
+                .await
+        }
+        "rich_menu_link_user" => {
+            let menu_id = s("menu_id")?;
+            let user_id = s("line_user_id")?;
+            adapter
+                .line_post_json(
+                    &format!("/user/{}/richmenu/{}", user_id, menu_id),
+                    serde_json::json!({}),
+                )
+                .await
+        }
+        "rich_menu_unlink_user" => {
+            let user_id = s("line_user_id")?;
+            adapter.line_delete(&format!("/user/{}/richmenu", user_id)).await
+        }
+        "get_quota" => adapter.line_get("/message/quota").await,
+        "get_profile" => {
+            let user_id = s("line_user_id")?;
+            adapter.line_get(&format!("/profile/{}", user_id)).await
+        }
+        "send_flex" => {
+            let target = s("target")?;
+            let alt = s("alt_text")?;
+            let contents = params
+                .get("contents")
+                .cloned()
+                .ok_or_else(|| CatClawError::Channel("missing 'contents'".into()))?;
+            adapter.send_flex(&target, &alt, contents).await
+        }
+        "show_loading" => {
+            let user_id = s("line_user_id")?;
+            let seconds = params
+                .get("seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20) as u32;
+            adapter.show_loading(&user_id, seconds).await
+        }
+        // Used by contacts pipeline for work-card rendering. LINE doesn't have
+        // an admin-channel UI in this design (admin uses Discord/Slack); we
+        // accept the call to silence the not-supported error.
+        "contact_work_card" | "contact_work_card_edit" => Ok(serde_json::json!({})),
+        other => Err(CatClawError::Channel(format!(
+            "action '{}' not supported by line adapter", other
+        ))),
     }
 }
 

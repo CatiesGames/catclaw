@@ -2,6 +2,7 @@ mod agents;
 mod bindings;
 mod chat;
 mod config_panel;
+mod contacts;
 mod dashboard;
 mod editor;
 mod logs;
@@ -104,6 +105,7 @@ pub enum Tab {
     Logs,
     Social,
     Drafts,
+    Contacts,
     Issues,
 }
 
@@ -120,6 +122,7 @@ impl Tab {
             Tab::Logs,
             Tab::Social,
             Tab::Drafts,
+            Tab::Contacts,
             Tab::Issues,
         ]
     }
@@ -136,6 +139,7 @@ impl Tab {
             Tab::Logs => "Logs",
             Tab::Social => "Social",
             Tab::Drafts => "Drafts",
+            Tab::Contacts => "Contacts",
             Tab::Issues => "Issues",
         }
     }
@@ -152,6 +156,7 @@ impl Tab {
             Tab::Logs => "📜",
             Tab::Social => "📥",
             Tab::Drafts => "📝",
+            Tab::Contacts => "👥",
             Tab::Issues => "🔥",
         }
     }
@@ -206,6 +211,7 @@ struct App {
     logs_panel: logs::LogsPanel,
     social_panel: social_inbox::SocialInboxPanel,
     drafts_panel: social_drafts::SocialDraftsPanel,
+    contacts_panel: contacts::ContactsPanel,
     issues_panel: issues::IssuesPanel,
     should_quit: bool,
     agent_count: usize,
@@ -252,6 +258,7 @@ impl App {
             },
             social_panel: social_inbox::SocialInboxPanel::new(client.clone()),
             drafts_panel: social_drafts::SocialDraftsPanel::new(client.clone()),
+            contacts_panel: contacts::ContactsPanel::new(client.clone()),
             issues_panel: issues::IssuesPanel::new(client.clone()),
             should_quit: false,
             agent_count: config.agents.len(),
@@ -278,6 +285,7 @@ impl App {
             Tab::Logs => self.logs_panel.captures_input(),
             Tab::Social => self.social_panel.captures_input(),
             Tab::Drafts => self.drafts_panel.captures_input(),
+            Tab::Contacts => self.contacts_panel.captures_input(),
             Tab::Issues => self.issues_panel.captures_input(),
         };
 
@@ -364,6 +372,7 @@ impl App {
             Tab::Logs => self.logs_panel.handle_event(event),
             Tab::Social => self.social_panel.handle_event(event),
             Tab::Drafts => self.drafts_panel.handle_event(event),
+            Tab::Contacts => self.contacts_panel.handle_event(event),
             Tab::Issues => self.issues_panel.handle_event(event),
         };
 
@@ -446,6 +455,7 @@ impl App {
             Tab::Logs => self.logs_panel.render(frame, chunks[1]),
             Tab::Social => self.social_panel.render(frame, chunks[1]),
             Tab::Drafts => self.drafts_panel.render(frame, chunks[1]),
+            Tab::Contacts => self.contacts_panel.render(frame, chunks[1]),
             Tab::Issues => self.issues_panel.render(frame, chunks[1]),
         }
 

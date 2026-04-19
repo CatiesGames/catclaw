@@ -270,6 +270,18 @@ async fn dispatch(
         "social.draft.approve" => handle_social_draft_approve(req, gw).await,
         "social.draft.discard" => handle_social_draft_discard(req, gw).await,
         "social.draft.submit_for_approval" => handle_social_draft_submit(req, gw).await,
+        "contact.list" => handle_contact_list(req, gw),
+        "contact.get" => handle_contact_get(req, gw),
+        "contact.update" => handle_contact_update(req, gw).await,
+        "contact.delete" => handle_contact_delete(req, gw),
+        "contact.bind" => handle_contact_bind(req, gw),
+        "contact.unbind" => handle_contact_unbind(req, gw),
+        "contact.draft.list" => handle_contact_draft_list(req, gw),
+        "contact.draft.approve" => handle_contact_draft_approve(req, gw).await,
+        "contact.draft.discard" => handle_contact_draft_discard(req, gw).await,
+        "contact.draft.request_revision" => handle_contact_draft_revision(req, gw).await,
+        "contact.ai_pause" => handle_contact_ai_pause(req, gw),
+        "contact.ai_resume" => handle_contact_ai_resume(req, gw),
         "issues.list" => handle_issues_list(req, gw),
         "issues.ignore" => handle_issues_ignore(req, gw).await,
         "issues.resolve" => handle_issues_resolve(req, gw).await,
@@ -2077,4 +2089,157 @@ async fn handle_issues_resolve(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRe
         }
     }
     WsResponse::ok(req.id, json!({ "ok": true }))
+}
+
+// ── Contacts handlers ──────────────────────────────────────────────────────────
+
+fn handle_contact_list(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let filter = crate::contacts::ContactsFilter {
+        agent_id: req.params.get("agent_id").and_then(|v| v.as_str()).map(String::from),
+        role: req.params.get("role").and_then(|v| v.as_str()).map(crate::contacts::ContactRole::parse),
+        tag: req.params.get("tag").and_then(|v| v.as_str()).map(String::from),
+    };
+    match gw.state_db.list_contacts(&filter) {
+        Ok(rows) => WsResponse::ok(req.id, json!(rows)),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+fn handle_contact_get(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return WsResponse::err(req.id, -32602, "missing id"),
+    };
+    match gw.state_db.get_contact(id) {
+        Ok(Some(c)) => {
+            let channels = gw.state_db.list_contact_channels(&c.id).unwrap_or_default();
+            WsResponse::ok(req.id, json!({"contact": c, "channels": channels}))
+        }
+        Ok(None) => WsResponse::err(req.id, -1, "contact not found"),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+async fn handle_contact_update(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let default_agent = gw.config.read().unwrap().default_agent_id().unwrap_or("main").to_string();
+    match crate::contacts::tools::execute_contacts_tool(
+        &gw.state_db, &gw.adapters, &default_agent, "contacts_update", req.params.clone(),
+    ).await {
+        Ok(v) => WsResponse::ok(req.id, v),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+fn handle_contact_delete(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return WsResponse::err(req.id, -32602, "missing id"),
+    };
+    match gw.state_db.delete_contact(id) {
+        Ok(_) => WsResponse::ok(req.id, json!({"deleted": id})),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+fn handle_contact_bind(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = req.params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let platform = req.params.get("platform").and_then(|v| v.as_str()).unwrap_or("");
+    let pu = req.params.get("platform_user_id").and_then(|v| v.as_str()).unwrap_or("");
+    if id.is_empty() || platform.is_empty() || pu.is_empty() {
+        return WsResponse::err(req.id, -32602, "missing id/platform/platform_user_id");
+    }
+    let mut ch = crate::contacts::ContactChannel::new(id, platform, pu);
+    ch.is_primary = req.params.get("is_primary").and_then(|v| v.as_bool()).unwrap_or(false);
+    match gw.state_db.upsert_contact_channel(&ch) {
+        Ok(_) => WsResponse::ok(req.id, json!(ch)),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+fn handle_contact_unbind(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let platform = req.params.get("platform").and_then(|v| v.as_str()).unwrap_or("");
+    let pu = req.params.get("platform_user_id").and_then(|v| v.as_str()).unwrap_or("");
+    if platform.is_empty() || pu.is_empty() {
+        return WsResponse::err(req.id, -32602, "missing platform/platform_user_id");
+    }
+    match gw.state_db.delete_contact_channel(platform, pu) {
+        Ok(_) => WsResponse::ok(req.id, json!({"unbound": true})),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+fn handle_contact_draft_list(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let contact_id = req.params.get("contact_id").and_then(|v| v.as_str());
+    let status = req.params.get("status").and_then(|v| v.as_str());
+    let limit = req.params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+    match gw.state_db.list_contact_drafts(contact_id, status, limit) {
+        Ok(rows) => WsResponse::ok(req.id, json!(rows)),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+async fn handle_contact_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => return WsResponse::err(req.id, -32602, "missing id"),
+    };
+    match crate::contacts::pipeline::approve_draft(&gw.state_db, &gw.adapters, id).await {
+        Ok(res) => WsResponse::ok(req.id, json!(res)),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+async fn handle_contact_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => return WsResponse::err(req.id, -32602, "missing id"),
+    };
+    match crate::contacts::pipeline::discard_draft(&gw.state_db, &gw.adapters, id).await {
+        Ok(res) => WsResponse::ok(req.id, json!(res)),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+async fn handle_contact_draft_revision(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => return WsResponse::err(req.id, -32602, "missing id"),
+    };
+    let note = req.params.get("note").and_then(|v| v.as_str()).unwrap_or("");
+    match crate::contacts::pipeline::request_revision(&gw.state_db, &gw.adapters, id, note).await {
+        Ok(res) => WsResponse::ok(req.id, json!(res)),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+fn handle_contact_ai_pause(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return WsResponse::err(req.id, -32602, "missing id"),
+    };
+    let mut c = match gw.state_db.get_contact(id) {
+        Ok(Some(c)) => c,
+        _ => return WsResponse::err(req.id, -1, "contact not found"),
+    };
+    c.ai_paused = true;
+    match gw.state_db.update_contact(&c) {
+        Ok(_) => WsResponse::ok(req.id, json!({"paused": id})),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
+}
+
+fn handle_contact_ai_resume(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let id = match req.params.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return WsResponse::err(req.id, -32602, "missing id"),
+    };
+    let mut c = match gw.state_db.get_contact(id) {
+        Ok(Some(c)) => c,
+        _ => return WsResponse::err(req.id, -1, "contact not found"),
+    };
+    c.ai_paused = false;
+    match gw.state_db.update_contact(&c) {
+        Ok(_) => WsResponse::ok(req.id, json!({"resumed": id})),
+        Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
+    }
 }
