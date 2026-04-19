@@ -356,6 +356,53 @@ impl StateDb {
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS contacts (
+                id                 TEXT PRIMARY KEY,
+                agent_id           TEXT NOT NULL,
+                display_name       TEXT NOT NULL,
+                role               TEXT NOT NULL DEFAULT 'unknown',
+                tags               TEXT NOT NULL DEFAULT '[]',
+                forward_channel    TEXT,
+                approval_required  INTEGER NOT NULL DEFAULT 1,
+                ai_paused          INTEGER NOT NULL DEFAULT 0,
+                external_ref       TEXT NOT NULL DEFAULT '{}',
+                metadata           TEXT NOT NULL DEFAULT '{}',
+                created_at         TEXT NOT NULL,
+                updated_at         TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_contacts_agent ON contacts(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_contacts_role  ON contacts(agent_id, role);
+
+            CREATE TABLE IF NOT EXISTS contact_channels (
+                contact_id         TEXT NOT NULL,
+                platform           TEXT NOT NULL,
+                platform_user_id   TEXT NOT NULL,
+                is_primary         INTEGER NOT NULL DEFAULT 0,
+                last_active_at     TEXT,
+                created_at         TEXT NOT NULL,
+                PRIMARY KEY (platform, platform_user_id),
+                FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_contact_channels_contact ON contact_channels(contact_id);
+
+            CREATE TABLE IF NOT EXISTS contact_drafts (
+                id              INTEGER PRIMARY KEY,
+                contact_id      TEXT NOT NULL,
+                agent_id        TEXT NOT NULL,
+                via_platform    TEXT,
+                payload         TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                forward_ref     TEXT,
+                revision_note   TEXT,
+                error           TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                sent_at         TEXT,
+                FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_contact_drafts_status ON contact_drafts(status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_contact_drafts_contact ON contact_drafts(contact_id);
             ",
         )?;
 
@@ -1178,6 +1225,456 @@ impl StateDb {
         )?;
         Ok(())
     }
+
+    // --- Contacts ---
+
+    pub fn insert_contact(&self, c: &crate::contacts::Contact) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO contacts (id, agent_id, display_name, role, tags, forward_channel,
+                                   approval_required, ai_paused, external_ref, metadata,
+                                   created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                c.id,
+                c.agent_id,
+                c.display_name,
+                c.role.as_str(),
+                serde_json::to_string(&c.tags).unwrap_or_else(|_| "[]".into()),
+                c.forward_channel,
+                c.approval_required as i32,
+                c.ai_paused as i32,
+                serde_json::to_string(&c.external_ref).unwrap_or_else(|_| "{}".into()),
+                serde_json::to_string(&c.metadata).unwrap_or_else(|_| "{}".into()),
+                c.created_at,
+                c.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_contact(&self, id: &str) -> Result<Option<crate::contacts::Contact>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT id, agent_id, display_name, role, tags, forward_channel, approval_required,
+                        ai_paused, external_ref, metadata, created_at, updated_at
+                 FROM contacts WHERE id = ?1",
+                params![id],
+                contact_row_mapper,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Find contact by platform + platform_user_id (joins contact_channels).
+    pub fn get_contact_by_platform_user(
+        &self,
+        platform: &str,
+        platform_user_id: &str,
+    ) -> Result<Option<crate::contacts::Contact>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT c.id, c.agent_id, c.display_name, c.role, c.tags, c.forward_channel,
+                        c.approval_required, c.ai_paused, c.external_ref, c.metadata,
+                        c.created_at, c.updated_at
+                 FROM contacts c
+                 JOIN contact_channels ch ON ch.contact_id = c.id
+                 WHERE ch.platform = ?1 AND ch.platform_user_id = ?2",
+                params![platform, platform_user_id],
+                contact_row_mapper,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn list_contacts(
+        &self,
+        filter: &crate::contacts::ContactsFilter,
+    ) -> Result<Vec<crate::contacts::Contact>> {
+        const COLS: &str = "id, agent_id, display_name, role, tags, forward_channel,
+                            approval_required, ai_paused, external_ref, metadata,
+                            created_at, updated_at";
+        let conn = self.conn.lock().unwrap();
+
+        let role_str = filter.role.map(|r| r.as_str().to_string());
+        let tag_pat = filter.tag.as_ref().map(|t| format!("%\"{}\"%", t));
+
+        let rows: Vec<crate::contacts::Contact> = match (&filter.agent_id, &role_str, &tag_pat) {
+            (Some(a), Some(r), Some(t)) => {
+                let sql = format!(
+                    "SELECT {COLS} FROM contacts WHERE agent_id=?1 AND role=?2 AND tags LIKE ?3 ORDER BY display_name"
+                );
+                conn.prepare(&sql)?
+                    .query_map(params![a, r, t], contact_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+            (Some(a), Some(r), None) => {
+                let sql = format!(
+                    "SELECT {COLS} FROM contacts WHERE agent_id=?1 AND role=?2 ORDER BY display_name"
+                );
+                conn.prepare(&sql)?
+                    .query_map(params![a, r], contact_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+            (Some(a), None, Some(t)) => {
+                let sql = format!(
+                    "SELECT {COLS} FROM contacts WHERE agent_id=?1 AND tags LIKE ?2 ORDER BY display_name"
+                );
+                conn.prepare(&sql)?
+                    .query_map(params![a, t], contact_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+            (Some(a), None, None) => {
+                let sql = format!(
+                    "SELECT {COLS} FROM contacts WHERE agent_id=?1 ORDER BY display_name"
+                );
+                conn.prepare(&sql)?
+                    .query_map(params![a], contact_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+            (None, Some(r), _) => {
+                let sql = format!(
+                    "SELECT {COLS} FROM contacts WHERE role=?1 ORDER BY display_name"
+                );
+                conn.prepare(&sql)?
+                    .query_map(params![r], contact_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+            (None, None, Some(t)) => {
+                let sql = format!(
+                    "SELECT {COLS} FROM contacts WHERE tags LIKE ?1 ORDER BY display_name"
+                );
+                conn.prepare(&sql)?
+                    .query_map(params![t], contact_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+            (None, None, None) => {
+                let sql = format!("SELECT {COLS} FROM contacts ORDER BY display_name");
+                conn.prepare(&sql)?
+                    .query_map([], contact_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+        };
+        Ok(rows)
+    }
+
+    pub fn update_contact(&self, c: &crate::contacts::Contact) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE contacts SET display_name=?1, role=?2, tags=?3, forward_channel=?4,
+                                approval_required=?5, ai_paused=?6, external_ref=?7,
+                                metadata=?8, updated_at=?9
+             WHERE id=?10",
+            params![
+                c.display_name,
+                c.role.as_str(),
+                serde_json::to_string(&c.tags).unwrap_or_else(|_| "[]".into()),
+                c.forward_channel,
+                c.approval_required as i32,
+                c.ai_paused as i32,
+                serde_json::to_string(&c.external_ref).unwrap_or_else(|_| "{}".into()),
+                serde_json::to_string(&c.metadata).unwrap_or_else(|_| "{}".into()),
+                now,
+                c.id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_contact(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM contacts WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    // --- Contact Channels ---
+
+    pub fn upsert_contact_channel(&self, ch: &crate::contacts::ContactChannel) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO contact_channels (contact_id, platform, platform_user_id, is_primary,
+                                           last_active_at, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(platform, platform_user_id) DO UPDATE SET
+                contact_id = excluded.contact_id,
+                is_primary = excluded.is_primary,
+                last_active_at = COALESCE(excluded.last_active_at, contact_channels.last_active_at)",
+            params![
+                ch.contact_id,
+                ch.platform,
+                ch.platform_user_id,
+                ch.is_primary as i32,
+                ch.last_active_at,
+                ch.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_contact_channel(&self, platform: &str, platform_user_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM contact_channels WHERE platform=?1 AND platform_user_id=?2",
+            params![platform, platform_user_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_contact_channels(
+        &self,
+        contact_id: &str,
+    ) -> Result<Vec<crate::contacts::ContactChannel>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT contact_id, platform, platform_user_id, is_primary, last_active_at, created_at
+             FROM contact_channels WHERE contact_id=?1
+             ORDER BY is_primary DESC, last_active_at DESC NULLS LAST",
+        )?;
+        let rows = stmt
+            .query_map(params![contact_id], contact_channel_row_mapper)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Touch last_active_at for inbound message tracking (used by router for last-active routing).
+    pub fn touch_contact_channel(&self, platform: &str, platform_user_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE contact_channels SET last_active_at=?1
+             WHERE platform=?2 AND platform_user_id=?3",
+            params![now, platform, platform_user_id],
+        )?;
+        Ok(())
+    }
+
+    // --- Contact Drafts ---
+
+    pub fn insert_contact_draft(&self, d: &crate::contacts::ContactDraft) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO contact_drafts (contact_id, agent_id, via_platform, payload, status,
+                                         forward_ref, revision_note, error, created_at,
+                                         updated_at, sent_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                d.contact_id,
+                d.agent_id,
+                d.via_platform,
+                serde_json::to_string(&d.payload).unwrap_or_else(|_| "{}".into()),
+                d.status,
+                d.forward_ref,
+                d.revision_note,
+                d.error,
+                d.created_at,
+                d.updated_at,
+                d.sent_at,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_contact_draft(&self, id: i64) -> Result<Option<crate::contacts::ContactDraft>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT id, contact_id, agent_id, via_platform, payload, status, forward_ref,
+                        revision_note, error, created_at, updated_at, sent_at
+                 FROM contact_drafts WHERE id=?1",
+                params![id],
+                contact_draft_row_mapper,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn list_contact_drafts(
+        &self,
+        contact_id: Option<&str>,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<crate::contacts::ContactDraft>> {
+        const COLS: &str = "id, contact_id, agent_id, via_platform, payload, status, forward_ref,
+                            revision_note, error, created_at, updated_at, sent_at";
+        let conn = self.conn.lock().unwrap();
+        let rows: Vec<crate::contacts::ContactDraft> = match (contact_id, status) {
+            (Some(c), Some(s)) => {
+                let sql = format!(
+                    "SELECT {COLS} FROM contact_drafts WHERE contact_id=?1 AND status=?2 ORDER BY created_at DESC LIMIT ?3"
+                );
+                conn.prepare(&sql)?
+                    .query_map(params![c, s, limit], contact_draft_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+            (Some(c), None) => {
+                let sql = format!(
+                    "SELECT {COLS} FROM contact_drafts WHERE contact_id=?1 ORDER BY created_at DESC LIMIT ?2"
+                );
+                conn.prepare(&sql)?
+                    .query_map(params![c, limit], contact_draft_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+            (None, Some(s)) => {
+                let sql = format!(
+                    "SELECT {COLS} FROM contact_drafts WHERE status=?1 ORDER BY created_at DESC LIMIT ?2"
+                );
+                conn.prepare(&sql)?
+                    .query_map(params![s, limit], contact_draft_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+            (None, None) => {
+                let sql = format!(
+                    "SELECT {COLS} FROM contact_drafts ORDER BY created_at DESC LIMIT ?1"
+                );
+                conn.prepare(&sql)?
+                    .query_map(params![limit], contact_draft_row_mapper)?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            }
+        };
+        Ok(rows)
+    }
+
+    pub fn update_contact_draft_status(&self, id: i64, status: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE contact_drafts SET status=?1, updated_at=?2 WHERE id=?3",
+            params![status, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_contact_draft_payload(
+        &self,
+        id: i64,
+        payload: &serde_json::Value,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE contact_drafts SET payload=?1, updated_at=?2 WHERE id=?3",
+            params![
+                serde_json::to_string(payload).unwrap_or_else(|_| "{}".into()),
+                now,
+                id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_contact_draft_forward_ref(&self, id: i64, forward_ref: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE contact_drafts SET forward_ref=?1, updated_at=?2 WHERE id=?3",
+            params![forward_ref, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_contact_draft_revision_note(&self, id: i64, note: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE contact_drafts SET revision_note=?1, status='revising', updated_at=?2 WHERE id=?3",
+            params![note, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_contact_draft_sent(&self, id: i64) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE contact_drafts SET status='sent', sent_at=?1, updated_at=?1 WHERE id=?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_contact_draft_failed(&self, id: i64, error: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE contact_drafts SET status='failed', error=?1, updated_at=?2 WHERE id=?3",
+            params![error, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_contact_draft(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM contact_drafts WHERE id=?1", params![id])?;
+        Ok(())
+    }
+}
+
+fn contact_row_mapper(row: &rusqlite::Row) -> rusqlite::Result<crate::contacts::Contact> {
+    let tags_str: String = row.get(4)?;
+    let ext_str: String = row.get(8)?;
+    let meta_str: String = row.get(9)?;
+    Ok(crate::contacts::Contact {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        display_name: row.get(2)?,
+        role: crate::contacts::ContactRole::parse(&row.get::<_, String>(3)?),
+        tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+        forward_channel: row.get(5)?,
+        approval_required: row.get::<_, i32>(6)? != 0,
+        ai_paused: row.get::<_, i32>(7)? != 0,
+        external_ref: serde_json::from_str(&ext_str).unwrap_or_else(|_| serde_json::json!({})),
+        metadata: serde_json::from_str(&meta_str).unwrap_or_else(|_| serde_json::json!({})),
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+fn contact_channel_row_mapper(
+    row: &rusqlite::Row,
+) -> rusqlite::Result<crate::contacts::ContactChannel> {
+    Ok(crate::contacts::ContactChannel {
+        contact_id: row.get(0)?,
+        platform: row.get(1)?,
+        platform_user_id: row.get(2)?,
+        is_primary: row.get::<_, i32>(3)? != 0,
+        last_active_at: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+fn contact_draft_row_mapper(
+    row: &rusqlite::Row,
+) -> rusqlite::Result<crate::contacts::ContactDraft> {
+    let payload_str: String = row.get(4)?;
+    Ok(crate::contacts::ContactDraft {
+        id: row.get(0)?,
+        contact_id: row.get(1)?,
+        agent_id: row.get(2)?,
+        via_platform: row.get(3)?,
+        payload: serde_json::from_str(&payload_str).unwrap_or_else(|_| serde_json::json!({})),
+        status: row.get(5)?,
+        forward_ref: row.get(6)?,
+        revision_note: row.get(7)?,
+        error: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+        sent_at: row.get(11)?,
+    })
 }
 
 // --- Social Inbox Row ---

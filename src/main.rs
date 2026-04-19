@@ -4,6 +4,7 @@ mod channel;
 mod cmd_hook;
 mod cli_ui;
 mod config;
+mod contacts;
 mod dist;
 mod error;
 mod gateway;
@@ -171,6 +172,12 @@ enum Commands {
     Social {
         #[command(subcommand)]
         command: SocialCommands,
+    },
+
+    /// Manage contacts (cross-platform identity for LINE/Discord/Telegram/Slack)
+    Contact {
+        #[command(subcommand)]
+        command: ContactCommands,
     },
 
     /// Manage system issue log (ERROR/WARN log entries tracked by heartbeat)
@@ -526,6 +533,109 @@ enum DraftCommands {
         /// Draft ID
         id: i64,
     },
+}
+
+#[derive(Subcommand)]
+enum ContactCommands {
+    /// Add a new contact
+    Add {
+        /// Display name
+        name: String,
+        /// Owning agent (defaults to default agent)
+        #[arg(long)]
+        agent: Option<String>,
+        /// Role: admin | client | unknown
+        #[arg(long, default_value = "unknown")]
+        role: String,
+        /// Tags (repeatable)
+        #[arg(long)]
+        tag: Vec<String>,
+        /// Skip approval requirement (default: approval required)
+        #[arg(long)]
+        no_approval: bool,
+    },
+    /// List contacts
+    List {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Show contact detail (with bound channels)
+    Show {
+        /// Contact id
+        id: String,
+    },
+    /// Update a contact field
+    Update {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+        /// Replace tags entirely (repeatable)
+        #[arg(long)]
+        tag: Vec<String>,
+        /// Set forward channel (e.g. "discord:guild/channel"). Pass empty string to clear.
+        #[arg(long)]
+        forward_channel: Option<String>,
+        /// Require approval for outgoing messages
+        #[arg(long)]
+        approval: bool,
+        /// Disable approval requirement
+        #[arg(long)]
+        no_approval: bool,
+    },
+    /// Delete a contact (cascade: removes channels + drafts)
+    Delete {
+        id: String,
+    },
+    /// Pause AI for this contact (inbound messages won't reach the agent)
+    Pause {
+        id: String,
+    },
+    /// Resume AI for this contact
+    Resume {
+        id: String,
+    },
+    /// Bind a platform user id to a contact
+    Bind {
+        id: String,
+        #[arg(long)]
+        platform: String,
+        #[arg(long)]
+        user_id: String,
+        #[arg(long)]
+        primary: bool,
+    },
+    /// Unbind a platform user id
+    Unbind {
+        #[arg(long)]
+        platform: String,
+        #[arg(long)]
+        user_id: String,
+    },
+    /// Manage outbound drafts
+    Draft {
+        #[command(subcommand)]
+        command: ContactDraftCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContactDraftCommands {
+    List {
+        #[arg(long)]
+        contact_id: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value = "20")]
+        limit: i64,
+    },
+    Approve { id: i64 },
+    Discard { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -1610,6 +1720,192 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Err(e) => eprintln!("Cannot connect to gateway at {}: {}", ws_url, e),
+                    }
+                }
+            }
+        }
+
+        Some(Commands::Contact { command }) => {
+            let config = Config::load(&cli.config)?;
+            let state_db = StateDb::open(&config.general.state_db)?;
+            let default_agent = config.default_agent_id().unwrap_or("main").to_string();
+
+            match command {
+                ContactCommands::Add { name, agent, role, tag, no_approval } => {
+                    let mut c = crate::contacts::Contact::new(
+                        agent.unwrap_or(default_agent),
+                        name,
+                    );
+                    c.role = crate::contacts::ContactRole::parse(&role);
+                    c.tags = tag;
+                    if no_approval {
+                        c.approval_required = false;
+                    }
+                    state_db.insert_contact(&c)?;
+                    println!("Created contact {} ({})", c.id, c.display_name);
+                }
+                ContactCommands::List { agent, role, tag } => {
+                    let filter = crate::contacts::ContactsFilter {
+                        agent_id: agent,
+                        role: role.as_deref().map(crate::contacts::ContactRole::parse),
+                        tag,
+                    };
+                    let rows = state_db.list_contacts(&filter)?;
+                    if rows.is_empty() {
+                        println!("No contacts.");
+                    } else {
+                        println!(
+                            "{:<38} {:<10} {:<8} {:<8} {:<8} NAME",
+                            "ID", "AGENT", "ROLE", "APPROVE", "PAUSED"
+                        );
+                        println!("{}", "-".repeat(96));
+                        for c in &rows {
+                            println!(
+                                "{:<38} {:<10} {:<8} {:<8} {:<8} {}",
+                                c.id,
+                                truncate_str(&c.agent_id, 10),
+                                c.role.as_str(),
+                                if c.approval_required { "yes" } else { "no" },
+                                if c.ai_paused { "yes" } else { "no" },
+                                c.display_name,
+                            );
+                        }
+                    }
+                }
+                ContactCommands::Show { id } => {
+                    match state_db.get_contact(&id)? {
+                        Some(c) => {
+                            println!("Contact {}", c.id);
+                            println!("  Agent:    {}", c.agent_id);
+                            println!("  Name:     {}", c.display_name);
+                            println!("  Role:     {}", c.role.as_str());
+                            println!("  Tags:     {:?}", c.tags);
+                            println!("  Forward:  {}", c.forward_channel.as_deref().unwrap_or("-"));
+                            println!("  Approval: {}", c.approval_required);
+                            println!("  AI paused:{}", c.ai_paused);
+                            println!("  External: {}", c.external_ref);
+                            println!("  Metadata: {}", c.metadata);
+                            println!("  Created:  {}", c.created_at);
+                            let channels = state_db.list_contact_channels(&c.id)?;
+                            if channels.is_empty() {
+                                println!("  Channels: -");
+                            } else {
+                                println!("  Channels:");
+                                for ch in channels {
+                                    println!(
+                                        "    {} {} (primary={}, last_active={})",
+                                        ch.platform,
+                                        ch.platform_user_id,
+                                        ch.is_primary,
+                                        ch.last_active_at.as_deref().unwrap_or("-"),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            eprintln!("Contact {} not found", id);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                ContactCommands::Update {
+                    id,
+                    name,
+                    role,
+                    tag,
+                    forward_channel,
+                    approval,
+                    no_approval,
+                } => {
+                    let mut c = state_db
+                        .get_contact(&id)?
+                        .ok_or_else(|| crate::error::CatClawError::Other(format!("contact '{}' not found", id)))?;
+                    if let Some(n) = name { c.display_name = n; }
+                    if let Some(r) = role { c.role = crate::contacts::ContactRole::parse(&r); }
+                    if !tag.is_empty() { c.tags = tag; }
+                    if let Some(fc) = forward_channel {
+                        c.forward_channel = if fc.is_empty() { None } else { Some(fc) };
+                    }
+                    if approval { c.approval_required = true; }
+                    if no_approval { c.approval_required = false; }
+                    state_db.update_contact(&c)?;
+                    println!("Updated contact {}", c.id);
+                }
+                ContactCommands::Delete { id } => {
+                    state_db.delete_contact(&id)?;
+                    println!("Deleted contact {}", id);
+                }
+                ContactCommands::Pause { id } => {
+                    let mut c = state_db
+                        .get_contact(&id)?
+                        .ok_or_else(|| crate::error::CatClawError::Other(format!("contact '{}' not found", id)))?;
+                    c.ai_paused = true;
+                    state_db.update_contact(&c)?;
+                    println!("AI paused for {}", id);
+                }
+                ContactCommands::Resume { id } => {
+                    let mut c = state_db
+                        .get_contact(&id)?
+                        .ok_or_else(|| crate::error::CatClawError::Other(format!("contact '{}' not found", id)))?;
+                    c.ai_paused = false;
+                    state_db.update_contact(&c)?;
+                    println!("AI resumed for {}", id);
+                }
+                ContactCommands::Bind { id, platform, user_id, primary } => {
+                    state_db
+                        .get_contact(&id)?
+                        .ok_or_else(|| crate::error::CatClawError::Other(format!("contact '{}' not found", id)))?;
+                    let mut ch = crate::contacts::ContactChannel::new(&id, &platform, &user_id);
+                    ch.is_primary = primary;
+                    state_db.upsert_contact_channel(&ch)?;
+                    println!("Bound {}:{} → {}", platform, user_id, id);
+                }
+                ContactCommands::Unbind { platform, user_id } => {
+                    state_db.delete_contact_channel(&platform, &user_id)?;
+                    println!("Unbound {}:{}", platform, user_id);
+                }
+                ContactCommands::Draft { command } => {
+                    match command {
+                        ContactDraftCommands::List { contact_id, status, limit } => {
+                            let rows = state_db.list_contact_drafts(
+                                contact_id.as_deref(),
+                                status.as_deref(),
+                                limit,
+                            )?;
+                            if rows.is_empty() {
+                                println!("No contact drafts.");
+                            } else {
+                                println!(
+                                    "{:<6} {:<38} {:<18} {:<10} PAYLOAD",
+                                    "ID", "CONTACT", "STATUS", "VIA"
+                                );
+                                println!("{}", "-".repeat(96));
+                                for d in &rows {
+                                    let preview = serde_json::to_string(&d.payload)
+                                        .unwrap_or_default()
+                                        .chars()
+                                        .take(36)
+                                        .collect::<String>();
+                                    println!(
+                                        "{:<6} {:<38} {:<18} {:<10} {}",
+                                        d.id,
+                                        d.contact_id,
+                                        d.status,
+                                        d.via_platform.as_deref().unwrap_or("-"),
+                                        preview,
+                                    );
+                                }
+                            }
+                        }
+                        ContactDraftCommands::Approve { id } => {
+                            // Stage 2: marks status; Stage 3 will trigger actual send via WS
+                            state_db.update_contact_draft_status(id, "awaiting_approval")?;
+                            println!("Draft {} approved (Stage 3 wires send pipeline)", id);
+                        }
+                        ContactDraftCommands::Discard { id } => {
+                            state_db.update_contact_draft_status(id, "ignored")?;
+                            println!("Draft {} discarded", id);
+                        }
                     }
                 }
             }

@@ -52,6 +52,7 @@ async fn handle_mcp(
             let mut tools = build_tool_list(adapters);
             tools.extend(build_social_tools(&gw));
             tools.extend(crate::memory::tools::build_memory_tools());
+            tools.extend(crate::contacts::tools::build_contacts_tools());
             let result = serde_json::json!({ "tools": tools });
             jsonrpc_ok(id, result)
         }
@@ -71,6 +72,33 @@ async fn handle_mcp(
                 match crate::memory::tools::execute_memory_tool(
                     &gw.state_db,
                     &gw.embedder,
+                    tool_name,
+                    arguments,
+                )
+                .await
+                {
+                    Ok(result) => {
+                        let response = serde_json::json!({
+                            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+                        });
+                        return jsonrpc_ok(id, response);
+                    }
+                    Err(e) => {
+                        let response = serde_json::json!({
+                            "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                            "isError": true
+                        });
+                        return jsonrpc_ok(id, response);
+                    }
+                }
+            }
+
+            // Route contacts tools.
+            if tool_name.starts_with("contacts_") {
+                let default_agent = gw.config.read().unwrap().default_agent_id().unwrap_or("main").to_string();
+                match crate::contacts::tools::execute_contacts_tool(
+                    &gw.state_db,
+                    &default_agent,
                     tool_name,
                     arguments,
                 )
