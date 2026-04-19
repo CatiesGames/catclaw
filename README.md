@@ -315,6 +315,7 @@ MCP tools appear in the TUI Tools panel under "User MCP Servers" and can be deni
 | **Discord** | ✅ | Threads, typing indicator, approval buttons, 32 MCP actions |
 | **Telegram** | ✅ | Long polling, forum topics, approval keyboard, 26 MCP actions |
 | **Slack** | ✅ | Socket Mode, threads, native AI streaming, approval buttons, 17 MCP actions |
+| **LINE** | ✅ | Webhook + HMAC verify, reply-token + push, image/video/file inbound, 11 MCP actions (rich menu / flex / quota / profile) |
 | **TUI** | ✅ | Direct chat with streaming, inline approval widget |
 
 **Activation modes** (DMs always respond; this controls group/server channels):
@@ -497,6 +498,125 @@ Alt+9 opens the Social Inbox tab. Use Tab/BackTab to filter by status, Enter to 
 ### Agent MCP Tools
 
 When social is configured, agents get `instagram_*` and `threads_*` MCP tools for direct API access. The `*_stage_reply` tools store a draft and trigger an admin review card — no approval hook needed.
+
+---
+
+## Contacts
+
+Cross-platform identity layer. CatClaw stores **who** you talk to (across Discord/Telegram/Slack/LINE) plus forward & approval rules — but **not the business data**. Business data (nutrition logs, training records, counseling notes, etc.) is the agent's responsibility — store wherever fits (Notion MCP, memory palace, your own SQLite).
+
+**Use when**: a single user (nutritionist / trainer / consultant / customer-service rep) manages multiple "clients" through the bot, and wants per-client routing, approval, or AI pause/resume.
+
+### Schema
+
+| Table | Purpose |
+|---|---|
+| `contacts` | id, agent_id, display_name, role (admin/client/unknown), tags, forward_channel, approval_required, ai_paused, external_ref (JSON), metadata (JSON) |
+| `contact_channels` | (platform, platform_user_id) → contact_id, with last_active_at for routing |
+| `contact_drafts` | Outbound draft queue (status: pending → awaiting_approval → sent / ignored / revising / failed) |
+
+### Outbound pipeline
+
+```
+agent → contacts_reply → draft → mirror to forward channel
+                              → approval gate (if approval_required)
+                              → adapter.send (platform = via OR last_active)
+                              → status=sent / failed
+```
+
+The agent **cannot bypass** this pipeline — direct calls to platform native send tools won't go through forward + approval. Always use `contacts_reply`.
+
+### Inbound flow
+
+When an inbound message comes from a sender bound to a contact:
+1. `contact_channels.last_active_at` is touched (used for last-active routing).
+2. The message is mirrored to `forward_channel` (if set).
+3. If `ai_paused` is true → mirror only, agent is **not** invoked.
+4. Otherwise the agent receives the message with `[Contact: name=…, role=…, tags=…, external_ref=…, metadata=…]` injected into the system prompt.
+
+A message arriving in a forward_channel (admin's monitoring channel) and not bound to a contact is treated as a **manual reply** — forwarded to the corresponding contact directly under the agent's identity, bypassing the agent.
+
+### CLI
+
+```bash
+catclaw contact add <name> [--role admin|client|unknown] [--tag ...] [--no-approval]
+catclaw contact list [--agent ID] [--role ...]
+catclaw contact show <id>
+catclaw contact update <id> [--name ...] [--role ...] [--forward-channel ...] [--approval|--no-approval]
+catclaw contact bind <id> --platform line --user-id U123...
+catclaw contact unbind --platform line --user-id U123...
+catclaw contact pause <id>
+catclaw contact resume <id>
+catclaw contact draft list [--status ...]
+catclaw contact draft approve <draft_id>
+catclaw contact draft discard <draft_id>
+```
+
+### TUI
+
+`Contacts` tab provides two sub-views (Tab toggles):
+- **Contacts**: list + role/tags/forward/approval/paused; `P`=toggle pause, `A`=toggle approval
+- **Drafts**: outbound draft queue; `a`=approve, `D`=discard
+
+### Agent MCP Tools
+
+`contacts_create / get / list / update / delete / bind_channel / unbind_channel / reply / ai_pause / ai_resume / drafts_list / draft_approve / draft_discard / draft_request_revision`
+
+`contacts_reply` payload supports `{type:"text"}`, `{type:"image"}`, `{type:"flex"}` (LINE-only Flex passes through to the LINE adapter).
+
+### Multi-agent extension path
+
+v1 binds each contact to a single agent (`contacts.agent_id`). All read paths go through `Contact::owning_agents() -> Vec<AgentId>` which currently returns one entry. To support sharing a contact across multiple agents in v2, migrate to a `contact_agents` join table and update the helper — call sites unchanged.
+
+---
+
+## LINE (optional channel)
+
+LINE Messaging API integration. **Optional** — the adapter only starts when a `line` channel is configured; otherwise zero impact on the rest of the system.
+
+### Setup
+
+You need:
+- A LINE Official Account with Messaging API enabled
+- Channel Access Token (long-lived) → set `LINE_CHANNEL_ACCESS_TOKEN`
+- Channel Secret → set `LINE_CHANNEL_SECRET`
+- A public HTTPS endpoint (cloudflared / ngrok / your own domain) pointing at the gateway port
+
+### Config
+
+```toml
+[[channels]]
+type = "line"
+token_env = "LINE_CHANNEL_ACCESS_TOKEN"
+secret_env = "LINE_CHANNEL_SECRET"
+```
+
+In LINE Developer Console, set the webhook URL to `https://your.host/webhook/line` and verify.
+
+### Capabilities
+
+- **Inbound**: text, image, video, audio, file (auto-download via Content API + Bearer token), follow / unfollow / postback events
+- **Outbound**: 5-minute reply-token (free) → fallback to push API (counts toward quota)
+- **HMAC-SHA256** signature verification on every webhook delivery
+- **Rich Menu** fully managed by the agent — CatClaw stores no menu↔role mapping
+
+### Agent MCP Tools (`line_*`)
+
+| Tool | Purpose |
+|---|---|
+| `line_rich_menu_create` | Create a rich menu |
+| `line_rich_menu_upload_image` | Upload background image (JPEG/PNG) |
+| `line_rich_menu_list` | List all menus |
+| `line_rich_menu_delete` | Delete a menu |
+| `line_rich_menu_set_default` | Set as OA-wide default |
+| `line_rich_menu_link_user` | Apply menu to specific user |
+| `line_rich_menu_unlink_user` | Remove per-user override |
+| `line_get_quota` | Push API monthly quota |
+| `line_get_profile` | LINE user displayName + picture URL |
+| `line_send_flex` | Send Flex message |
+| `line_show_loading` | Show loading animation in 1:1 chat |
+
+For LINE-side outbound to actual contacts, use `contacts_reply` (which routes through the contacts pipeline). `line_send_flex` is for direct out-of-band Flex sends (e.g. broadcasts not tied to a contact).
 
 ---
 

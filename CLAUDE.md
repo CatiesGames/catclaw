@@ -143,6 +143,11 @@ Each tool exists in exactly one list: `allowed` (directly usable), `denied` (una
 | `src/social/webhook.rs` | Axum webhook handlers for `/webhook/instagram` and `/webhook/threads` with HMAC verification |
 | `src/social/poller.rs` | Polling logic for Instagram/Threads feeds, cursor management via `social_cursors` table |
 | `src/social/forward.rs` | Forward card builder (`ForwardCard`) + adapter-specific renderers for Discord/Slack/Telegram |
+| `src/contacts/mod.rs` | Contacts core types (`Contact`, `ContactChannel`, `ContactDraft`, `ContactRole`, `ContactPayload`) + `owning_agents()` helper for v2 multi-agent extension |
+| `src/contacts/pipeline.rs` | Outbound pipeline: `submit_reply` / `approve_draft` / `discard_draft` / `request_revision` / `mirror_inbound` / `try_manual_reply` |
+| `src/contacts/tools.rs` | `mcp__catclaw__contacts_*` MCP tool schemas + dispatch (14 tools) |
+| `src/channel/line.rs` | LINE adapter: webhook handler with HMAC verify, reply-token + push API, image/follow/unfollow inbound, 11 `line_*` MCP actions (rich menu / flex / quota / profile) |
+| `src/tui/contacts.rs` | TUI Contacts panel with [Contacts] / [Drafts] sub-tabs |
 
 ## Memory Palace System (MemPalace)
 
@@ -181,6 +186,29 @@ Distillation has been removed — importance field + Haiku extraction replaces i
 
 ### Migration
 On first startup after upgrade, `run_migration()` in gateway.rs imports existing `memory/*.md` diary files and `MEMORY.md` into palace DB. Controlled by `palace_meta.migration_v1` key. Old files are preserved but no longer read by the system.
+
+## Contacts System
+
+Cross-platform identity layer in `src/contacts/`. CatClaw stores **who** the agent talks to (across DC/TG/Slack/LINE) but **not the business data** — that is the agent's responsibility (Notion / palace / self-managed). 
+
+### Three tables
+- `contacts` (id, agent_id, role, tags, forward_channel, approval_required, ai_paused, external_ref JSON, metadata JSON)
+- `contact_channels` (platform, platform_user_id) → contact_id, with last_active_at
+- `contact_drafts` (status: pending → awaiting_approval → sent / ignored / revising / failed, payload JSON, forward_ref, revision_note)
+
+### Outbound pipeline (agent → contact)
+`agent → contacts_reply → draft (pending) → mirror to forward_channel → approval gate (if approval_required) → adapter.send (via or last-active channel) → status=sent/failed`. Agents **cannot bypass** this — the only outbound path is `contacts_reply`. Direct `discord_send_message`/native sends from the agent will not show up in admin's forward channel and will not respect approval.
+
+### Inbound pipeline (contact → agent)
+Router (`src/router.rs`) checks `contact_channels` for the sender:
+1. If matched, touch `last_active_at`, mirror to `forward_channel`, inject `[Contact: ...]` into system prompt; if `ai_paused`, skip agent dispatch entirely.
+2. If sender NOT matched, check whether the inbound channel itself IS a `forward_channel` of any contact — if so, treat as **manual reply** and forward verbatim to the contact (admin types directly in `#client-foo` Discord channel → contact gets the message under the agent's identity). The agent is not invoked.
+
+### Multi-agent extension predicate
+`Contact::owning_agents() -> Vec<AgentId>` is the abstraction layer for v1→v2 migration. v1 returns `vec![self.agent_id]`. To enable multi-agent shared contacts, migrate to a `contact_agents` join table and update only this helper — call sites unchanged.
+
+### LINE specifics
+LINE is the first channel built with contacts in mind. The adapter (`src/channel/line.rs`) registers via `GatewayHandle.line_adapter` (concrete-typed, like `backend_adapter`) so the axum webhook handler can call `verify_signature` + `handle_webhook_payload` directly. Reply token cache (5-min validity) per LINE userId; outbound auto-tries reply token then falls back to push API. **Rich Menu is fully agent-managed** — CatClaw stores no `role↔menu` mapping; agents create menus via `line_rich_menu_*` actions and store the IDs themselves (in `contacts.external_ref` or memory).
 
 ## Language Conventions
 
@@ -241,6 +269,10 @@ JSON-RPC methods supported by the gateway WS server (`/ws`):
 | `social.draft.approve` | Approve draft → call Meta API → status=sent | — |
 | `social.draft.discard` | Discard draft → status=ignored | — |
 | `social.draft.submit_for_approval` | Called by hook: find latest draft, send review card, set status=awaiting_approval | — |
+| `contact.list` / `.get` / `.update` / `.delete` | Contacts CRUD | — |
+| `contact.bind` / `.unbind` | Bind/unbind platform user id ↔ contact | — |
+| `contact.draft.list` / `.approve` / `.discard` / `.request_revision` | Contact outbound draft management | — |
+| `contact.ai_pause` / `.ai_resume` | Pause/resume AI for a contact | — |
 
 When adding a new WS method, update this table and the `dispatch()` function in `src/ws_server.rs`.
 
@@ -284,3 +316,9 @@ Always do the complete fix. Never leave warnings, tech debt, or half-done work w
 13. **Social channel creation order in gateway.rs** — `social_item_tx`/`social_item_rx` must be created before the scheduler block (scheduler config references `social_item_tx`) but the ingest task spawn must happen after `adapters_list` is built. Solution: create the unbounded channel early, spawn the ingest task after `adapters_list` is available.
 14. **TUI Agents > Tools uses a static list — must be kept in sync with mcp_server.rs** — `list_catclaw_mcp_tools()` in `src/tui/agents.rs` is a hardcoded list of `mcp__catclaw__*` tool names. It does NOT auto-discover from the running gateway. Any time a new built-in MCP tool is added to `mcp_server.rs`, it must also be added to `list_catclaw_mcp_tools()`. Social tools are conditional: only add when `config.social.instagram.is_some()` / `config.social.threads.is_some()`.
 15. **Social card restore must be self-healing, not best-effort** — `update_forward_card` can fail (Discord edit-limits, rate limit, deleted message) and if the caller only `warn!`s, the inbox row silently desyncs from its UI — user sees a resolved card with no buttons while the DB says `pending`. Always restore via `forward::ensure_inbox_card_restored()`, which falls back to sending a new card and updating `forward_ref`. Pair with `forward::notify_admin()` when even the fallback fails so the human knows to run `catclaw social reprocess <id>` / `/social-reprocess` in Discord.
+16. **Router needs adapter map, must be built after adapters** — contacts forward mirroring + manual reply detection both require `Arc<HashMap<String, Arc<dyn ChannelAdapter>>>`. The original gateway.rs created `MessageRouter` in step 5 (before adapters), then built adapters in step 7. Now router construction is deferred until step 9 so `set_adapters()` can inject the populated map. **Rule:** when adding a router-level dependency on adapter state, double-check the construction order in gateway.rs.
+17. **Contacts business data is NOT CatClaw's responsibility** — `contacts.metadata` is for slow-changing profile (allergies, goals); `contacts.external_ref` is a free-form JSON pointer (e.g. Notion page id). Per-day metrics, training logs, counseling notes belong in agent-managed external storage (Notion MCP / palace / self-managed SQLite). Do NOT add domain-specific schemas to CatClaw — that locks the system to one vertical.
+18. **`contacts_reply` is the ONLY agent outbound path to a contact** — agents must not call `discord_send_message` / `telegram_send_message` / etc. directly for messages destined for a contact, because direct sends bypass the forward + approval pipeline. The agent's MCP toolbox includes both, but the catclaw skill (SKILL_CATCLAW) instructs agents to use `contacts_reply` for any contact-destined output.
+19. **LINE adapter stores reply tokens per LINE userId; check expiry before reuse** — reply tokens are valid 5 minutes from inbound event. `LineAdapter.reply_tokens` is `RwLock<HashMap<userId, (token, expires_unix)>>`. `take_reply_token()` consumes the token (one-shot) and returns None when expired. Outbound `send()` always tries reply token first, then push API.
+20. **LINE adapter is registered TWICE in gateway**: once into `adapters` (the generic `Arc<dyn ChannelAdapter>` map for router/MCP dispatch) AND once into `GatewayHandle.line_adapter` as concrete `Arc<LineAdapter>` (so the axum webhook handler can call `verify_signature` + `handle_webhook_payload` without trait downcast). Same pattern as `backend_adapter`. Don't try to fold these into one — Rust doesn't support trait-object downcast cleanly.
+21. **`ChannelType::Line` enum variant must include in every match** — adding a new ChannelType variant requires updating `as_str()` in `src/channel/mod.rs`. Compiler catches missing arms; just don't fall back to a wildcard `_ =>` in places that need explicit per-platform routing.

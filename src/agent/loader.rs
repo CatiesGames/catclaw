@@ -1857,6 +1857,140 @@ Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
 **Image/carousel posts:** Upload each image with `instagram_upload_media` / `threads_upload_media` first, then pass all URLs as an array to the create_post tool. 1 image = single post, 2+ images = carousel.
 
 For full setup guidance, load the `instagram` or `threads` skill.
+
+---
+
+## Contacts (cross-platform identity)
+
+CatClaw 的 contacts 系統提供「人」的抽象 — 跨 Discord/Telegram/Slack/LINE 統一身份。
+若使用者要把對話對象當「個案」「客戶」「學員」等管理，就用 contacts。
+
+**核心觀念**:
+- contacts 只管身份、平台綁定、forward 鏡射、approval — **不存業務資料**
+- 業務資料(個案飲食記錄、健身數據、諮商筆記等)由你自選工具:
+  Notion MCP / memory palace (`memory_*` tools) / 自管 SQLite / 檔案
+- `contacts.external_ref` 欄位可塞自由 JSON 指向外部系統(例如 Notion page id)
+- `contacts.metadata` 可塞慢變 profile(目標、過敏源、tags...)
+
+**Role 是行為 hint,不是權限**:
+- `admin` — 對方是管理者(會收到指令、要報表)
+- `client` — 對方是被服務的個案/客戶(分析、溫和回覆)
+- `unknown` — 預設,未明確身份
+
+**未綁 contact 的 sender** = role unknown,行為與沒裝 contacts 系統時完全相同(零回歸)。
+
+### Workflow
+
+1. 個案首次傳訊或 LINE follow → 你看到 `[LINE follow event]` 或一般訊息
+2. 與管理者(admin)確認 → 用 `contacts_create + contacts_bind_channel`
+3. 之後該 sender 的每則訊息 system prompt 會附 `[Contact: name=..., role=..., tags=..., metadata=...]`
+4. 你回覆時用 `contacts_reply` (而非平台原生 send tool)，確保走 forward + approval pipeline
+
+### MCP Tools
+
+| Tool | 說明 |
+|------|------|
+| `contacts_create` | 建立 contact (name + role + tags + approval_required) |
+| `contacts_get` | 用 id 或 (platform, platform_user_id) 查 |
+| `contacts_list` | 列表,可 filter agent_id / role / tag |
+| `contacts_update` | 部分更新欄位(role/tags/forward_channel/approval_required/external_ref/metadata) |
+| `contacts_delete` | 刪除(cascade channels + drafts) |
+| `contacts_bind_channel` | 綁定 LINE userId / Discord id / TG user_id 等 |
+| `contacts_unbind_channel` | 解綁 |
+| `contacts_reply` | **唯一回覆出口**,走 outbound pipeline |
+| `contacts_ai_pause` | 暫停 AI(個案訊息只鏡射不派給你) |
+| `contacts_ai_resume` | 恢復 AI |
+| `contacts_drafts_list` | 列待審草稿 |
+| `contacts_draft_approve` | 核准送出 |
+| `contacts_draft_discard` | 丟棄草稿 |
+| `contacts_draft_request_revision` | 退回草稿要求重寫(附 note) |
+
+### contacts_reply payload
+
+```json
+{"type": "text", "text": "..."}
+{"type": "image", "url": "https://...", "caption": "..."}
+{"type": "flex", "contents": {...}}     // 僅 LINE 支援
+```
+
+### Forward channel
+
+設 `forward_channel = "discord:guild_id/channel_id"` 後:
+- 個案入站訊息會鏡射到該頻道
+- 你的草稿會以 work card 顯示在該頻道
+- 管理者在該頻道直接打字 → 系統視為手動回覆,以你的名義轉發給個案
+- ai_paused 時所有訊息只鏡射,不派給你 — 等管理者人工介入
+
+### 業務資料建議
+
+不要把每日數據塞 `contacts.metadata`(那是慢變 profile)。建議:
+- **慢變、欄位固定**(目標、過敏、分型) → `contacts.metadata`
+- **時序、每日浮動**(餐點、體重、血糖) → 你自選 Notion / 檔案 / `memory_write` 並把 page id 存到 `contacts.external_ref`
+- **敘事、需要模糊搜尋**(諮商摘要、情緒) → `memory_write` (wing 可設為 contact.id 做 per-contact 隔離)
+
+### CLI
+
+```bash
+catclaw contact add <name> --role client --tag 糖尿病 --no-approval
+catclaw contact list [--agent ID] [--role ...]
+catclaw contact show <id>
+catclaw contact update <id> [--role ...] [--forward-channel ...] [--approval|--no-approval]
+catclaw contact bind <id> --platform line --user-id U123...
+catclaw contact unbind --platform line --user-id U123...
+catclaw contact pause <id>
+catclaw contact resume <id>
+catclaw contact draft list [--status ...]
+catclaw contact draft approve <draft_id>
+catclaw contact draft discard <draft_id>
+```
+
+---
+
+## LINE (optional channel)
+
+LINE 為**選用**通訊管道,需要 LINE Official Account + Messaging API + 公開 HTTPS endpoint。
+未配置時整個 adapter 不啟動,既有功能零影響。
+
+### LINE-specific MCP Actions
+
+(透過 adapter execute,工具名 `line_<action>`)
+
+| Action | 用途 |
+|--------|------|
+| `rich_menu_create` | 建立 rich menu(name + chat_bar_text + size + areas) |
+| `rich_menu_upload_image` | 上傳 menu 背景圖(JPEG/PNG,絕對本機路徑) |
+| `rich_menu_list` | 列出所有 rich menu |
+| `rich_menu_delete` | 刪除 menu |
+| `rich_menu_set_default` | 設為 OA-wide 預設 menu |
+| `rich_menu_link_user` | 套用 menu 到特定用戶(差異化 admin/client menu) |
+| `rich_menu_unlink_user` | 解除個別 menu(回到預設) |
+| `get_quota` | 查 push API 月配額 |
+| `get_profile` | 查 LINE 用戶 displayName + 頭像 |
+| `send_flex` | 發送 Flex message(rich UI) |
+| `show_loading` | 1:1 chat 顯示 loading(最多 60 秒) |
+
+**Rich Menu 完全由 agent 自管** — CatClaw 不維護 role↔menu 對應。
+你建立 menu 後,把 menu_id 存到 `contacts.external_ref` 或 memory,
+之後看到 contact role 變化就主動 `rich_menu_link_user`。
+
+範例工作流:
+```
+管理者: "幫我做兩個 rich menu,一個給我,一個給個案"
+你:
+  1. rich_menu_create({name:"admin", chat_bar_text:"管理", size:..., areas:[...]})
+     → 拿到 menu_id_a
+  2. rich_menu_upload_image({menu_id: menu_id_a, image_path: "/path/to/admin.jpg"})
+  3. (同樣建立 client menu → menu_id_c)
+  4. 把兩個 id 記住(寫到 memory 或自己的 Notion)
+  5. 對 role=admin 的 contact 呼叫 rich_menu_link_user(menu_id_a, ...)
+     對 role=client 的 contact 呼叫 rich_menu_link_user(menu_id_c, ...)
+```
+
+### LINE Outbound 提示
+
+- 5 分鐘內回覆走 reply token (免費),過期才走 push API (計入月配額)
+- 文字長度上限 5000 字元
+- adapter 自動處理 reply token 快取,你不需要區分 reply / push
 "#;
 
 const SKILL_INJECTION_GUARD: &str = r#"---
