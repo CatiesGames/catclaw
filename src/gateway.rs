@@ -10,6 +10,7 @@ use dashmap::DashMap;
 use crate::agent::{AgentLoader, AgentRegistry};
 use crate::channel::backend::BackendAdapter;
 use crate::channel::discord::DiscordAdapter;
+use crate::channel::line::LineAdapter;
 use crate::channel::slack::SlackAdapter;
 use crate::channel::telegram::TelegramAdapter;
 use crate::channel::{AdapterFilter, ChannelAdapter, MsgContext};
@@ -54,6 +55,9 @@ pub struct GatewayHandle {
     /// Backend channel adapter (if configured). Stored as concrete type
     /// so the WS handler can call `handle_backend_ws` directly.
     pub backend_adapter: Option<Arc<BackendAdapter>>,
+    /// LINE adapter (if configured). Stored as concrete type so the webhook
+    /// handler can call `handle_webhook_payload` + `verify_signature` directly.
+    pub line_adapter: Option<Arc<LineAdapter>>,
 }
 
 /// Start gateway services (DB, agents, session manager, channel adapters, scheduler)
@@ -128,14 +132,9 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
             .with_config(gw_config.clone()),
     );
 
-    // 5. Load bindings from config
-    let router = Arc::new(MessageRouter::new(
-        session_manager.clone(),
-        agent_registry.clone(),
-        &config.bindings,
-        default_agent_id,
-        config.general.workspace.clone(),
-    ));
+    // 5. Defer router creation until adapters are built (router needs adapter map
+    //    for contact forward mirroring + manual reply detection).
+    let router_default_agent = default_agent_id;
 
     // 6. Create message channel
     let (msg_tx, mut msg_rx) = mpsc::channel::<MsgContext>(256);
@@ -152,6 +151,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     let mut adapters: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
     let mut adapter_filters: Vec<Arc<std::sync::RwLock<AdapterFilter>>> = Vec::new();
     let mut backend_adapter: Option<Arc<BackendAdapter>> = None;
+    let mut line_adapter: Option<Arc<LineAdapter>> = None;
 
     for channel_config in &config.channels {
         match channel_config.channel_type.as_str() {
@@ -226,6 +226,22 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 });
 
                 info!("slack adapter started");
+            }
+            "line" => {
+                let (la, filter) = LineAdapter::from_config(channel_config)?;
+                adapter_filters.push(filter);
+                let adapter = Arc::new(la);
+                adapters.push(adapter.clone());
+                line_adapter = Some(adapter.clone());
+
+                let tx = msg_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = adapter.start(tx).await {
+                        error!(error = %e, "line adapter error");
+                    }
+                });
+
+                info!("line adapter started (webhook-driven)");
             }
             "backend" => {
                 match BackendAdapter::from_config(channel_config) {
@@ -312,6 +328,18 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         .map(|a| (a.name().to_string(), a.clone()))
         .collect();
     let adapter_map = Arc::new(adapter_map);
+
+    // Build router now that adapters are available (router needs them for
+    // contact forward mirroring + manual reply detection).
+    let mut router_inner = MessageRouter::new(
+        session_manager.clone(),
+        agent_registry.clone(),
+        &config.bindings,
+        router_default_agent,
+        config.general.workspace.clone(),
+    );
+    router_inner.set_adapters(adapter_map.clone());
+    let router = Arc::new(router_inner);
 
     let (event_bus_tx, _) = tokio::sync::broadcast::channel::<String>(256);
     let event_bus = Arc::new(event_bus_tx);
@@ -534,6 +562,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         social_item_tx,
         embedder: embedder.clone(),
         backend_adapter,
+        line_adapter,
     };
 
     // 10. Start gateway server (WS + MCP on single port)

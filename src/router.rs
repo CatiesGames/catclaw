@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::warn;
@@ -24,6 +25,8 @@ pub struct MessageRouter {
     workspace: PathBuf,
     /// HTTP client for downloading attachments
     http_client: reqwest::Client,
+    /// Adapter map for contact forward mirroring + manual reply (set by gateway).
+    adapters: Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,7 +63,13 @@ impl MessageRouter {
             default_agent_id,
             workspace,
             http_client: reqwest::Client::new(),
+            adapters: Arc::new(HashMap::new()),
         }
+    }
+
+    /// Inject the adapter map (after gateway constructs it). Call once at startup.
+    pub fn set_adapters(&mut self, adapters: Arc<HashMap<String, Arc<dyn ChannelAdapter>>>) {
+        self.adapters = adapters;
     }
 
     /// Route a message: resolve agent, create/resume session, get response
@@ -69,6 +78,57 @@ impl MessageRouter {
         ctx: &MsgContext,
         adapter: &dyn ChannelAdapter,
     ) -> Result<()> {
+        // 0a. Contact lookup: if this sender is a known contact, mirror inbound
+        //     to forward channel and (when ai_paused) skip agent dispatch.
+        let db = self.session_manager.state_db();
+        let platform = ctx.channel_type.as_str();
+        let contact = db
+            .get_contact_by_platform_user(platform, &ctx.sender_id)
+            .ok()
+            .flatten();
+        if let Some(ref c) = contact {
+            // Touch last_active for last-active routing in pipeline.
+            let _ = db.touch_contact_channel(platform, &ctx.sender_id);
+            // Mirror inbound to forward channel (best effort).
+            let attachments: Vec<String> = ctx
+                .attachments
+                .iter()
+                .map(|a| format!("{} ({})", a.filename, a.url))
+                .collect();
+            crate::contacts::pipeline::mirror_inbound(
+                &self.adapters, c, platform, &ctx.text, attachments,
+            )
+            .await;
+            if c.ai_paused {
+                tracing::info!(
+                    contact_id = %c.id,
+                    sender = %ctx.sender_name,
+                    "skipping agent dispatch — contact is ai_paused"
+                );
+                return Ok(());
+            }
+        }
+
+        // 0b. Manual reply detection: if this message comes from a forward channel
+        //     (admin's monitoring channel), forward it to the corresponding contact
+        //     instead of routing through the agent.
+        if contact.is_none() {
+            // forward_channel format: "{platform}:{channel_id}" or "{platform}:{guild}/{channel_id}"
+            if crate::contacts::pipeline::try_manual_reply(
+                db,
+                &self.adapters,
+                platform,
+                &ctx.channel_id,
+                &ctx.text,
+                &ctx.sender_id,
+            )
+            .await
+            .is_some()
+            {
+                return Ok(());
+            }
+        }
+
         // 1. Start typing indicator
         let _typing = adapter.start_typing(&ctx.channel_id, &ctx.peer_id).await?;
 
@@ -211,7 +271,34 @@ impl MessageRouter {
         };
 
         // 6. Build context header + download attachments + compose message
-        let context_header = build_context_header(ctx);
+        let mut context_header = build_context_header(ctx);
+        if let Some(ref c) = contact {
+            let tags_str = if c.tags.is_empty() {
+                String::new()
+            } else {
+                format!(", tags=[{}]", c.tags.join(","))
+            };
+            let ext_str = if c.external_ref.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+                String::new()
+            } else {
+                format!("\n[Contact external_ref: {}]", c.external_ref)
+            };
+            let meta_str = if c.metadata.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+                String::new()
+            } else {
+                format!("\n[Contact metadata: {}]", c.metadata)
+            };
+            context_header = format!(
+                "{}\n[Contact: id={}, name={}, role={}{}]{}{}",
+                context_header,
+                c.id,
+                c.display_name,
+                c.role.as_str(),
+                tags_str,
+                ext_str,
+                meta_str,
+            );
+        }
         let reply_line = ctx.reply_to.as_ref().and_then(|r| {
             r.text.as_ref().map(|t| {
                 let preview: String = t.chars().take(200).collect();

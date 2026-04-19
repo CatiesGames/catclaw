@@ -4,8 +4,13 @@
 //! `contacts_ai_resume`、`contacts_draft_request_revision` 等需要 outbound pipeline
 //! 的 tools 在 Stage 3 補齊。
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use serde_json::Value;
 
+use crate::channel::ChannelAdapter;
+use crate::contacts::pipeline;
 use crate::contacts::{Contact, ContactChannel, ContactRole, ContactsFilter};
 use crate::error::{CatClawError, Result};
 use crate::state::StateDb;
@@ -108,6 +113,60 @@ pub fn build_contacts_tools() -> Vec<Value> {
             }),
         ),
         tool(
+            "contacts_reply",
+            "Send a reply to a contact. Goes through the outbound pipeline: \
+             draft → mirror to forward channel (if set) → approval gate → send. \
+             If approval_required=true the message will be queued and an admin \
+             must approve via the work card; if false it sends immediately.",
+            serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "id":{"type":"string","description":"Contact id"},
+                    "payload":{
+                        "description":"Message payload. Examples: {\"type\":\"text\",\"text\":\"hi\"} | {\"type\":\"image\",\"url\":\"https://...\",\"caption\":\"...\"} | {\"type\":\"flex\",\"contents\":{...}} (LINE only).",
+                        "oneOf":[
+                            {"type":"object","properties":{"type":{"const":"text"},"text":{"type":"string"}},"required":["type","text"]},
+                            {"type":"object","properties":{"type":{"const":"image"},"url":{"type":"string"},"caption":{"type":"string"}},"required":["type","url"]},
+                            {"type":"object","properties":{"type":{"const":"flex"},"contents":{"type":"object"}},"required":["type","contents"]}
+                        ]
+                    },
+                    "via":{"type":"string","description":"Optional explicit platform to send via (e.g. 'line'). Defaults to last-active channel."}
+                },
+                "required":["id","payload"]
+            }),
+        ),
+        tool(
+            "contacts_ai_pause",
+            "Pause AI for a contact. While paused, inbound messages from this contact are mirrored \
+             to the forward channel but NOT dispatched to the agent. Admin should reply manually.",
+            serde_json::json!({
+                "type":"object",
+                "properties":{"id":{"type":"string"}},
+                "required":["id"]
+            }),
+        ),
+        tool(
+            "contacts_ai_resume",
+            "Resume AI handling for a contact.",
+            serde_json::json!({
+                "type":"object",
+                "properties":{"id":{"type":"string"}},
+                "required":["id"]
+            }),
+        ),
+        tool(
+            "contacts_draft_request_revision",
+            "Send a draft back to the agent for revision with a note (e.g. 'be more empathetic').",
+            serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "draft_id":{"type":"integer"},
+                    "note":{"type":"string"}
+                },
+                "required":["draft_id","note"]
+            }),
+        ),
+        tool(
             "contacts_drafts_list",
             "List outbound drafts pending approval (or other status). Filter by contact_id and status.",
             serde_json::json!({
@@ -151,6 +210,7 @@ fn tool(name: &str, description: &str, schema: Value) -> Value {
 /// Dispatch a `contacts_*` tool call.
 pub async fn execute_contacts_tool(
     db: &StateDb,
+    adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
     default_agent_id: &str,
     tool_name: &str,
     args: Value,
@@ -289,22 +349,58 @@ pub async fn execute_contacts_tool(
             let rows = db.list_contact_drafts(contact_id, status, limit)?;
             Ok(serde_json::to_value(&rows).unwrap_or(Value::Null))
         }
+        "contacts_reply" => {
+            let id = str_arg(&args, "id")?;
+            let payload = args
+                .get("payload")
+                .cloned()
+                .ok_or_else(|| CatClawError::Other("missing payload".into()))?;
+            let via = args.get("via").and_then(|v| v.as_str()).map(String::from);
+            let res = pipeline::submit_reply(db, adapters, id, payload, via).await?;
+            Ok(serde_json::to_value(&res).unwrap_or(Value::Null))
+        }
+        "contacts_ai_pause" => {
+            let id = str_arg(&args, "id")?;
+            let mut c = db
+                .get_contact(id)?
+                .ok_or_else(|| CatClawError::Other(format!("contact '{}' not found", id)))?;
+            c.ai_paused = true;
+            db.update_contact(&c)?;
+            Ok(serde_json::json!({"paused": id}))
+        }
+        "contacts_ai_resume" => {
+            let id = str_arg(&args, "id")?;
+            let mut c = db
+                .get_contact(id)?
+                .ok_or_else(|| CatClawError::Other(format!("contact '{}' not found", id)))?;
+            c.ai_paused = false;
+            db.update_contact(&c)?;
+            Ok(serde_json::json!({"resumed": id}))
+        }
         "contacts_draft_approve" => {
             let id = args
                 .get("draft_id")
                 .and_then(|v| v.as_i64())
                 .ok_or_else(|| CatClawError::Other("missing draft_id".into()))?;
-            // Stage 2 stub: mark approved (Stage 3 wires actual send pipeline)
-            db.update_contact_draft_status(id, "awaiting_approval")?;
-            Ok(serde_json::json!({"approved": id, "note": "send pipeline activates in Stage 3"}))
+            let res = pipeline::approve_draft(db, adapters, id).await?;
+            Ok(serde_json::to_value(&res).unwrap_or(Value::Null))
         }
         "contacts_draft_discard" => {
             let id = args
                 .get("draft_id")
                 .and_then(|v| v.as_i64())
                 .ok_or_else(|| CatClawError::Other("missing draft_id".into()))?;
-            db.update_contact_draft_status(id, "ignored")?;
-            Ok(serde_json::json!({"discarded": id}))
+            let res = pipeline::discard_draft(db, adapters, id).await?;
+            Ok(serde_json::to_value(&res).unwrap_or(Value::Null))
+        }
+        "contacts_draft_request_revision" => {
+            let id = args
+                .get("draft_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| CatClawError::Other("missing draft_id".into()))?;
+            let note = str_arg(&args, "note")?;
+            let res = pipeline::request_revision(db, adapters, id, note).await?;
+            Ok(serde_json::to_value(&res).unwrap_or(Value::Null))
         }
         other => Err(CatClawError::Other(format!(
             "unknown contacts tool '{}'",

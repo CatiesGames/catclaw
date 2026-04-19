@@ -1500,6 +1500,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         group_allow: vec![],
                         group_deny: vec![],
                         app_token_env,
+                        secret_env: None,
                     });
                     config.save(&cli.config)?;
                     println!("Channel added. Config saved.");
@@ -2308,6 +2309,7 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
                 group_allow: vec![],
                 group_deny: vec![],
                 app_token_env: None,
+                secret_env: None,
             });
 
             std::env::set_var(env_var_name, &token);
@@ -2409,6 +2411,7 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
                 group_allow: vec![],
                 group_deny: vec![],
                 app_token_env: None,
+                secret_env: None,
             });
 
             std::env::set_var(env_var_name, &token);
@@ -2573,6 +2576,7 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
                 group_allow: vec![],
                 group_deny: vec![],
                 app_token_env: Some(app_env.to_string()),
+                secret_env: None,
             });
 
             std::env::set_var(bot_env, &bot_token);
@@ -2613,6 +2617,7 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
                 group_allow: vec![],
                 group_deny: vec![],
                 app_token_env: None,
+                secret_env: None,
             });
 
             std::env::set_var(&env_var_name, &token);

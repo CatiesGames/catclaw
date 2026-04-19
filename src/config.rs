@@ -319,6 +319,11 @@ pub struct ChannelConfig {
     /// Environment variable name for the app-level token (Slack Socket Mode only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_token_env: Option<String>,
+
+    /// Environment variable name for the channel signing secret.
+    /// Currently used by LINE adapter for webhook HMAC verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

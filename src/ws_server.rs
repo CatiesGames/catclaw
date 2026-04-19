@@ -26,6 +26,11 @@ pub fn spawn(addr: String, gw: GatewayHandle) -> tokio::task::JoinHandle<()> {
 
     tokio::spawn(async move {
         let webhook_router = crate::social::webhook::build_router(gw.clone());
+        let line_webhook_router: Router<Arc<GatewayHandle>> = if gw.line_adapter.is_some() {
+            crate::channel::line::build_webhook_router()
+        } else {
+            Router::new()
+        };
         let app = Router::new()
             .route("/ws", get(ws_handler))
             .route("/ws/backend", get(ws_backend_handler))
@@ -33,6 +38,7 @@ pub fn spawn(addr: String, gw: GatewayHandle) -> tokio::task::JoinHandle<()> {
             .route("/media/{filename}", get(serve_media))
             .merge(mcp_server::router())
             .merge(webhook_router)
+            .merge(line_webhook_router)
             .with_state(gw);
 
         let listener = match tokio::net::TcpListener::bind(&addr).await {
