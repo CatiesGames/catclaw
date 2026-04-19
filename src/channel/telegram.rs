@@ -27,12 +27,17 @@ pub struct TelegramAdapter {
     /// Receiver half — taken once by gateway.
     #[allow(clippy::type_complexity)]
     social_action_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(i64, String, Option<String>)>>>,
+    /// Sender half for contact work-card actions.
+    contact_action_tx: mpsc::UnboundedSender<crate::contacts::ContactAction>,
+    contact_action_rx:
+        tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<crate::contacts::ContactAction>>>,
 }
 
 impl TelegramAdapter {
     pub fn new(token: String, filter: std::sync::Arc<std::sync::RwLock<AdapterFilter>>) -> Self {
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         let (social_action_tx, social_action_rx) = mpsc::unbounded_channel();
+        let (contact_action_tx, contact_action_rx) = mpsc::unbounded_channel();
         TelegramAdapter {
             token,
             filter,
@@ -41,6 +46,8 @@ impl TelegramAdapter {
             approval_rx: tokio::sync::Mutex::new(Some(approval_rx)),
             social_action_tx,
             social_action_rx: tokio::sync::Mutex::new(Some(social_action_rx)),
+            contact_action_tx,
+            contact_action_rx: tokio::sync::Mutex::new(Some(contact_action_rx)),
         }
     }
 
@@ -52,6 +59,13 @@ impl TelegramAdapter {
     /// Take the social action receiver (called once by gateway).
     pub async fn take_social_action_rx(&self) -> Option<mpsc::UnboundedReceiver<(i64, String, Option<String>)>> {
         self.social_action_rx.lock().await.take()
+    }
+
+    /// Take the contact-action receiver (called once by gateway).
+    pub async fn take_contact_action_rx(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<crate::contacts::ContactAction>> {
+        self.contact_action_rx.lock().await.take()
     }
 
     pub fn from_config(config: &crate::config::ChannelConfig) -> Result<(Self, std::sync::Arc<std::sync::RwLock<AdapterFilter>>)> {
@@ -318,12 +332,46 @@ impl ChannelAdapter for TelegramAdapter {
         // Callback query handler for approval and social inbox button presses
         let approval_tx = self.approval_tx.clone();
         let social_action_tx = self.social_action_tx.clone();
+        let contact_action_tx = self.contact_action_tx.clone();
         let callback_handler = Update::filter_callback_query().endpoint(
             move |bot: Bot, q: teloxide::types::CallbackQuery| {
                 let approval_tx = approval_tx.clone();
                 let social_action_tx = social_action_tx.clone();
+                let contact_action_tx = contact_action_tx.clone();
                 async move {
                     if let Some(data) = &q.data {
+                        // Contact work-card button: contact:{action}:{id}
+                        // Telegram: no Revise (decision C — would need 2-step prompt).
+                        if let Some(rest) = data.strip_prefix("contact:") {
+                            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                            if parts.len() == 2 {
+                                use crate::contacts::ContactAction;
+                                let act = parts[0];
+                                let arg = parts[1];
+                                match act {
+                                    "approve" => {
+                                        if let Ok(id) = arg.parse::<i64>() {
+                                            let _ = contact_action_tx.send(ContactAction::Approve(id));
+                                        }
+                                    }
+                                    "discard" => {
+                                        if let Ok(id) = arg.parse::<i64>() {
+                                            let _ = contact_action_tx.send(ContactAction::Discard(id));
+                                        }
+                                    }
+                                    "pause" => {
+                                        let _ = contact_action_tx.send(ContactAction::Pause(arg.to_string()));
+                                    }
+                                    "resume" => {
+                                        let _ = contact_action_tx.send(ContactAction::Resume(arg.to_string()));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let _ = bot.answer_callback_query(&q.id).await;
+                            return Ok(());
+                        }
+
                         // Social draft button: social_draft:{action}:{draft_id}
                         if let Some(rest) = data.strip_prefix("social_draft:") {
                             let parts: Vec<&str> = rest.splitn(2, ':').collect();
@@ -523,6 +571,45 @@ impl ChannelAdapter for TelegramAdapter {
             .ok_or_else(|| CatClawError::Telegram("not connected".into()))?;
 
         match action {
+            // ── Contact work card ─────────────────────────────────────
+            "contact_work_card" => {
+                let chat_id_str = p_str(&params, "channel_id")?;
+                let chat_id: i64 = chat_id_str.parse()
+                    .map_err(|_| CatClawError::Telegram("invalid channel_id".into()))?;
+                let (text, kb) = build_contact_work_card_telegram(&params);
+                let mut req = bot.send_message(ChatId(chat_id), text);
+                if let Some(k) = kb {
+                    req = req.reply_markup(k);
+                }
+                let msg = req.await
+                    .map_err(|e| CatClawError::Telegram(format!("contact_work_card: {}", e)))?;
+                Ok(serde_json::json!({"message_id": msg.id.0.to_string()}))
+            }
+            "contact_work_card_edit" => {
+                let chat_id_str = p_str(&params, "channel_id")?;
+                let mid_str = p_str(&params, "message_id")?;
+                let chat_id: i64 = chat_id_str.parse()
+                    .map_err(|_| CatClawError::Telegram("invalid channel_id".into()))?;
+                let mid: i32 = mid_str.parse()
+                    .map_err(|_| CatClawError::Telegram("invalid message_id".into()))?;
+                let (text, kb) = build_contact_work_card_telegram(&params);
+                bot.edit_message_text(ChatId(chat_id), TgMessageId(mid), text)
+                    .await
+                    .map_err(|e| CatClawError::Telegram(format!("contact_work_card_edit text: {}", e)))?;
+                if let Some(k) = kb {
+                    let _ = bot
+                        .edit_message_reply_markup(ChatId(chat_id), TgMessageId(mid))
+                        .reply_markup(k)
+                        .await;
+                } else {
+                    let empty = InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new());
+                    let _ = bot
+                        .edit_message_reply_markup(ChatId(chat_id), TgMessageId(mid))
+                        .reply_markup(empty)
+                        .await;
+                }
+                Ok(serde_json::json!({"edited": true}))
+            }
             // ── Messages ──────────────────────────────────────────────
             "send_message" => {
                 let cid = p_chat(&params)?;
@@ -1045,4 +1132,41 @@ fn telegram_action_infos() -> Vec<ActionInfo> {
             "required": ["chat_id", "file_path"]
         })),
     ]
+}
+
+/// Build text + InlineKeyboard for a contact work card.
+/// Telegram does NOT include a Revise button (decision C — would need a
+/// 2-step prompt for the note). Use CLI / Discord / Slack to revise.
+fn build_contact_work_card_telegram(
+    params: &serde_json::Value,
+) -> (String, Option<InlineKeyboardMarkup>) {
+    let draft_id = params.get("draft_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let contact_id = params.get("contact_id").and_then(|v| v.as_str()).unwrap_or("");
+    let contact_name = params.get("contact_name").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+    let role = params.get("role").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let via = params.get("via_platform").and_then(|v| v.as_str()).unwrap_or("auto");
+    let preview = params.get("payload_preview").and_then(|v| v.as_str()).unwrap_or("");
+    let status = params.get("status_label").and_then(|v| v.as_str()).unwrap_or("");
+    let show_actions = params.get("show_actions").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let text = format!(
+        "📨 {} (role={})\nVia: {}    Status: {}\n────\n{}\n\ndraft #{} · contact {}",
+        contact_name, role, via, status, preview, draft_id,
+        contact_id.chars().take(8).collect::<String>(),
+    );
+    let kb = if show_actions {
+        Some(InlineKeyboardMarkup::new(vec![
+            vec![
+                InlineKeyboardButton::callback("✅ 核准", format!("contact:approve:{}", draft_id)),
+                InlineKeyboardButton::callback("🗑 捨棄", format!("contact:discard:{}", draft_id)),
+            ],
+            vec![
+                InlineKeyboardButton::callback("⏸ 暫停 AI", format!("contact:pause:{}", contact_id)),
+                InlineKeyboardButton::callback("▶ 恢復 AI", format!("contact:resume:{}", contact_id)),
+            ],
+        ]))
+    } else {
+        None
+    };
+    (text, kb)
 }

@@ -98,7 +98,10 @@ async fn handle_mcp(
                 let default_agent = gw.config.read().unwrap().default_agent_id().unwrap_or("main").to_string();
                 match crate::contacts::tools::execute_contacts_tool(
                     &gw.state_db,
+                    &gw.state_db,
                     &gw.adapters,
+                    &gw.session_manager,
+                    &gw.agent_registry,
                     &default_agent,
                     tool_name,
                     arguments,

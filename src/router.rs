@@ -119,6 +119,7 @@ impl MessageRouter {
                 &self.adapters,
                 platform,
                 &ctx.channel_id,
+                ctx.guild_id.as_deref(),
                 &ctx.text,
                 &ctx.sender_id,
             )

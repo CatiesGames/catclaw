@@ -194,3 +194,18 @@ pub struct ContactsFilter {
     pub role: Option<ContactRole>,
     pub tag: Option<String>,
 }
+
+/// Work card button action emitted by an adapter when an admin presses a button
+/// (or submits a modal) in the forward channel. Gateway dispatches to the
+/// appropriate pipeline call.
+#[derive(Debug, Clone)]
+pub enum ContactAction {
+    Approve(i64),
+    Discard(i64),
+    /// (draft_id, revision_note)
+    Revise(i64, String),
+    /// (contact_id)
+    Pause(String),
+    /// (contact_id)
+    Resume(String),
+}

@@ -34,6 +34,10 @@ pub struct DiscordAdapter {
     /// Receiver half — taken once by gateway.
     #[allow(clippy::type_complexity)]
     social_action_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(i64, String, Option<String>)>>>,
+    /// Sender half for contact work-card actions (approve/discard/revise/pause/resume).
+    contact_action_tx: mpsc::UnboundedSender<crate::contacts::ContactAction>,
+    contact_action_rx:
+        tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<crate::contacts::ContactAction>>>,
 }
 
 struct Handler {
@@ -43,12 +47,15 @@ struct Handler {
     approval_tx: mpsc::UnboundedSender<(String, bool)>,
     /// Channel to send social inbox button actions back to gateway.
     social_action_tx: mpsc::UnboundedSender<(i64, String, Option<String>)>,
+    /// Channel to send contact work-card button actions back to gateway.
+    contact_action_tx: mpsc::UnboundedSender<crate::contacts::ContactAction>,
 }
 
 impl DiscordAdapter {
     pub fn new(token: String, filter: Arc<std::sync::RwLock<AdapterFilter>>) -> Self {
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         let (social_action_tx, social_action_rx) = mpsc::unbounded_channel();
+        let (contact_action_tx, contact_action_rx) = mpsc::unbounded_channel();
         DiscordAdapter {
             token,
             filter,
@@ -58,6 +65,8 @@ impl DiscordAdapter {
             approval_rx: tokio::sync::Mutex::new(Some(approval_rx)),
             social_action_tx,
             social_action_rx: tokio::sync::Mutex::new(Some(social_action_rx)),
+            contact_action_tx,
+            contact_action_rx: tokio::sync::Mutex::new(Some(contact_action_rx)),
         }
     }
 
@@ -69,6 +78,13 @@ impl DiscordAdapter {
     /// Take the social action receiver (called once by gateway).
     pub async fn take_social_action_rx(&self) -> Option<mpsc::UnboundedReceiver<(i64, String, Option<String>)>> {
         self.social_action_rx.lock().await.take()
+    }
+
+    /// Take the contact-action receiver (called once by gateway).
+    pub async fn take_contact_action_rx(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<crate::contacts::ContactAction>> {
+        self.contact_action_rx.lock().await.take()
     }
 
     pub fn from_config(config: &crate::config::ChannelConfig) -> Result<(Self, Arc<std::sync::RwLock<AdapterFilter>>)> {
@@ -437,6 +453,81 @@ impl EventHandler for Handler {
             Interaction::Component(comp) => {
                 let custom_id = comp.data.custom_id.clone();
 
+                // Contact work-card button: contact:{action}:{id}
+                //   id = draft_id (i64) for approve/discard/revise
+                //   id = contact_id (uuid) for pause/resume
+                if let Some(rest) = custom_id.strip_prefix("contact:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() != 2 {
+                        let _ = comp.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await;
+                        return;
+                    }
+                    let action = parts[0];
+                    let arg = parts[1];
+
+                    // 'revise' opens a modal to collect the revision note.
+                    if action == "revise" {
+                        use serenity::all::{CreateInputText, CreateModal, InputTextStyle};
+                        let modal_id = format!("contact:revise_submit:{}", arg);
+                        let input = CreateInputText::new(
+                            InputTextStyle::Paragraph,
+                            "重寫指示",
+                            "note",
+                        )
+                        .placeholder("例如:再溫和一點、提到他上週的進步…")
+                        .required(true)
+                        .max_length(500);
+                        let modal = CreateModal::new(modal_id, "要求 AI 重寫")
+                            .components(vec![serenity::all::CreateActionRow::InputText(input)]);
+                        let _ = comp
+                            .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+                            .await;
+                        return;
+                    }
+
+                    let mut strip_buttons = false;
+                    match action {
+                        "approve" => {
+                            if let Ok(id) = arg.parse::<i64>() {
+                                let _ = self
+                                    .contact_action_tx
+                                    .send(crate::contacts::ContactAction::Approve(id));
+                                strip_buttons = true;
+                            }
+                        }
+                        "discard" => {
+                            if let Ok(id) = arg.parse::<i64>() {
+                                let _ = self
+                                    .contact_action_tx
+                                    .send(crate::contacts::ContactAction::Discard(id));
+                                strip_buttons = true;
+                            }
+                        }
+                        "pause" => {
+                            let _ = self
+                                .contact_action_tx
+                                .send(crate::contacts::ContactAction::Pause(arg.to_string()));
+                        }
+                        "resume" => {
+                            let _ = self
+                                .contact_action_tx
+                                .send(crate::contacts::ContactAction::Resume(arg.to_string()));
+                        }
+                        _ => {
+                            tracing::warn!(custom_id = %custom_id, "discord: unknown contact action");
+                        }
+                    }
+                    let response = if strip_buttons {
+                        CreateInteractionResponse::UpdateMessage(
+                            CreateInteractionResponseMessage::new().components(vec![]),
+                        )
+                    } else {
+                        CreateInteractionResponse::Acknowledge
+                    };
+                    let _ = comp.create_response(&ctx.http, response).await;
+                    return;
+                }
+
                 // Social draft button: social_draft:{action}:{draft_id}
                 if let Some(rest) = custom_id.strip_prefix("social_draft:") {
                     let parts: Vec<&str> = rest.splitn(2, ':').collect();
@@ -545,6 +636,32 @@ impl EventHandler for Handler {
                 }
             }
             Interaction::Modal(modal) => {
+                // Contact revise submission: contact:revise_submit:{draft_id}
+                if let Some(rest) = modal.data.custom_id.strip_prefix("contact:revise_submit:") {
+                    if let Ok(draft_id) = rest.parse::<i64>() {
+                        let note = modal
+                            .data
+                            .components
+                            .iter()
+                            .flat_map(|row| row.components.iter())
+                            .find_map(|c| {
+                                if let serenity::all::ActionRowComponent::InputText(t) = c {
+                                    if t.custom_id == "note" {
+                                        return t.value.clone();
+                                    }
+                                }
+                                None
+                            })
+                            .unwrap_or_default();
+                        let _ = self
+                            .contact_action_tx
+                            .send(crate::contacts::ContactAction::Revise(draft_id, note));
+                    }
+                    let _ = modal
+                        .create_response(&ctx.http, CreateInteractionResponse::Acknowledge)
+                        .await;
+                    return;
+                }
                 // ai_reply_hint modal submission: social:ai_reply_hint_submit:{card_id}
                 if let Some(rest) = modal.data.custom_id.strip_prefix("social:ai_reply_hint_submit:") {
                     if let Ok(card_id) = rest.parse::<i64>() {
@@ -611,6 +728,7 @@ impl ChannelAdapter for DiscordAdapter {
             filter: self.filter.clone(),
             approval_tx: self.approval_tx.clone(),
             social_action_tx: self.social_action_tx.clone(),
+            contact_action_tx: self.contact_action_tx.clone(),
         };
 
         let mut client = Client::builder(&self.token, intents)
@@ -789,6 +907,38 @@ impl ChannelAdapter for DiscordAdapter {
             .ok_or_else(|| CatClawError::Discord("not connected".to_string()))?;
 
         match action {
+            // ── Contact work card (rich render via embed + buttons) ───
+            "contact_work_card" => {
+                let cid = require_str(&params, "channel_id")?;
+                let ch_id = cid.parse::<u64>()
+                    .map_err(|_| CatClawError::Discord("invalid channel_id".into()))?;
+                let (embed, components) = build_contact_work_card_components(&params);
+                let mut builder = CreateMessage::new().embed(embed);
+                if !components.is_empty() {
+                    builder = builder.components(components);
+                }
+                let msg = ChannelId::new(ch_id).send_message(http, builder).await
+                    .map_err(|e| CatClawError::Discord(format!("contact_work_card send: {}", e)))?;
+                Ok(serde_json::json!({"message_id": msg.id.get().to_string()}))
+            }
+            "contact_work_card_edit" => {
+                let cid = require_str(&params, "channel_id")?;
+                let mid = require_str(&params, "message_id")?;
+                let ch_id = cid.parse::<u64>()
+                    .map_err(|_| CatClawError::Discord("invalid channel_id".into()))?;
+                let m_id = mid.parse::<u64>()
+                    .map_err(|_| CatClawError::Discord("invalid message_id".into()))?;
+                let (embed, components) = build_contact_work_card_components(&params);
+                let mut builder = EditMessage::new().embed(embed);
+                builder = if components.is_empty() {
+                    builder.components(vec![])
+                } else {
+                    builder.components(components)
+                };
+                ChannelId::new(ch_id).edit_message(http, serenity::all::MessageId::new(m_id), builder).await
+                    .map_err(|e| CatClawError::Discord(format!("contact_work_card_edit: {}", e)))?;
+                Ok(serde_json::json!({"edited": true}))
+            }
             // ── Messages ──────────────────────────────────────────────
             "get_messages" => {
                 let cid = parse_channel_id(&params)?;
@@ -1736,4 +1886,70 @@ fn action(name: &str, description: &str, params_schema: serde_json::Value) -> Ac
         description: description.into(),
         params_schema,
     }
+}
+
+/// Build the embed + button components for a contact work card.
+/// Status determines button visibility (terminal states get no buttons).
+fn build_contact_work_card_components(
+    params: &serde_json::Value,
+) -> (CreateEmbed, Vec<CreateActionRow>) {
+    let draft_id = params.get("draft_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let contact_id = params.get("contact_id").and_then(|v| v.as_str()).unwrap_or("");
+    let contact_name = params.get("contact_name").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+    let role = params.get("role").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let via = params.get("via_platform").and_then(|v| v.as_str()).unwrap_or("auto");
+    let preview = params.get("payload_preview").and_then(|v| v.as_str()).unwrap_or("");
+    let status_label = params.get("status_label").and_then(|v| v.as_str()).unwrap_or("");
+    let show_actions = params.get("show_actions").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let color = match status_label {
+        "sent" => 0x57F287u32,
+        "discarded" | "ignored" => 0x99AAB5u32,
+        "failed" => 0xED4245u32,
+        "publishing" | "auto-sending..." => 0xFFA500u32,
+        "revising" => 0xEB459Eu32,
+        _ => 0xFEE75Cu32,
+    };
+
+    let embed = CreateEmbed::new()
+        .title(format!("📨 {} (role={})", contact_name, role))
+        .description(preview)
+        .field("Via", via, true)
+        .field("Status", status_label, true)
+        .color(color)
+        .footer(serenity::all::CreateEmbedFooter::new(format!(
+            "draft #{} · contact {}",
+            draft_id,
+            &contact_id.chars().take(8).collect::<String>()
+        )));
+
+    let components: Vec<CreateActionRow> = if !show_actions {
+        vec![]
+    } else {
+        let primary = vec![
+            CreateButton::new(format!("contact:approve:{}", draft_id))
+                .label("✅ 核准送出")
+                .style(ButtonStyle::Success),
+            CreateButton::new(format!("contact:revise:{}", draft_id))
+                .label("🔄 要求重寫")
+                .style(ButtonStyle::Secondary),
+            CreateButton::new(format!("contact:discard:{}", draft_id))
+                .label("🗑 捨棄")
+                .style(ButtonStyle::Danger),
+        ];
+        let secondary = vec![
+            CreateButton::new(format!("contact:pause:{}", contact_id))
+                .label("⏸ 暫停 AI")
+                .style(ButtonStyle::Secondary),
+            CreateButton::new(format!("contact:resume:{}", contact_id))
+                .label("▶ 恢復 AI")
+                .style(ButtonStyle::Secondary),
+        ];
+        vec![
+            CreateActionRow::Buttons(primary),
+            CreateActionRow::Buttons(secondary),
+        ]
+    };
+
+    (embed, components)
 }

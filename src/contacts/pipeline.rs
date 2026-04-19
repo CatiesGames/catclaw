@@ -15,9 +15,12 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
+use crate::agent::AgentRegistry;
 use crate::channel::{ChannelAdapter, ChannelType, OutboundMessage};
 use crate::contacts::{Contact, ContactDraft, ContactPayload};
 use crate::error::{CatClawError, Result};
+use crate::session::manager::{SenderInfo, SessionManager};
+use crate::session::{Priority, SessionKey};
 use crate::state::StateDb;
 
 /// Parsed forward_channel reference.
@@ -336,6 +339,127 @@ pub async fn request_revision(
     })
 }
 
+/// Inject a revision instruction back into the contact's owning agent session.
+///
+/// Boundary policy A (per design): if no active session exists for this contact's
+/// agent, log a warning and leave the draft in `revising` state. The admin will
+/// have to remind the agent next time they interact (we deliberately don't spawn
+/// a fresh session — that would consume tokens unexpectedly).
+///
+/// Caller (WS handler / adapter button handler) is responsible for kicking this
+/// off in `tokio::spawn` — this function is fire-and-forget from the agent's
+/// perspective (we don't await the agent's reply).
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_revision_to_agent(
+    db: &Arc<StateDb>,
+    session_manager: &Arc<SessionManager>,
+    agent_registry: &Arc<std::sync::RwLock<AgentRegistry>>,
+    draft_id: i64,
+) {
+    let Ok(Some(draft)) = db.get_contact_draft(draft_id) else {
+        warn!(draft_id, "dispatch_revision: draft not found");
+        return;
+    };
+    if draft.status != "revising" {
+        // request_revision already updated to revising; ignore stale calls.
+        return;
+    }
+    let note = draft.revision_note.clone().unwrap_or_default();
+    let Ok(Some(contact)) = db.get_contact(&draft.contact_id) else {
+        warn!(draft_id, contact_id = %draft.contact_id, "dispatch_revision: contact not found");
+        return;
+    };
+
+    // Resolve agent. owning_agents() returns a Vec for forward-compat with v2
+    // multi-agent contacts; v1 has exactly one entry.
+    let agent_id = match contact.owning_agents().into_iter().next() {
+        Some(id) => id,
+        None => {
+            warn!(contact_id = %contact.id, "dispatch_revision: contact has no owning agent");
+            return;
+        }
+    };
+    let agent = {
+        let reg = agent_registry.read().unwrap();
+        reg.get(&agent_id).cloned()
+    };
+    let agent = match agent {
+        Some(a) => a,
+        None => {
+            warn!(agent_id, "dispatch_revision: agent not found in registry");
+            return;
+        }
+    };
+
+    // Boundary A: only inject if there is an active (or resumable) session.
+    // We look up by deriving the same session_key the original conversation used:
+    //   catclaw:{agent_id}:contacts:contact-{contact_id}
+    // This is a synthetic key — agent uses its normal context_id naming, but
+    // revisions go into a dedicated channel so we don't accidentally pollute a
+    // user-facing session. (The agent will see this in a separate session.)
+    //
+    // Trade-off: the agent loses the original draft's conversation context.
+    // We compensate by including the original payload in the inject text.
+    let session_key = SessionKey::new(&agent.id, "contacts", format!("contact-{}", contact.id));
+    let key_str = session_key.to_key_string();
+    let existing = match db.get_session(&key_str) {
+        Ok(opt) => opt,
+        Err(e) => {
+            warn!(error = %e, draft_id, "dispatch_revision: db error checking session");
+            return;
+        }
+    };
+    let session_alive = existing
+        .as_ref()
+        .map(|r| r.state != "archived")
+        .unwrap_or(false);
+    if !session_alive {
+        // Per boundary A: don't auto-spawn. Log and let the admin nudge later.
+        // We keep status=revising so a future tool call (or TUI refresh) can show
+        // the pending revision.
+        info!(
+            draft_id,
+            contact = %contact.display_name,
+            agent_id = %agent.id,
+            "revision pending: no active agent session — admin must follow up manually"
+        );
+        return;
+    }
+
+    let original_text = match serde_json::from_value::<ContactPayload>(draft.payload.clone()) {
+        Ok(p) => p.preview(),
+        Err(_) => draft.payload.to_string(),
+    };
+    let prompt = format!(
+        "[管理者要求重寫剛才給 {} 的回覆]\n原文:\n{}\n\n指示:\n{}\n\n請重新草擬一則回覆,使用 contacts_reply 送出 (contact_id={}).",
+        contact.display_name, original_text, note, contact.id
+    );
+
+    let sender = SenderInfo {
+        sender_id: Some("system:revision".to_string()),
+        sender_name: Some("admin (revision request)".to_string()),
+        channel_id: None,
+        thread_id: None,
+    };
+    let priority = Priority::Mention;
+
+    // Fire-and-forget: agent will run, possibly call contacts_reply with a new draft.
+    // We don't await — admin button handler must return immediately.
+    let sm = session_manager.clone();
+    let key = session_key.clone();
+    let agent_clone = agent.clone();
+    let prompt_clone = prompt.clone();
+    let draft_id_clone = draft_id;
+    tokio::spawn(async move {
+        let res = sm
+            .send_and_wait(&key, &agent_clone, &prompt_clone, priority, &sender, None, None)
+            .await;
+        if let Err(e) = res {
+            warn!(error = %e, draft_id = draft_id_clone, "revision dispatch failed");
+        }
+    });
+}
+
 /// Edit a draft's payload (manual edit by admin) and approve in one step.
 pub async fn edit_and_approve(
     db: &StateDb,
@@ -549,27 +673,20 @@ pub async fn try_manual_reply(
     adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
     inbound_platform: &str,
     inbound_channel_id: &str,
+    inbound_guild_id: Option<&str>,
     inbound_text: &str,
     inbound_sender_id: &str,
 ) -> Option<()> {
-    // Look up any contact whose forward_channel matches this (platform, channel_id).
-    // Naive: scan all contacts. Cheap because contacts are typically O(100) per agent.
-    let all = db.list_contacts(&Default::default()).ok()?;
-    let target_str_a = format!("{}:{}", inbound_platform, inbound_channel_id);
-    let mut matched: Option<Contact> = None;
-    for c in all {
-        let Some(ref fc) = c.forward_channel else { continue };
-        if fc == &target_str_a {
-            matched = Some(c);
-            break;
-        }
-        // Also match guild-prefixed form
-        if fc.starts_with(&format!("{}:", inbound_platform)) && fc.ends_with(&format!("/{}", inbound_channel_id)) {
-            matched = Some(c);
-            break;
-        }
+    // Indexed lookup: build the exact candidate strings the router would emit
+    // and let the contacts(forward_channel) index do an O(1) match.
+    let mut candidates = vec![format!("{}:{}", inbound_platform, inbound_channel_id)];
+    if let Some(g) = inbound_guild_id {
+        candidates.push(format!("{}:{}/{}", inbound_platform, g, inbound_channel_id));
     }
-    let contact = matched?;
+    let contact = db
+        .find_contact_by_forward_channel(&candidates)
+        .ok()
+        .flatten()?;
 
     // Don't echo bot's own messages; many adapters guard against this in their own loop too.
     if inbound_sender_id == "bot" || inbound_text.is_empty() {

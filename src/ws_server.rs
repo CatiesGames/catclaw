@@ -2123,7 +2123,9 @@ fn handle_contact_get(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
 async fn handle_contact_update(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
     let default_agent = gw.config.read().unwrap().default_agent_id().unwrap_or("main").to_string();
     match crate::contacts::tools::execute_contacts_tool(
-        &gw.state_db, &gw.adapters, &default_agent, "contacts_update", req.params.clone(),
+        &gw.state_db, &gw.state_db, &gw.adapters,
+        &gw.session_manager, &gw.agent_registry,
+        &default_agent, "contacts_update", req.params.clone(),
     ).await {
         Ok(v) => WsResponse::ok(req.id, v),
         Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
@@ -2207,7 +2209,17 @@ async fn handle_contact_draft_revision(req: &WsRequest, gw: &Arc<GatewayHandle>)
     };
     let note = req.params.get("note").and_then(|v| v.as_str()).unwrap_or("");
     match crate::contacts::pipeline::request_revision(&gw.state_db, &gw.adapters, id, note).await {
-        Ok(res) => WsResponse::ok(req.id, json!(res)),
+        Ok(res) => {
+            // Fire-and-forget: push the revision instruction back to the agent's session.
+            crate::contacts::pipeline::dispatch_revision_to_agent(
+                &gw.state_db,
+                &gw.session_manager,
+                &gw.agent_registry,
+                id,
+            )
+            .await;
+            WsResponse::ok(req.id, json!(res))
+        }
         Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
     }
 }

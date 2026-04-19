@@ -373,6 +373,8 @@ impl StateDb {
             );
             CREATE INDEX IF NOT EXISTS idx_contacts_agent ON contacts(agent_id);
             CREATE INDEX IF NOT EXISTS idx_contacts_role  ON contacts(agent_id, role);
+            CREATE INDEX IF NOT EXISTS idx_contacts_forward
+                ON contacts(forward_channel) WHERE forward_channel IS NOT NULL;
 
             CREATE TABLE IF NOT EXISTS contact_channels (
                 contact_id         TEXT NOT NULL,
@@ -1445,6 +1447,34 @@ impl StateDb {
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
+    }
+
+    /// Find a contact whose forward_channel matches one of the given candidate
+    /// reference strings. The router builds candidates like
+    /// "discord:guild123/chan456" + "discord:chan456" so the index lookup is exact.
+    pub fn find_contact_by_forward_channel(
+        &self,
+        candidates: &[String],
+    ) -> Result<Option<crate::contacts::Contact>> {
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let placeholders = candidates.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, agent_id, display_name, role, tags, forward_channel,
+                    approval_required, ai_paused, external_ref, metadata,
+                    created_at, updated_at
+             FROM contacts WHERE forward_channel IN ({}) LIMIT 1",
+            placeholders
+        );
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            candidates.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let row = stmt
+            .query_row(params.as_slice(), contact_row_mapper)
+            .optional()?;
+        Ok(row)
     }
 
     /// Touch last_active_at for inbound message tracking (used by router for last-active routing).

@@ -9,10 +9,12 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::agent::AgentRegistry;
 use crate::channel::ChannelAdapter;
 use crate::contacts::pipeline;
 use crate::contacts::{Contact, ContactChannel, ContactRole, ContactsFilter};
 use crate::error::{CatClawError, Result};
+use crate::session::manager::SessionManager;
 use crate::state::StateDb;
 
 /// Tool list for tools/list response.
@@ -208,9 +210,17 @@ fn tool(name: &str, description: &str, schema: Value) -> Value {
 }
 
 /// Dispatch a `contacts_*` tool call.
+///
+/// `db_arc` + `session_manager` + `agent_registry` are required only for
+/// `contacts_draft_request_revision`, which dispatches the revision back to
+/// the contact's owning agent session. Other tools ignore them.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_contacts_tool(
     db: &StateDb,
+    db_arc: &Arc<StateDb>,
     adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
+    session_manager: &Arc<SessionManager>,
+    agent_registry: &Arc<std::sync::RwLock<AgentRegistry>>,
     default_agent_id: &str,
     tool_name: &str,
     args: Value,
@@ -400,6 +410,8 @@ pub async fn execute_contacts_tool(
                 .ok_or_else(|| CatClawError::Other("missing draft_id".into()))?;
             let note = str_arg(&args, "note")?;
             let res = pipeline::request_revision(db, adapters, id, note).await?;
+            // Push the revision instruction back to the agent (fire-and-forget).
+            pipeline::dispatch_revision_to_agent(db_arc, session_manager, agent_registry, id).await;
             Ok(serde_json::to_value(&res).unwrap_or(Value::Null))
         }
         other => Err(CatClawError::Other(format!(

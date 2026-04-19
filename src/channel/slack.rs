@@ -31,6 +31,9 @@ pub struct SlackAdapter {
     /// Receiver half — taken once by gateway.
     #[allow(clippy::type_complexity)]
     social_action_rx: Mutex<Option<mpsc::UnboundedReceiver<(i64, String, Option<String>)>>>,
+    /// Sender half for contact work-card actions.
+    contact_action_tx: mpsc::UnboundedSender<crate::contacts::ContactAction>,
+    contact_action_rx: Mutex<Option<mpsc::UnboundedReceiver<crate::contacts::ContactAction>>>,
     /// User display name cache: user_id → display_name
     user_cache: DashMap<String, String>,
     /// Channel name cache: channel_id → channel_name
@@ -45,6 +48,7 @@ impl SlackAdapter {
     ) -> Self {
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         let (social_action_tx, social_action_rx) = mpsc::unbounded_channel();
+        let (contact_action_tx, contact_action_rx) = mpsc::unbounded_channel();
         SlackAdapter {
             bot_token,
             app_token,
@@ -55,6 +59,8 @@ impl SlackAdapter {
             approval_rx: Mutex::new(Some(approval_rx)),
             social_action_tx,
             social_action_rx: Mutex::new(Some(social_action_rx)),
+            contact_action_tx,
+            contact_action_rx: Mutex::new(Some(contact_action_rx)),
             user_cache: DashMap::new(),
             channel_cache: DashMap::new(),
         }
@@ -68,6 +74,13 @@ impl SlackAdapter {
     /// Take the social action receiver (called once by gateway).
     pub async fn take_social_action_rx(&self) -> Option<mpsc::UnboundedReceiver<(i64, String, Option<String>)>> {
         self.social_action_rx.lock().await.take()
+    }
+
+    /// Take the contact-action receiver (called once by gateway).
+    pub async fn take_contact_action_rx(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<crate::contacts::ContactAction>> {
+        self.contact_action_rx.lock().await.take()
     }
 
     pub fn from_config(
@@ -156,6 +169,7 @@ impl ChannelAdapter for SlackAdapter {
         let filter_arc = self.filter.clone();
         let approval_tx = self.approval_tx.clone();
         let social_action_tx = self.social_action_tx.clone();
+        let contact_action_tx = self.contact_action_tx.clone();
         let http = self.http.clone();
         let bot_token = self.bot_token.clone();
         let app_token = self.app_token.clone();
@@ -550,6 +564,50 @@ impl ChannelAdapter for SlackAdapter {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
 
+                            // Contact work-card button: contact:{action}:{id}
+                            if let Some(rest) = action_id.strip_prefix("contact:") {
+                                let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                                if parts.len() != 2 {
+                                    continue;
+                                }
+                                let act = parts[0];
+                                let arg = parts[1];
+                                use crate::contacts::ContactAction;
+                                match act {
+                                    "approve" => {
+                                        if let Ok(id) = arg.parse::<i64>() {
+                                            let _ = contact_action_tx.send(ContactAction::Approve(id));
+                                        }
+                                    }
+                                    "discard" => {
+                                        if let Ok(id) = arg.parse::<i64>() {
+                                            let _ = contact_action_tx.send(ContactAction::Discard(id));
+                                        }
+                                    }
+                                    "revise" => {
+                                        // Slack revise: read note from action.value (we send it in the
+                                        // button payload for now — simpler than opening a view modal,
+                                        // which requires a trigger_id round-trip).
+                                        let note = action
+                                            .get("value")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("(no note)")
+                                            .to_string();
+                                        if let Ok(id) = arg.parse::<i64>() {
+                                            let _ = contact_action_tx.send(ContactAction::Revise(id, note));
+                                        }
+                                    }
+                                    "pause" => {
+                                        let _ = contact_action_tx.send(ContactAction::Pause(arg.to_string()));
+                                    }
+                                    "resume" => {
+                                        let _ = contact_action_tx.send(ContactAction::Resume(arg.to_string()));
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
                             // Social draft button: social_draft:{action}:{draft_id}
                             if let Some(rest) = action_id.strip_prefix("social_draft:") {
                                 let parts: Vec<&str> = rest.splitn(2, ':').collect();
@@ -928,6 +986,32 @@ impl ChannelAdapter for SlackAdapter {
 
     async fn execute(&self, action: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         match action {
+            // ── Contact work card ─────────────────────────────────────
+            "contact_work_card" => {
+                let channel = p_str(&params, "channel_id")?;
+                let blocks = build_contact_work_card_blocks(&params);
+                let body = serde_json::json!({
+                    "channel": channel,
+                    "blocks": blocks,
+                    "text": params.get("payload_preview").and_then(|v| v.as_str()).unwrap_or(""),
+                });
+                let resp = self.api("chat.postMessage", &body).await?;
+                let ts = resp.get("ts").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                Ok(serde_json::json!({"message_id": ts}))
+            }
+            "contact_work_card_edit" => {
+                let channel = p_str(&params, "channel_id")?;
+                let ts = p_str(&params, "message_id")?;
+                let blocks = build_contact_work_card_blocks(&params);
+                let body = serde_json::json!({
+                    "channel": channel,
+                    "ts": ts,
+                    "blocks": blocks,
+                    "text": params.get("payload_preview").and_then(|v| v.as_str()).unwrap_or(""),
+                });
+                self.api("chat.update", &body).await?;
+                Ok(serde_json::json!({"edited": true}))
+            }
             // ── Messages ──────────────────────────────────────────────
             "send_message" => {
                 let channel = p_str(&params, "channel")?;
@@ -1585,4 +1669,56 @@ fn slack_action_infos() -> Vec<ActionInfo> {
             }),
         ),
     ]
+}
+
+/// Build Block Kit blocks for a contact work card (header + section + actions).
+/// Status determines whether the buttons block is included.
+fn build_contact_work_card_blocks(params: &serde_json::Value) -> serde_json::Value {
+    let draft_id = params.get("draft_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let contact_id = params.get("contact_id").and_then(|v| v.as_str()).unwrap_or("");
+    let contact_name = params.get("contact_name").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+    let role = params.get("role").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let via = params.get("via_platform").and_then(|v| v.as_str()).unwrap_or("auto");
+    let preview = params.get("payload_preview").and_then(|v| v.as_str()).unwrap_or("");
+    let status = params.get("status_label").and_then(|v| v.as_str()).unwrap_or("");
+    let show_actions = params.get("show_actions").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let header = serde_json::json!({
+        "type": "header",
+        "text": {"type": "plain_text", "text": format!("📨 {} (role={})", contact_name, role)}
+    });
+    let section = serde_json::json!({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": format!("*Via:* {}    *Status:* `{}`\n\n{}", via, status, preview)}
+    });
+    let context = serde_json::json!({
+        "type": "context",
+        "elements": [{"type": "mrkdwn",
+            "text": format!("draft #{} · contact `{}`", draft_id, &contact_id.chars().take(8).collect::<String>())}]
+    });
+
+    let mut blocks = vec![header, section, context];
+    if show_actions {
+        blocks.push(serde_json::json!({
+            "type": "actions",
+            "elements": [
+                {"type":"button","action_id":format!("contact:approve:{}", draft_id),
+                 "text":{"type":"plain_text","text":"✅ 核准送出"},"style":"primary"},
+                {"type":"button","action_id":format!("contact:revise:{}", draft_id),
+                 "text":{"type":"plain_text","text":"🔄 要求重寫"},"value":"請重寫(Slack 簡化版,note 留空)"},
+                {"type":"button","action_id":format!("contact:discard:{}", draft_id),
+                 "text":{"type":"plain_text","text":"🗑 捨棄"},"style":"danger"},
+            ]
+        }));
+        blocks.push(serde_json::json!({
+            "type": "actions",
+            "elements": [
+                {"type":"button","action_id":format!("contact:pause:{}", contact_id),
+                 "text":{"type":"plain_text","text":"⏸ 暫停 AI"}},
+                {"type":"button","action_id":format!("contact:resume:{}", contact_id),
+                 "text":{"type":"plain_text","text":"▶ 恢復 AI"}},
+            ]
+        }));
+    }
+    serde_json::Value::Array(blocks)
 }

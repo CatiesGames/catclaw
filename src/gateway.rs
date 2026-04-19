@@ -146,6 +146,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     let mut approval_receivers: Vec<tokio_mpsc::UnboundedReceiver<(String, bool)>> = Vec::new();
     // Collect social_action_rx receivers from adapters
     let mut social_action_receivers: Vec<tokio_mpsc::UnboundedReceiver<(i64, String, Option<String>)>> = Vec::new();
+    let mut contact_action_receivers: Vec<tokio_mpsc::UnboundedReceiver<crate::contacts::ContactAction>> = Vec::new();
 
     // 7. Start channel adapters
     let mut adapters: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
@@ -166,6 +167,9 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 }
                 if let Some(rx) = adapter.take_social_action_rx().await {
                     social_action_receivers.push(rx);
+                }
+                if let Some(rx) = adapter.take_contact_action_rx().await {
+                    contact_action_receivers.push(rx);
                 }
 
                 adapters.push(adapter.clone());
@@ -191,6 +195,9 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 if let Some(rx) = adapter.take_social_action_rx().await {
                     social_action_receivers.push(rx);
                 }
+                if let Some(rx) = adapter.take_contact_action_rx().await {
+                    contact_action_receivers.push(rx);
+                }
 
                 adapters.push(adapter.clone());
 
@@ -214,6 +221,9 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 }
                 if let Some(rx) = adapter.take_social_action_rx().await {
                     social_action_receivers.push(rx);
+                }
+                if let Some(rx) = adapter.take_contact_action_rx().await {
+                    contact_action_receivers.push(rx);
                 }
 
                 adapters.push(adapter.clone());
@@ -520,6 +530,59 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 handle_social_button_action(
                     inbox_id, &action, hint.as_deref(), &sa_db, &sa_config, &sa_adapters, &sa_sm, &sa_ar,
                 ).await;
+            }
+        });
+    }
+
+    // Wire contact action receivers (work-card buttons → contacts pipeline).
+    for mut rx in contact_action_receivers {
+        let ca_db = state_db.clone();
+        let ca_adapters_map: HashMap<String, Arc<dyn ChannelAdapter>> = adapters
+            .iter()
+            .map(|a| (a.name().to_string(), a.clone()))
+            .collect();
+        let ca_adapters = Arc::new(ca_adapters_map);
+        let ca_sm = session_manager.clone();
+        let ca_ar = agent_registry.clone();
+        tokio::spawn(async move {
+            use crate::contacts::ContactAction;
+            use crate::contacts::pipeline;
+            while let Some(action) = rx.recv().await {
+                match action {
+                    ContactAction::Approve(id) => {
+                        if let Err(e) = pipeline::approve_draft(&ca_db, &ca_adapters, id).await {
+                            warn!(draft_id = id, error = %e, "contact approve failed");
+                        }
+                    }
+                    ContactAction::Discard(id) => {
+                        if let Err(e) = pipeline::discard_draft(&ca_db, &ca_adapters, id).await {
+                            warn!(draft_id = id, error = %e, "contact discard failed");
+                        }
+                    }
+                    ContactAction::Revise(id, note) => {
+                        if let Err(e) = pipeline::request_revision(&ca_db, &ca_adapters, id, &note).await {
+                            warn!(draft_id = id, error = %e, "contact request_revision failed");
+                            continue;
+                        }
+                        pipeline::dispatch_revision_to_agent(&ca_db, &ca_sm, &ca_ar, id).await;
+                    }
+                    ContactAction::Pause(contact_id) => {
+                        if let Ok(Some(mut c)) = ca_db.get_contact(&contact_id) {
+                            c.ai_paused = true;
+                            if let Err(e) = ca_db.update_contact(&c) {
+                                warn!(contact_id = %contact_id, error = %e, "contact pause failed");
+                            }
+                        }
+                    }
+                    ContactAction::Resume(contact_id) => {
+                        if let Ok(Some(mut c)) = ca_db.get_contact(&contact_id) {
+                            c.ai_paused = false;
+                            if let Err(e) = ca_db.update_contact(&c) {
+                                warn!(contact_id = %contact_id, error = %e, "contact resume failed");
+                            }
+                        }
+                    }
+                }
             }
         });
     }
