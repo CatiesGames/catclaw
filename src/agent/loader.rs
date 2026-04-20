@@ -1289,6 +1289,7 @@ catclaw config set <key> <value>  # Set a value
 | Key | Default | Notes |
 |-----|---------|-------|
 | `contacts.enabled` | false | Advertise `contacts_*` MCP tools to agents (saves ~3-4KB tokens when off). Hot-reload — no restart needed. |
+| `contacts.unknown_inbox_channel` | "" | Mirror target for `role=unknown` inbound (e.g. `discord:guild/未分類`). Empty = log only (rows still saved to DB for review via TUI Contacts / `catclaw contact list --role unknown`). |
 
 ### Per-Channel Keys (`channels[N].field`)
 
@@ -1876,6 +1877,22 @@ CatClaw 的 contacts 系統提供「人」的抽象 — 跨 Discord/Telegram/Sla
 
 **啟用前提**:`catclaw config set contacts.enabled true` (預設關閉以節省 context tokens)。
 若使用者描述了個案管理需求但你看不到 `contacts_*` 工具,請提示他們開啟此 key。
+
+**LINE 自動建檔(無 LLM)**:contacts 啟用後,任何 LINE 用戶傳訊或加好友都會自動
+建立 `role=unknown` contact 並綁定 LINE userId — **不會觸發 agent**。這是「儲存
+備查」狀態。
+
+升級流程(由人類發起):
+1. 使用者(陳老師)在 TUI Contacts 看到未分類列表,或從 `unknown_inbox_channel`
+   鏡射看到 unknown 入站
+2. 使用者跟你說「把小華設為個案,糖尿病,目標 1800 大卡」
+3. 你呼叫 `contacts_list(role="unknown")` → 找到對應 contact id
+4. 你呼叫 `contacts_update(id, role="client", tags=[...], metadata={...},
+   forward_channel="discord:...")`
+5. 之後小華的訊息開始正常派給你處理
+
+不要主動催使用者升級 unknown contact — 等使用者明確指示再操作。
+LINE unfollow 事件會自動把對應 contact 設 `ai_paused=true` + tag `unfollowed`。
 
 **核心觀念**:
 - contacts 只管身份、平台綁定、forward 鏡射、approval — **不存業務資料**
@@ -2477,16 +2494,13 @@ Every inbound message event includes a **reply token** valid for **5 minutes**. 
 
 ## Follow / Unfollow / Postback Events
 
-These come through as **system text messages** to the agent:
+When `contacts.enabled=true`:
+- **follow**: handled silently in the LINE adapter — auto-registers the user as a `role=unknown` contact (no LLM). You're NOT invoked. Admin will see new unknown contacts in the TUI Contacts panel (or `unknown_inbox_channel` mirror) and can promote them later.
+- **unfollow**: handled silently — sets `ai_paused=true` and adds tag `unfollowed` on the matching contact (if any). You're NOT invoked.
+- **postback**: comes through as `[LINE postback] {data}` system message — decode the `data` (you defined it when creating the Rich Menu / Flex button) and act accordingly.
 
-- `[LINE follow event] 用戶剛加你為好友。可用 contacts_create + contacts_bind_channel 加為個案。`
-- `[LINE unfollow event] 用戶封鎖或刪除你。`
-- `[LINE postback] {data}` (from Rich Menu button or Flex postback action)
-
-**Recommended responses:**
-- **follow**: Greet the user; if you manage clients, ask the admin whether to register them as a contact via `contacts_create + contacts_bind_channel`.
-- **unfollow**: Note in your records (e.g. `contacts_update` to set a tag, or `memory_write`); don't try to send messages — the user has blocked you.
-- **postback**: Decode the `data` (you defined it when creating the Rich Menu / Flex button) and act accordingly.
+When `contacts.enabled=false` (no contacts subsystem):
+- All three event types currently have no special handling — postback still surfaces, follow/unfollow are logged only at the adapter layer.
 
 ## Rich Menu
 

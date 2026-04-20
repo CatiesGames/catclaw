@@ -550,6 +550,23 @@ async fn send_to_contact(
         .await
 }
 
+/// Mirror an inbound message to a specific target string (e.g. unknown_inbox_channel).
+/// Used by the router for unknown contacts whose own forward_channel is unset.
+pub async fn mirror_inbound_to(
+    adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
+    contact: &Contact,
+    from_platform: &str,
+    text: &str,
+    attachments: Vec<String>,
+    target_str: &str,
+) {
+    let Some(target) = ForwardTarget::parse(target_str) else {
+        warn!(target = %target_str, "mirror_inbound_to: invalid target format");
+        return;
+    };
+    do_mirror(adapters, contact, from_platform, text, attachments, &target).await;
+}
+
 /// Mirror an inbound message from a contact to the forward channel.
 /// Best-effort — failure to mirror does not block routing to the agent.
 pub async fn mirror_inbound(
@@ -564,6 +581,17 @@ pub async fn mirror_inbound(
         warn!(forward_channel = %fc, "mirror_inbound: invalid forward_channel format");
         return;
     };
+    do_mirror(adapters, contact, from_platform, text, attachments, &target).await;
+}
+
+async fn do_mirror(
+    adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
+    contact: &Contact,
+    from_platform: &str,
+    text: &str,
+    attachments: Vec<String>,
+    target: &ForwardTarget,
+) {
     let mirror = InboundMirror {
         contact_id: contact.id.clone(),
         contact_name: contact.display_name.clone(),

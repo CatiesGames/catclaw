@@ -232,6 +232,16 @@ pub struct Config {
 pub struct ContactsConfig {
     #[serde(default)]
     pub enabled: bool,
+
+    /// Forward channel for messages from unknown / unclassified contacts
+    /// (e.g. LINE users who just added the OA but haven't been promoted to
+    /// client/admin yet). Format same as contact.forward_channel:
+    /// "platform:channel_id" or "platform:guild_id/channel_id".
+    /// When unset, unknown inbound is only logged (`info!`); the sender is
+    /// still auto-registered in the contacts table for later review via
+    /// TUI Contacts (role=unknown filter) or `catclaw contact list --role unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_inbox_channel: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -656,6 +666,9 @@ impl Config {
                 Ok(if t == 0 { "120".to_string() } else { t.to_string() })
             }
             "contacts.enabled" => Ok(self.contacts.enabled.to_string()),
+            "contacts.unknown_inbox_channel" => {
+                Ok(self.contacts.unknown_inbox_channel.clone().unwrap_or_default())
+            }
             "webhook_base_url" => Ok(self.general.webhook_base_url.clone().unwrap_or_else(|| format!("http://localhost:{}", self.general.port))),
             "social.instagram.mode" => Ok(self.social.instagram.as_ref().map_or_else(|| "off".to_string(), |c| c.mode.clone())),
             "social.instagram.poll_interval_mins" => Ok(self.social.instagram.as_ref().map_or(5, |c| c.poll_interval_mins).to_string()),
@@ -780,6 +793,11 @@ impl Config {
             "contacts.enabled" => {
                 self.contacts.enabled = parse_bool(value)?;
                 // tools/list reads config live each call, so no restart needed.
+                Ok(false)
+            }
+            "contacts.unknown_inbox_channel" => {
+                self.contacts.unknown_inbox_channel =
+                    if value.is_empty() { None } else { Some(value.to_string()) };
                 Ok(false)
             }
             "heartbeat.enabled" => {

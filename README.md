@@ -513,6 +513,14 @@ catclaw config set contacts.enabled true
 ```
 When disabled, `contacts_*` MCP tools are not advertised to agents. Schema, CLI, and TUI remain functional — you can still build up contacts manually before flipping the switch.
 
+**Auto-registration of unknown contacts (LINE)**: when enabled, every LINE inbound sender (including follow events) is auto-registered as a `role=unknown` contact — **no LLM invoked**. These are storage-only until promoted to `client`/`admin` via `contacts_update`. This prevents strangers adding your OA from burning agent tokens. Optionally mirror unknown inbound to a channel for admin review:
+```bash
+catclaw config set contacts.unknown_inbox_channel "discord:guild_id/channel_id"
+```
+If unset, unknown inbound is only logged (`info!`); browse via TUI Contacts tab or `catclaw contact list --role unknown`.
+
+Unfollow events on LINE set `ai_paused=true` + tag `unfollowed` on the corresponding contact, preserving history.
+
 ### Schema
 
 | Table | Purpose |

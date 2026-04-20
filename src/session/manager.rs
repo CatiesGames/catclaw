@@ -93,6 +93,11 @@ impl SessionManager {
         self.state_db.clone()
     }
 
+    /// Get a clone of the shared config Arc, if any.
+    pub fn config_arc(&self) -> Option<Arc<std::sync::RwLock<crate::config::Config>>> {
+        self.config.clone()
+    }
+
     /// Read the current mcp_env from config (or empty if no config).
     fn mcp_env(&self) -> HashMap<String, HashMap<String, String>> {
         self.config.as_ref()

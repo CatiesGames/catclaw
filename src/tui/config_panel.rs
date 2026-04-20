@@ -206,6 +206,12 @@ impl ConfigPanel {
             section: "Contacts".to_string(),
             editable: true,
         });
+        entries.push(ConfigEntry {
+            key: "contacts.unknown_inbox_channel".to_string(),
+            value: config.contacts.unknown_inbox_channel.clone().unwrap_or_default(),
+            section: "Contacts".to_string(),
+            editable: true,
+        });
 
         // Channels
         for (i, ch) in config.channels.iter().enumerate() {

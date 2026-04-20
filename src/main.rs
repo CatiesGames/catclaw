@@ -2960,7 +2960,8 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
     if cli_ui::section_confirm("Enable contacts subsystem now?", false) {
         config.contacts.enabled = true;
         cli_ui::section_ok("Contacts enabled — agents will see contacts_* MCP tools");
-        cli_ui::section_hint("Tip: add the first contact via TUI Contacts tab or `catclaw contact add <name>`. Then bind a platform user id with `catclaw contact bind <id> --platform line --user-id U...`.");
+        cli_ui::section_hint("LINE inbound is auto-registered as role=unknown contacts (no LLM). Promote them later via TUI Contacts → role filter, or by telling the agent.");
+        cli_ui::section_hint("Optional: route unknown inbound to a review channel via `catclaw config set contacts.unknown_inbox_channel \"discord:guild/channel\"`. Empty (default) = log only.");
     } else {
         cli_ui::section_hint("Enable later: catclaw config set contacts.enabled true");
     }

@@ -106,18 +106,108 @@ impl LineAdapter {
 
     /// Inject a parsed LINE webhook payload. Spawns parsing + dispatch.
     /// Called by the axum webhook handler after signature verification.
-    pub async fn handle_webhook_payload(&self, payload: Value) {
+    ///
+    /// When `contacts.enabled=true`, every inbound LINE sender is auto-registered
+    /// as a `role=unknown` contact (bound to LINE userId) BEFORE the message is
+    /// dispatched to the router. The router then sees role=unknown and skips
+    /// agent dispatch (per design — unknown contacts are storage-only until the
+    /// admin promotes them to client/admin via `contacts_update`).
+    pub async fn handle_webhook_payload(
+        &self,
+        payload: Value,
+        db: &crate::state::StateDb,
+        default_agent_id: &str,
+        contacts_enabled: bool,
+    ) {
         let Some(events) = payload.get("events").and_then(|v| v.as_array()) else {
             debug!("line webhook: no events array");
             return;
         };
         for event in events {
+            // Auto-register unknown contact (no LLM): cheap DB operation that
+            // ensures we have a record of every LINE sender, even if they're
+            // never promoted to a client. Fail-soft — log and continue on error.
+            let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if contacts_enabled {
+                if let Some(source) = event.get("source") {
+                    let user_id = source
+                        .get("userId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !user_id.is_empty() {
+                        self.ensure_unknown_contact(db, default_agent_id, user_id, source).await;
+                        // Unfollow: pause AI for the contact (if any) and tag
+                        // it. The contact row is preserved so historical data
+                        // isn't lost.
+                        if event_type == "unfollow" {
+                            if let Ok(Some(mut c)) = db.get_contact_by_platform_user("line", user_id) {
+                                c.ai_paused = true;
+                                if !c.tags.iter().any(|t| t == "unfollowed") {
+                                    c.tags.push("unfollowed".to_string());
+                                }
+                                let _ = db.update_contact(&c);
+                            }
+                        }
+                    }
+                }
+            }
+
             if let Some(ctx) = self.parse_event(event).await {
                 if let Some(tx) = self.msg_tx.get() {
                     let _ = tx.send(ctx).await;
                 }
             }
         }
+    }
+
+    /// If a LINE userId has no contact binding yet, create a `role=unknown`
+    /// contact and bind the LINE userId to it. Idempotent — does nothing when
+    /// already bound. No LLM call; pure DB writes.
+    async fn ensure_unknown_contact(
+        &self,
+        db: &crate::state::StateDb,
+        default_agent_id: &str,
+        user_id: &str,
+        source: &Value,
+    ) {
+        match db.get_contact_by_platform_user("line", user_id) {
+            Ok(Some(_)) => return, // already bound
+            Ok(None) => {}
+            Err(e) => {
+                warn!(error = %e, user_id, "ensure_unknown_contact: lookup failed");
+                return;
+            }
+        }
+        // Try to fetch displayName for nicer naming; fall back to userId prefix.
+        let source_type = source.get("type").and_then(|v| v.as_str()).unwrap_or("user");
+        let channel_id = match source_type {
+            "user" => user_id.to_string(),
+            "group" => source.get("groupId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            "room" => source.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            _ => user_id.to_string(),
+        };
+        let display_name = self
+            .get_display_name(user_id, source_type, &channel_id)
+            .await
+            .unwrap_or_else(|| format!("LINE:{}", &user_id[..user_id.len().min(8)]));
+
+        let contact = crate::contacts::Contact::new(default_agent_id, display_name);
+        let contact_id = contact.id.clone();
+        if let Err(e) = db.insert_contact(&contact) {
+            warn!(error = %e, user_id, "ensure_unknown_contact: insert failed");
+            return;
+        }
+        let mut ch = crate::contacts::ContactChannel::new(&contact_id, "line", user_id);
+        ch.is_primary = true;
+        if let Err(e) = db.upsert_contact_channel(&ch) {
+            warn!(error = %e, user_id, contact_id = %contact_id, "ensure_unknown_contact: bind failed");
+            return;
+        }
+        info!(
+            user_id,
+            contact_id = %contact_id,
+            "auto-registered unknown LINE contact"
+        );
     }
 
     /// Parse a single LINE webhook event into a MsgContext (for "message" events).
@@ -213,20 +303,17 @@ impl LineAdapter {
                 }
             }
             "follow" => {
-                info!(user_id, "line follow event — surfacing as system text");
-                Some(mk_ctx(
-                    "[LINE follow event] 用戶剛加你為好友。可用 contacts_create + contacts_bind_channel 加為個案。".to_string(),
-                    vec![],
-                    None,
-                ))
+                // No agent dispatch. The auto-bind path in handle_webhook_payload
+                // already registered the user as an unknown contact for later
+                // promotion via TUI / `contacts_update`.
+                info!(user_id, "line follow event — silent (auto-registered as unknown contact)");
+                None
             }
             "unfollow" => {
-                info!(user_id, "line unfollow event — surfacing as system text");
-                Some(mk_ctx(
-                    "[LINE unfollow event] 用戶封鎖或刪除你。".to_string(),
-                    vec![],
-                    None,
-                ))
+                // Mark the contact (if any) as ai_paused + tag 'unfollowed' so
+                // later attempts to message them are explicitly halted.
+                info!(user_id, "line unfollow event");
+                None
             }
             "postback" => {
                 let data = event
@@ -784,6 +871,15 @@ async fn receive_webhook(
             return axum::http::StatusCode::BAD_REQUEST;
         }
     };
-    adapter.handle_webhook_payload(payload).await;
+    let (contacts_enabled, default_agent) = {
+        let cfg = gw.config.read().unwrap();
+        (
+            cfg.contacts.enabled,
+            cfg.default_agent_id().unwrap_or("main").to_string(),
+        )
+    };
+    adapter
+        .handle_webhook_payload(payload, &gw.state_db, &default_agent, contacts_enabled)
+        .await;
     axum::http::StatusCode::OK
 }

@@ -95,6 +95,35 @@ impl MessageRouter {
                 .iter()
                 .map(|a| format!("{} ({})", a.filename, a.url))
                 .collect();
+
+            // Unknown contacts go to the global unknown_inbox_channel (when
+            // configured) instead of the contact's own forward_channel — they
+            // haven't been classified yet, so there's no per-contact channel.
+            // Either way we never dispatch to the agent for role=unknown
+            // (storage-only state until promoted to client/admin).
+            if matches!(c.role, crate::contacts::ContactRole::Unknown) {
+                let inbox_channel = self
+                    .session_manager
+                    .config_arc()
+                    .as_ref()
+                    .and_then(|cfg| cfg.read().unwrap().contacts.unknown_inbox_channel.clone());
+                if let Some(target_str) = inbox_channel {
+                    crate::contacts::pipeline::mirror_inbound_to(
+                        &self.adapters, c, platform, &ctx.text, attachments, &target_str,
+                    )
+                    .await;
+                } else {
+                    tracing::info!(
+                        contact_id = %c.id,
+                        sender = %ctx.sender_name,
+                        platform,
+                        text_preview = %ctx.text.chars().take(80).collect::<String>(),
+                        "unknown contact inbound — no unknown_inbox_channel set; record kept in DB only"
+                    );
+                }
+                return Ok(());
+            }
+
             crate::contacts::pipeline::mirror_inbound(
                 &self.adapters, c, platform, &ctx.text, attachments,
             )
