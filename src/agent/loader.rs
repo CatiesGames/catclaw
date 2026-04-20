@@ -1945,10 +1945,20 @@ LINE unfollow 事件會自動把對應 contact 設 `ai_paused=true` + tag `unfol
 ### Forward channel
 
 設 `forward_channel = "discord:guild_id/channel_id"` 後:
-- 個案入站訊息會鏡射到該頻道
+- 個案入站訊息會鏡射到該頻道(LINE 圖片等需 auth 的附件會自動下載並改成
+  公開 URL,前提是 `general.webhook_base_url` 有設;沒設管理者會看到一行
+  warning,連結點不開)
 - 你的草稿會以 work card 顯示在該頻道
 - 管理者在該頻道直接打字 → 系統視為手動回覆,以你的名義轉發給個案
 - ai_paused 時所有訊息只鏡射,不派給你 — 等管理者人工介入
+
+**設定 forward_channel 前查 ID 流程**(Discord 為例):
+1. `discord_get_guilds()` → 拿到 guild_id 列表
+2. `discord_get_channels(guild_id)` → 找出目標頻道的 channel_id
+3. 組成 `"discord:{guild_id}/{channel_id}"` 傳給 `contacts_update(forward_channel=...)`
+4. 若目標頻道還不存在,可先用 `discord_create_channel`(需 bot 有 Manage
+   Channels 權限,見 discord skill)。常見模式:每個 client 一條 `#client-XXX` 頻道
+查到 ID 後可寫進 memory 避免下次重查。
 
 ### 業務資料建議
 

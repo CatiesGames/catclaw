@@ -72,6 +72,84 @@ impl MessageRouter {
         self.adapters = adapters;
     }
 
+    /// Convert inbound attachments into a list of human-friendly mirror lines
+    /// where any auth-protected URL has been downloaded to `media_tmp` and
+    /// rewritten to a public URL served by the gateway. Falls back to the
+    /// original URL (with a warning) when `webhook_base_url` is unset.
+    async fn attachments_for_mirror(&self, attachments: &[Attachment]) -> Vec<String> {
+        if attachments.is_empty() {
+            return vec![];
+        }
+        // Resolve webhook_base_url + media_tmp dir from shared config.
+        let webhook_base_url: Option<String> = self
+            .session_manager
+            .config_arc()
+            .as_ref()
+            .and_then(|c| c.read().unwrap().general.webhook_base_url.clone());
+
+        let media_dir = self.workspace.join("media_tmp");
+        let _ = std::fs::create_dir_all(&media_dir);
+
+        let mut out = Vec::with_capacity(attachments.len());
+        for att in attachments {
+            // Pass-through when no auth is needed (Discord/TG/Slack public URLs):
+            // mirror viewer just opens the URL directly.
+            if att.auth_header.is_none() {
+                out.push(format!("{} ({})", att.filename, att.url));
+                continue;
+            }
+            // Auth-protected (e.g. LINE Content API). Without webhook_base_url
+            // there's nowhere public to host the file, so fall back to the
+            // original URL with a warning so the admin at least sees the
+            // attachment metadata.
+            let Some(ref base) = webhook_base_url else {
+                warn!(
+                    filename = %att.filename,
+                    "mirror: auth-protected attachment but webhook_base_url unset — admin will see a broken link",
+                );
+                out.push(format!("{} (auth-required: {})", att.filename, att.url));
+                continue;
+            };
+            // Download once, save under a stable random name, expose via
+            // GET /media/{filename}.
+            let mut req = self.http_client.get(&att.url);
+            if let Some(ref a) = att.auth_header {
+                req = req.header(reqwest::header::AUTHORIZATION, a);
+            }
+            let bytes = match req.send().await {
+                Ok(r) if r.status().is_success() => r.bytes().await.ok(),
+                Ok(r) => {
+                    warn!(status = %r.status(), filename = %att.filename, "mirror: download failed");
+                    None
+                }
+                Err(e) => {
+                    warn!(error = %e, filename = %att.filename, "mirror: download error");
+                    None
+                }
+            };
+            let Some(bytes) = bytes else {
+                out.push(format!("{} (download failed)", att.filename));
+                continue;
+            };
+            // Sanitize filename + prepend short uuid to avoid collision.
+            let safe: String = att
+                .filename
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+                .collect();
+            let local_name = format!("{}_{}", &uuid::Uuid::new_v4().to_string()[..8], safe);
+            let local_path = media_dir.join(&local_name);
+            if let Err(e) = std::fs::write(&local_path, &bytes) {
+                warn!(error = %e, filename = %att.filename, "mirror: write failed");
+                out.push(format!("{} (save failed)", att.filename));
+                continue;
+            }
+            let public_url = format!("{}/media/{}", base.trim_end_matches('/'), local_name);
+            out.push(format!("{} ({})", att.filename, public_url));
+        }
+        out
+    }
+
     /// Route a message: resolve agent, create/resume session, get response
     pub async fn route(
         &self,
@@ -90,11 +168,12 @@ impl MessageRouter {
             // Touch last_active for last-active routing in pipeline.
             let _ = db.touch_contact_channel(platform, &ctx.sender_id);
             // Mirror inbound to forward channel (best effort).
-            let attachments: Vec<String> = ctx
-                .attachments
-                .iter()
-                .map(|a| format!("{} ({})", a.filename, a.url))
-                .collect();
+            // For attachments behind auth (e.g. LINE Content API which needs
+            // Bearer header), download to media_tmp and rewrite to a public
+            // URL so the admin viewing the mirror can actually open them.
+            let attachments: Vec<String> = self
+                .attachments_for_mirror(&ctx.attachments)
+                .await;
 
             // Unknown contacts go to the global unknown_inbox_channel (when
             // configured) instead of the contact's own forward_channel — they

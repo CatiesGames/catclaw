@@ -458,23 +458,11 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         info!("social ingest pipeline started");
     }
 
-    // Startup: clear media_tmp dir (temp files don't survive restarts).
-    {
-        let media_dir = config.general.workspace.join("media_tmp");
-        if media_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&media_dir) {
-                let mut count = 0usize;
-                for entry in entries.flatten() {
-                    if std::fs::remove_file(entry.path()).is_ok() {
-                        count += 1;
-                    }
-                }
-                if count > 0 {
-                    info!(count, "startup: cleared media_tmp files");
-                }
-            }
-        }
-    }
+    // (Removed: startup clear of media_tmp. Files in media_tmp now serve
+    // double-duty as social tool uploads AND inbound contact attachment
+    // mirrors — the latter must persist across restarts so admins can review
+    // historical client photos. If size becomes an issue, add a periodic
+    // age-based cleanup similar to cleanup_old_attachments() in router.rs.)
 
     // Startup token check: exchange short-lived tokens for long-lived ones.
     {
