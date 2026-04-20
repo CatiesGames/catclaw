@@ -540,6 +540,7 @@ const EMBEDDED_SKILLS: &[(&str, &str)] = &[
     ("discord", SKILL_DISCORD),
     ("telegram", SKILL_TELEGRAM),
     ("slack", SKILL_SLACK),
+    ("line", SKILL_LINE),
     ("catclaw", SKILL_CATCLAW),
     ("injection-guard", SKILL_INJECTION_GUARD),
     ("instagram", SKILL_INSTAGRAM),
@@ -1948,49 +1949,15 @@ catclaw contact draft discard <draft_id>
 
 ## LINE (optional channel)
 
-LINE 為**選用**通訊管道,需要 LINE Official Account + Messaging API + 公開 HTTPS endpoint。
-未配置時整個 adapter 不啟動,既有功能零影響。
+LINE 為**選用**通訊管道,需要 LINE Official Account + Messaging API + 公開 HTTPS
+endpoint。未配置時整個 adapter 不啟動。
 
-### LINE-specific MCP Actions
+當 LINE 配置存在(或 contact 綁了 LINE userId)且需要平台特性(訊息格式、Rich Menu
+設計、Flex Message、reply token 機制等),載入 `line` skill 取得完整指引。
 
-(透過 adapter execute,工具名 `line_<action>`)
-
-| Action | 用途 |
-|--------|------|
-| `rich_menu_create` | 建立 rich menu(name + chat_bar_text + size + areas) |
-| `rich_menu_upload_image` | 上傳 menu 背景圖(JPEG/PNG,絕對本機路徑) |
-| `rich_menu_list` | 列出所有 rich menu |
-| `rich_menu_delete` | 刪除 menu |
-| `rich_menu_set_default` | 設為 OA-wide 預設 menu |
-| `rich_menu_link_user` | 套用 menu 到特定用戶(差異化 admin/client menu) |
-| `rich_menu_unlink_user` | 解除個別 menu(回到預設) |
-| `get_quota` | 查 push API 月配額 |
-| `get_profile` | 查 LINE 用戶 displayName + 頭像 |
-| `send_flex` | 發送 Flex message(rich UI) |
-| `show_loading` | 1:1 chat 顯示 loading(最多 60 秒) |
-
-**Rich Menu 完全由 agent 自管** — CatClaw 不維護 role↔menu 對應。
-你建立 menu 後,把 menu_id 存到 `contacts.external_ref` 或 memory,
-之後看到 contact role 變化就主動 `rich_menu_link_user`。
-
-範例工作流:
-```
-管理者: "幫我做兩個 rich menu,一個給我,一個給個案"
-你:
-  1. rich_menu_create({name:"admin", chat_bar_text:"管理", size:..., areas:[...]})
-     → 拿到 menu_id_a
-  2. rich_menu_upload_image({menu_id: menu_id_a, image_path: "/path/to/admin.jpg"})
-  3. (同樣建立 client menu → menu_id_c)
-  4. 把兩個 id 記住(寫到 memory 或自己的 Notion)
-  5. 對 role=admin 的 contact 呼叫 rich_menu_link_user(menu_id_a, ...)
-     對 role=client 的 contact 呼叫 rich_menu_link_user(menu_id_c, ...)
-```
-
-### LINE Outbound 提示
-
-- 5 分鐘內回覆走 reply token (免費),過期才走 push API (計入月配額)
-- 文字長度上限 5000 字元
-- adapter 自動處理 reply token 快取,你不需要區分 reply / push
+回覆 LINE 上的 contact,**仍走** `contacts_reply` (透過 contacts pipeline,享有
+forward 鏡射 + approval gate)。`line_*` actions 用於非 contact 場景(廣播、
+Rich Menu 管理、配額查詢等)。
 "#;
 
 const SKILL_INJECTION_GUARD: &str = r#"---
@@ -2427,4 +2394,233 @@ catclaw social draft get <id>                                # Full content + me
 
 - **Social tab (Alt+9):** Social Inbox — incoming events, filter by status, approve/discard inbox items.
 - **Drafts tab (Alt+0):** Social Drafts — outgoing draft queue, filter by status, approve/discard drafts.
+"#;
+
+const SKILL_LINE: &str = r#"---
+name: line
+description: LINE Messaging API patterns — message format (no Markdown), reply token vs push API, Rich Menu design, Flex Message structure, source types (user/group/room), follow events. Use when handling LINE inbound/outbound or designing Rich Menus / Flex content.
+---
+
+# LINE Messaging
+
+This skill provides guidance for working with LINE Official Account via the CatClaw gateway.
+
+## When to Use
+
+Apply this skill whenever:
+- A message arrives from a LINE source (`channel_type=line` in the system prompt context header)
+- The user asks to design / install Rich Menus
+- You need to send a Flex Message
+- You need to check LINE push API quota
+- You receive a `[LINE follow event]` / `[LINE unfollow event]` / `[LINE postback]` system message
+
+## Replying to Contacts vs Direct Send
+
+If the LINE user is bound to a contact (you'll see `[Contact: ...]` in the system prompt):
+
+**Use `contacts_reply`** — not `line_send_flex` or any direct LINE call. The contacts pipeline gives you forward mirroring + approval gate. `contacts_reply` accepts text / image / flex payloads; the LINE adapter renders flex correctly.
+
+`line_*` actions are for **non-contact** scenarios:
+- Broadcasts / announcements not tied to a specific person
+- Rich Menu management (one-time setup)
+- Quota / profile lookups
+
+## Message Format — NO Markdown
+
+LINE messages are **plain text**. Unlike Discord (Markdown), Slack (mrkdwn), Telegram (MarkdownV2), LINE renders nothing:
+
+- `**bold**` shows literally as `**bold**`
+- `[link](url)` shows literally as `[link](url)`
+- Code blocks have no background — just monospace via the user's font
+
+For rich layout, use **Flex Messages** (`line_send_flex`).
+
+## Message Limits
+
+- **Text:** 5,000 characters per message (CatClaw auto-truncates with ellipsis)
+- **Flex:** size limit ~50KB JSON; Bubble can have up to 12 boxes
+- **Carousel:** up to 12 Bubbles
+
+## Source Types
+
+LINE messages come from three source types — each has a distinct ID:
+
+| Source | What | ID field |
+|---|---|---|
+| `user` | 1:1 chat | `userId` (starts with `U`) |
+| `group` | Multi-user group chat | `groupId` (starts with `C`) |
+| `room` | Multi-person chat (no admin, all equal) | `roomId` (starts with `R`) |
+
+CatClaw normalizes these: `peer_id` is always the userId of the actual sender; `channel_id` is the userId / groupId / roomId depending on source. For groups/rooms, you may not be able to fetch member display names without scope grants.
+
+## Reply Token vs Push API
+
+Every inbound message event includes a **reply token** valid for **5 minutes**. Reply API calls are **free** and do NOT count toward your monthly push quota. After 5 minutes (or after using the token once), outbound goes through Push API which counts toward quota.
+
+**CatClaw's LINE adapter handles this automatically:**
+- It caches reply tokens per LINE userId
+- `send()` tries reply token first; falls back to push if expired/used
+- You don't need to manage tokens manually
+
+**Implication for your behavior:** if you reply within ~5 minutes of inbound, you're free. If a delayed task replies hours later (e.g. heartbeat reminder), it costs quota. Use `line_get_quota` to monitor.
+
+## Follow / Unfollow / Postback Events
+
+These come through as **system text messages** to the agent:
+
+- `[LINE follow event] 用戶剛加你為好友。可用 contacts_create + contacts_bind_channel 加為個案。`
+- `[LINE unfollow event] 用戶封鎖或刪除你。`
+- `[LINE postback] {data}` (from Rich Menu button or Flex postback action)
+
+**Recommended responses:**
+- **follow**: Greet the user; if you manage clients, ask the admin whether to register them as a contact via `contacts_create + contacts_bind_channel`.
+- **unfollow**: Note in your records (e.g. `contacts_update` to set a tag, or `memory_write`); don't try to send messages — the user has blocked you.
+- **postback**: Decode the `data` (you defined it when creating the Rich Menu / Flex button) and act accordingly.
+
+## Rich Menu
+
+Rich Menu is the bottom keyboard area shown to LINE users. **Fully agent-managed** — CatClaw stores no role↔menu mapping; you create menus and remember the IDs (in `contacts.external_ref`, memory, or your own external store).
+
+### Standard sizes
+
+| Size | Width × Height | Use |
+|---|---|---|
+| Full | 2500 × 1686 | Standard menu (default) |
+| Compact | 2500 × 843 | Half-height menu (less screen real estate) |
+
+### Areas
+
+Each tap area is `{bounds: {x, y, width, height}, action: {...}}`. Coordinates are in pixels relative to the image. Action types:
+
+```json
+{"type":"message","text":"我要看今日餐點"}     // sends text as if user typed
+{"type":"postback","data":"action=menu1"}      // triggers postback event to bot
+{"type":"uri","uri":"https://..."}              // opens URL
+{"type":"richmenuswitch","richMenuAliasId":"..."}  // switch to another menu
+```
+
+### Setup workflow
+
+```
+1. line_rich_menu_create({
+     name: "admin_menu",
+     chat_bar_text: "管理選單",          // <= 14 chars, shown on chat bar
+     size: {width: 2500, height: 1686},
+     areas: [
+       {bounds: {x:0, y:0, width:1250, height:843},
+        action: {type:"postback", data:"admin:report"}},
+       {bounds: {x:1250, y:0, width:1250, height:843},
+        action: {type:"postback", data:"admin:settings"}},
+       ...
+     ]
+   })
+   → returns {richMenuId: "richmenu-abc123..."}
+
+2. line_rich_menu_upload_image({
+     menu_id: "richmenu-abc123...",
+     image_path: "/absolute/path/to/admin.jpg"     // must be JPEG or PNG
+   })
+
+3. (Repeat 1+2 for client menu → richmenu-xyz789...)
+
+4. Remember the IDs — store in memory or contacts.external_ref:
+   contacts_update(id="...", external_ref={"line_rich_menu": "richmenu-xyz789..."})
+
+5. When a contact's role changes:
+   line_rich_menu_link_user({menu_id: "richmenu-xyz789...", line_user_id: "U..."})
+```
+
+### Default vs per-user
+
+- `line_rich_menu_set_default(menu_id)` — shown to anyone without a per-user override
+- `line_rich_menu_link_user(menu_id, line_user_id)` — per-user override (takes priority)
+- `line_rich_menu_unlink_user(line_user_id)` — remove override (user falls back to default)
+
+## Flex Message
+
+Flex Messages are JSON-defined rich UI cards (think Discord embeds but more flexible). Two top-level types:
+
+- **Bubble** — single card
+- **Carousel** — horizontal scroll of up to 12 Bubbles
+
+### Minimal Bubble
+
+```json
+{
+  "type": "bubble",
+  "body": {
+    "type": "box",
+    "layout": "vertical",
+    "contents": [
+      {"type": "text", "text": "今日營養報告", "weight": "bold", "size": "xl"},
+      {"type": "text", "text": "蛋白質: 65g / 80g", "margin": "md"},
+      {"type": "text", "text": "熱量: 1420 / 1800 kcal"}
+    ]
+  }
+}
+```
+
+Send via:
+```
+line_send_flex({
+  target: "U....",          // userId / groupId / roomId
+  alt_text: "今日營養報告",  // shown in notifications + when Flex isn't supported
+  contents: { ... bubble JSON above ... }
+})
+```
+
+For contact replies with Flex, prefer `contacts_reply` with `{type:"flex", contents: {...}}`.
+
+### Common box layouts
+
+- `vertical` — stack top-to-bottom
+- `horizontal` — left-to-right
+- `baseline` — horizontal aligned to text baseline (good for label + value)
+
+### Common components
+
+- `text` — text with `weight`/`size`/`color`/`align`/`wrap`
+- `image` — `url` (must be HTTPS) + `aspectRatio` like `"20:13"`
+- `button` — `action` + `style` (primary/secondary/link)
+- `separator` — divider line
+- `spacer` — fixed gap
+
+Full schema: <https://developers.line.biz/en/reference/messaging-api/#flex-message>
+
+## Loading Animation
+
+For 1:1 chats only, you can show a loading indicator while you process:
+
+```
+line_show_loading({line_user_id: "U...", seconds: 20})  // 5-60, rounded to nearest 5
+```
+
+Useful when an inbound triggers a long agent task and you want to signal "working on it" before the actual reply arrives.
+
+## Quota Management
+
+```
+line_get_quota()
+// → {"value": 200} = 200 push messages/month limit (free tier)
+```
+
+Strategies to stay under quota:
+- Reply within 5 min when possible (free)
+- Batch related notifications into one Flex carousel instead of multiple texts
+- Use `contacts_ai_pause` for users you don't need to actively message
+
+## Important: How to Reply
+
+**Do NOT use `line_send_flex` or any `line_*` MCP tool to reply to the current conversation.** The gateway sends your text response automatically — just write naturally.
+
+Use `line_*` and `contacts_reply` tools only for:
+- Replying to a contact (use `contacts_reply` — goes through approval pipeline)
+- Proactive operations (broadcasts, Rich Menu setup, quota checks)
+
+## Official Documentation
+
+- Messaging API overview: <https://developers.line.biz/en/docs/messaging-api/>
+- Flex Message Simulator (visual designer): <https://developers.line.biz/flex-simulator/>
+- Rich Menu spec: <https://developers.line.biz/en/docs/messaging-api/using-rich-menus/>
+- Webhook events reference: <https://developers.line.biz/en/reference/messaging-api/#webhook-event-objects>
 "#;
