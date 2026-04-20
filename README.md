@@ -210,6 +210,20 @@ catclaw config get <key>                          # Get a specific value
 catclaw config set <key> <value>                  # Set a value (hot-reload when possible)
 ```
 
+### Environment variables
+
+Tokens (LINE / Discord / Slack / Telegram / Meta) are referenced from config by `*_env` keys; the actual values live in `~/.catclaw/.env`:
+
+```bash
+catclaw env list                                  # Show all (values masked)
+catclaw env set CATCLAW_LINE_CHANNEL_ACCESS_TOKEN xxx
+catclaw env get <KEY>
+catclaw env remove <KEY>
+catclaw mcp_env set <server> <KEY> <VALUE>        # Per-MCP-server env (separate scope)
+```
+
+`catclaw onboard` does this for you when adding channels. For manual / scripted deployments use `catclaw env set` — **don't** rely on shell `export`, the daemon (`catclaw gateway start -d`) won't inherit interactive shell env.
+
 ### Logs
 
 ```bash

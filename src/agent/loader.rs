@@ -1257,6 +1257,28 @@ catclaw config set <key> <value>  # Set a value
 
 `config set` output tells you if the change was **applied immediately** or **requires restart** — no need to memorize which keys are which.
 
+### Environment variables
+
+Channel tokens (Discord/Telegram/Slack/LINE), Meta API tokens (Instagram/Threads),
+and any other external secrets are referenced by `*_env` config keys (e.g.
+`channels[N].token_env = "CATCLAW_LINE_CHANNEL_ACCESS_TOKEN"`). The actual values
+must be set via `catclaw env`:
+
+```bash
+catclaw env list                       # Show all (values masked)
+catclaw env get <KEY>                  # Get one
+catclaw env set <KEY> <VALUE>          # Set one (writes to ~/.catclaw/.env)
+catclaw env remove <KEY>
+catclaw mcp_env set <SERVER> <KEY> <VALUE>   # Per-MCP-server env (separate scope)
+```
+
+`env set` writes to `[env]` in catclaw.toml + `~/.catclaw/.env`; the gateway reads
+both and injects into every claude subprocess. Hot-reloads when gateway is running.
+
+**Do NOT** rely on shell-level `export FOO=bar` for tokens — `catclaw gateway start -d`
+runs as a background daemon (launchd/systemd) and won't inherit interactive shell
+env. Always use `catclaw env set`.
+
 ### General Keys
 
 | Key | Default | Notes |
