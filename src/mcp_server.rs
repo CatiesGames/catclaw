@@ -97,9 +97,13 @@ async fn handle_mcp(
 
             // Route contacts tools.
             if tool_name.starts_with("contacts_") {
-                let (enabled, default_agent) = {
+                let (enabled, default_agent, unknown_inbox) = {
                     let cfg = gw.config.read().unwrap();
-                    (cfg.contacts.enabled, cfg.default_agent_id().unwrap_or("main").to_string())
+                    (
+                        cfg.contacts.enabled,
+                        cfg.default_agent_id().unwrap_or("main").to_string(),
+                        cfg.contacts.unknown_inbox_channel.clone(),
+                    )
                 };
                 if !enabled {
                     let response = serde_json::json!({
@@ -115,6 +119,7 @@ async fn handle_mcp(
                     &gw.session_manager,
                     &gw.agent_registry,
                     &default_agent,
+                    unknown_inbox.as_deref(),
                     tool_name,
                     arguments,
                 )

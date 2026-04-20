@@ -203,8 +203,14 @@ impl MessageRouter {
                 return Ok(());
             }
 
+            let unknown_inbox = self
+                .session_manager
+                .config_arc()
+                .as_ref()
+                .and_then(|cfg| cfg.read().unwrap().contacts.unknown_inbox_channel.clone());
             crate::contacts::pipeline::mirror_inbound(
                 &self.adapters, c, platform, &ctx.text, attachments,
+                unknown_inbox.as_deref(),
             )
             .await;
             if c.ai_paused {
@@ -217,11 +223,20 @@ impl MessageRouter {
             }
         }
 
-        // 0b. Manual reply detection: if this message comes from a forward channel
-        //     (admin's monitoring channel), forward it to the corresponding contact
-        //     instead of routing through the agent.
-        if contact.is_none() {
+        // 0b. Manual reply detection: ANY message in a forward_channel that
+        //     starts with the `>>` prefix is treated as the admin relaying
+        //     content to the bound contact. Without the prefix, the message
+        //     continues to agent dispatch — this lets the admin chat with the
+        //     agent in the same channel without echoing every sentence to the
+        //     contact. Applies whether or not the sender is themselves a
+        //     bound contact (admins often are bound as role=admin).
+        {
             // forward_channel format: "{platform}:{channel_id}" or "{platform}:{guild}/{channel_id}"
+            let unknown_inbox = self
+                .session_manager
+                .config_arc()
+                .as_ref()
+                .and_then(|cfg| cfg.read().unwrap().contacts.unknown_inbox_channel.clone());
             if crate::contacts::pipeline::try_manual_reply(
                 db,
                 &self.adapters,
@@ -230,6 +245,7 @@ impl MessageRouter {
                 ctx.guild_id.as_deref(),
                 &ctx.text,
                 &ctx.sender_id,
+                unknown_inbox.as_deref(),
             )
             .await
             .is_some()

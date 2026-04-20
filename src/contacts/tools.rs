@@ -222,8 +222,9 @@ fn tool(name: &str, description: &str, schema: Value) -> Value {
 /// Dispatch a `contacts_*` tool call.
 ///
 /// `db_arc` + `session_manager` + `agent_registry` are required only for
-/// `contacts_draft_request_revision`, which dispatches the revision back to
-/// the contact's owning agent session. Other tools ignore them.
+/// `contacts_draft_request_revision`. `unknown_inbox` is the global
+/// `contacts.unknown_inbox_channel` used as fallback when a contact has no
+/// per-contact `forward_channel`.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_contacts_tool(
     db: &StateDb,
@@ -232,6 +233,7 @@ pub async fn execute_contacts_tool(
     session_manager: &Arc<SessionManager>,
     agent_registry: &Arc<std::sync::RwLock<AgentRegistry>>,
     default_agent_id: &str,
+    unknown_inbox: Option<&str>,
     tool_name: &str,
     args: Value,
 ) -> Result<Value> {
@@ -376,7 +378,7 @@ pub async fn execute_contacts_tool(
                 .cloned()
                 .ok_or_else(|| CatClawError::Other("missing payload".into()))?;
             let via = args.get("via").and_then(|v| v.as_str()).map(String::from);
-            let res = pipeline::submit_reply(db, adapters, id, payload, via).await?;
+            let res = pipeline::submit_reply(db, adapters, id, payload, via, unknown_inbox).await?;
             Ok(serde_json::to_value(&res).unwrap_or(Value::Null))
         }
         "contacts_ai_pause" => {
@@ -402,7 +404,7 @@ pub async fn execute_contacts_tool(
                 .get("draft_id")
                 .and_then(|v| v.as_i64())
                 .ok_or_else(|| CatClawError::Other("missing draft_id".into()))?;
-            let res = pipeline::approve_draft(db, adapters, id).await?;
+            let res = pipeline::approve_draft(db, adapters, id, unknown_inbox).await?;
             Ok(serde_json::to_value(&res).unwrap_or(Value::Null))
         }
         "contacts_draft_discard" => {
@@ -410,7 +412,7 @@ pub async fn execute_contacts_tool(
                 .get("draft_id")
                 .and_then(|v| v.as_i64())
                 .ok_or_else(|| CatClawError::Other("missing draft_id".into()))?;
-            let res = pipeline::discard_draft(db, adapters, id).await?;
+            let res = pipeline::discard_draft(db, adapters, id, unknown_inbox).await?;
             Ok(serde_json::to_value(&res).unwrap_or(Value::Null))
         }
         "contacts_draft_request_revision" => {
@@ -419,7 +421,7 @@ pub async fn execute_contacts_tool(
                 .and_then(|v| v.as_i64())
                 .ok_or_else(|| CatClawError::Other("missing draft_id".into()))?;
             let note = str_arg(&args, "note")?;
-            let res = pipeline::request_revision(db, adapters, id, note).await?;
+            let res = pipeline::request_revision(db, adapters, id, note, unknown_inbox).await?;
             // Push the revision instruction back to the agent (fire-and-forget).
             pipeline::dispatch_revision_to_agent(db_arc, session_manager, agent_registry, id).await;
             Ok(serde_json::to_value(&res).unwrap_or(Value::Null))

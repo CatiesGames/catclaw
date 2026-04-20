@@ -1971,8 +1971,13 @@ LINE unfollow 事件會自動把對應 contact 設 `ai_paused=true` + tag `unfol
   公開 URL,前提是 `general.webhook_base_url` 有設;沒設管理者會看到一行
   warning,連結點不開)
 - 你的草稿會以 work card 顯示在該頻道
-- 管理者在該頻道直接打字 → 系統視為手動回覆,以你的名義轉發給個案
 - ai_paused 時所有訊息只鏡射,不派給你 — 等管理者人工介入
+
+**沒設 forward_channel 時**:鏡射 + work card 自動 fallback 到全域
+`contacts.unknown_inbox_channel`(若有設)。兩個都沒設,訊息只記 log,
+work card 永遠不會出現給管理者看 — 這在 `approval_required=true` 時是壞
+組合,你應該主動提示使用者「請先 set forward_channel 或 unknown_inbox_channel,
+否則我送的訊息會卡在審核佇列沒人看到」。
 
 **設定 forward_channel 前查 ID 流程**(Discord 為例):
 1. `discord_get_guilds()` → 拿到 guild_id 列表
@@ -1981,6 +1986,32 @@ LINE unfollow 事件會自動把對應 contact 設 `ai_paused=true` + tag `unfol
 4. 若目標頻道還不存在,可先用 `discord_create_channel`(需 bot 有 Manage
    Channels 權限,見 discord skill)。常見模式:每個 client 一條 `#client-XXX` 頻道
 查到 ID 後可寫進 memory 避免下次重查。
+
+### 管理者在 forward_channel 的兩種輸入
+
+forward channel 同時是「跟你對話」與「手動回覆給個案」兩用,系統用前綴區分:
+
+| 管理者打字 | 系統行為 |
+|---|---|
+| `>> 你好,週末記得回診` | **手動回覆**:去掉 `>>` 後直接以你的名義轉發給該 contact (走 outbound pipeline + adapter.send),你不會被觸發 |
+| `幫我看小明這週的進度` | **跟你對話**:這則訊息派給你處理,你可以分析、查詢、然後決定要不要 `contacts_reply` |
+| 任何 work card 按鈕 | 由 work card handler 處理(approve/discard/revise 等),不走文字路徑 |
+
+教使用者第一次設好 forward_channel 時,主動說明這兩種輸入差異,避免他想跟你
+對話卻意外把訊息發給個案。`>>` 是固定前綴,跨 Discord/Slack/Telegram 都通用。
+
+### 升級 unknown contact 前先看歷史
+
+unknown contact 期間的訊息**沒寫到 catclaw 的對話 transcript**,但若管理者
+有設 `contacts.unknown_inbox_channel`,所有 unknown 入站都鏡射到該頻道,變成
+事實上的歷史記錄。
+
+升級流程建議(使用者說「把小華設為個案」時):
+1. `contacts_list(role="unknown")` → 找到對應 contact id
+2. (可選但建議) 用 `discord_get_messages(unknown_inbox_channel, limit=50)`
+   翻最近訊息,找出該 LINE userId 對應的歷史,給自己脈絡
+3. `contacts_update(id, role="client", tags=[...], forward_channel=...)`
+4. 之後該 contact 入站開始正常派給你 — 你已有上下文,首次回應就能精準
 
 ### 業務資料建議
 

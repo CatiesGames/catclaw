@@ -532,23 +532,26 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         let ca_adapters = Arc::new(ca_adapters_map);
         let ca_sm = session_manager.clone();
         let ca_ar = agent_registry.clone();
+        let ca_cfg = gw_config.clone();
         tokio::spawn(async move {
             use crate::contacts::ContactAction;
             use crate::contacts::pipeline;
             while let Some(action) = rx.recv().await {
+                let unknown_inbox = ca_cfg.read().unwrap().contacts.unknown_inbox_channel.clone();
+                let unknown_inbox = unknown_inbox.as_deref();
                 match action {
                     ContactAction::Approve(id) => {
-                        if let Err(e) = pipeline::approve_draft(&ca_db, &ca_adapters, id).await {
+                        if let Err(e) = pipeline::approve_draft(&ca_db, &ca_adapters, id, unknown_inbox).await {
                             warn!(draft_id = id, error = %e, "contact approve failed");
                         }
                     }
                     ContactAction::Discard(id) => {
-                        if let Err(e) = pipeline::discard_draft(&ca_db, &ca_adapters, id).await {
+                        if let Err(e) = pipeline::discard_draft(&ca_db, &ca_adapters, id, unknown_inbox).await {
                             warn!(draft_id = id, error = %e, "contact discard failed");
                         }
                     }
                     ContactAction::Revise(id, note) => {
-                        if let Err(e) = pipeline::request_revision(&ca_db, &ca_adapters, id, &note).await {
+                        if let Err(e) = pipeline::request_revision(&ca_db, &ca_adapters, id, &note, unknown_inbox).await {
                             warn!(draft_id = id, error = %e, "contact request_revision failed");
                             continue;
                         }

@@ -87,6 +87,17 @@ impl Contact {
     pub fn owning_agents(&self) -> Vec<String> {
         vec![self.agent_id.clone()]
     }
+
+    /// Effective forward channel target string: per-contact `forward_channel`
+    /// when set, otherwise fall back to the global `unknown_inbox_channel`.
+    /// Returns None when neither is configured (mirror / work-card calls
+    /// become no-ops, falling back to log-only).
+    pub fn effective_forward_channel<'a>(
+        &'a self,
+        fallback: Option<&'a str>,
+    ) -> Option<&'a str> {
+        self.forward_channel.as_deref().or(fallback)
+    }
 }
 
 /// 平台綁定(多對多)。

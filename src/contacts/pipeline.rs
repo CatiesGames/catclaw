@@ -166,6 +166,7 @@ pub async fn submit_reply(
     contact_id: &str,
     payload: serde_json::Value,
     via: Option<String>,
+    unknown_inbox: Option<&str>,
 ) -> Result<OutboundResult> {
     let contact = db
         .get_contact(contact_id)?
@@ -188,8 +189,9 @@ pub async fn submit_reply(
     let draft_id = db.insert_contact_draft(&draft)?;
     draft.id = draft_id;
 
-    // 2. Mirror to forward_channel (best-effort).
-    if let Some(ref fc) = contact.forward_channel {
+    // 2. Mirror to forward_channel (or unknown_inbox fallback) — best-effort.
+    let effective = contact.effective_forward_channel(unknown_inbox);
+    if let Some(fc) = effective {
         if let Some(target) = ForwardTarget::parse(fc) {
             let initial_label = if contact.approval_required {
                 "awaiting approval"
@@ -219,6 +221,13 @@ pub async fn submit_reply(
                 "invalid forward_channel format (expected 'platform:[guild/]channel')"
             );
         }
+    } else if contact.approval_required {
+        // No mirror channel and approval needed — admin will never see the work
+        // card. Log loudly so the operator notices.
+        warn!(
+            contact_id,
+            "approval_required=true but no forward_channel and no contacts.unknown_inbox_channel — work card has no destination; review via TUI Drafts panel"
+        );
     }
 
     // 3. Approval branch.
@@ -228,9 +237,9 @@ pub async fn submit_reply(
             draft_id,
             status: "queued_for_approval".into(),
             message: format!(
-                "Draft #{} queued for approval. Notify in forward channel: {}",
+                "Draft #{} queued for approval. Notify in: {}",
                 draft_id,
-                contact.forward_channel.as_deref().unwrap_or("(none)")
+                effective.unwrap_or("(no channel — review via TUI Drafts)")
             ),
         })
     } else {
@@ -238,7 +247,7 @@ pub async fn submit_reply(
         match send_to_contact(db, adapters, &contact, &draft).await {
             Ok(()) => {
                 db.update_contact_draft_sent(draft_id)?;
-                refresh_card(db, adapters, &contact, draft_id, "sent", false).await;
+                refresh_card(db, adapters, &contact, draft_id, "sent", false, unknown_inbox).await;
                 Ok(OutboundResult {
                     draft_id,
                     status: "sent".into(),
@@ -248,7 +257,7 @@ pub async fn submit_reply(
             Err(e) => {
                 let err = format!("{}", e);
                 db.update_contact_draft_failed(draft_id, &err)?;
-                refresh_card(db, adapters, &contact, draft_id, "failed", false).await;
+                refresh_card(db, adapters, &contact, draft_id, "failed", false, unknown_inbox).await;
                 Err(e)
             }
         }
@@ -265,6 +274,7 @@ pub async fn approve_draft(
     db: &StateDb,
     adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
     draft_id: i64,
+    unknown_inbox: Option<&str>,
 ) -> Result<OutboundResult> {
     // CAS: claim before reading the draft. If status is already publishing/sent,
     // another caller owns the send.
@@ -286,12 +296,12 @@ pub async fn approve_draft(
         .get_contact(&draft.contact_id)?
         .ok_or_else(|| CatClawError::Other(format!("contact '{}' not found", draft.contact_id)))?;
 
-    refresh_card(db, adapters, &contact, draft_id, "publishing", false).await;
+    refresh_card(db, adapters, &contact, draft_id, "publishing", false, unknown_inbox).await;
 
     match send_to_contact(db, adapters, &contact, &draft).await {
         Ok(()) => {
             db.update_contact_draft_sent(draft_id)?;
-            refresh_card(db, adapters, &contact, draft_id, "sent", false).await;
+            refresh_card(db, adapters, &contact, draft_id, "sent", false, unknown_inbox).await;
             Ok(OutboundResult {
                 draft_id,
                 status: "sent".into(),
@@ -301,7 +311,7 @@ pub async fn approve_draft(
         Err(e) => {
             let err = format!("{}", e);
             db.update_contact_draft_failed(draft_id, &err)?;
-            refresh_card(db, adapters, &contact, draft_id, "failed", true).await;
+            refresh_card(db, adapters, &contact, draft_id, "failed", true, unknown_inbox).await;
             Err(e)
         }
     }
@@ -312,12 +322,13 @@ pub async fn discard_draft(
     db: &StateDb,
     adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
     draft_id: i64,
+    unknown_inbox: Option<&str>,
 ) -> Result<OutboundResult> {
     let draft = db
         .get_contact_draft(draft_id)?
         .ok_or_else(|| CatClawError::Other(format!("draft #{} not found", draft_id)))?;
     if let Ok(Some(c)) = db.get_contact(&draft.contact_id) {
-        refresh_card(db, adapters, &c, draft_id, "discarded", false).await;
+        refresh_card(db, adapters, &c, draft_id, "discarded", false, unknown_inbox).await;
     }
     db.update_contact_draft_status(draft_id, "ignored")?;
     Ok(OutboundResult {
@@ -335,13 +346,14 @@ pub async fn request_revision(
     adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
     draft_id: i64,
     note: &str,
+    unknown_inbox: Option<&str>,
 ) -> Result<OutboundResult> {
     let draft = db
         .get_contact_draft(draft_id)?
         .ok_or_else(|| CatClawError::Other(format!("draft #{} not found", draft_id)))?;
     db.update_contact_draft_revision_note(draft_id, note)?;
     if let Ok(Some(c)) = db.get_contact(&draft.contact_id) {
-        refresh_card(db, adapters, &c, draft_id, "revising", false).await;
+        refresh_card(db, adapters, &c, draft_id, "revising", false, unknown_inbox).await;
     }
     Ok(OutboundResult {
         draft_id,
@@ -481,9 +493,10 @@ pub async fn edit_and_approve(
     adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
     draft_id: i64,
     new_payload: serde_json::Value,
+    unknown_inbox: Option<&str>,
 ) -> Result<OutboundResult> {
     db.update_contact_draft_payload(draft_id, &new_payload)?;
-    approve_draft(db, adapters, draft_id).await
+    approve_draft(db, adapters, draft_id, unknown_inbox).await
 }
 
 /// Send a `ContactPayload` to a contact via the appropriate adapter.
@@ -568,6 +581,7 @@ pub async fn mirror_inbound_to(
 }
 
 /// Mirror an inbound message from a contact to the forward channel.
+/// Falls back to `unknown_inbox` if the contact has no per-contact forward set.
 /// Best-effort — failure to mirror does not block routing to the agent.
 pub async fn mirror_inbound(
     adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
@@ -575,8 +589,9 @@ pub async fn mirror_inbound(
     from_platform: &str,
     text: &str,
     attachments: Vec<String>,
+    unknown_inbox: Option<&str>,
 ) {
-    let Some(ref fc) = contact.forward_channel else { return };
+    let Some(fc) = contact.effective_forward_channel(unknown_inbox) else { return };
     let Some(target) = ForwardTarget::parse(fc) else {
         warn!(forward_channel = %fc, "mirror_inbound: invalid forward_channel format");
         return;
@@ -675,8 +690,9 @@ async fn refresh_card(
     draft_id: i64,
     label: &str,
     show_actions: bool,
+    unknown_inbox: Option<&str>,
 ) {
-    let Some(ref fc) = contact.forward_channel else { return };
+    let Some(fc) = contact.effective_forward_channel(unknown_inbox) else { return };
     let Some(target) = ForwardTarget::parse(fc) else { return };
     let Ok(Some(d)) = db.get_contact_draft(draft_id) else { return };
     let card = ContactWorkCard::from_draft(&d, contact, label, show_actions);
@@ -708,9 +724,19 @@ async fn refresh_card(
     }
 }
 
+/// Prefix that marks a message typed by an admin in a forward channel as a
+/// manual-reply command ("relay this text to the contact as if I'm the agent").
+/// Without this prefix, messages in a forward channel are treated as normal
+/// agent conversation — so the admin can talk to the agent about the contact
+/// without accidentally echoing every sentence to the contact.
+pub const MANUAL_REPLY_PREFIX: &str = ">>";
+
 /// Try to handle a manual reply detected in a forward channel.
-/// Returns Some(()) if the channel matched a contact and the message was forwarded.
-/// Returns None when this is just a regular adapter inbound (no contact mirror context).
+/// Returns Some(()) when the message matched a forward channel AND carried
+/// the `>>` prefix — the trimmed content was relayed to the contact.
+/// Returns None for all other cases (not in a forward channel, or no prefix) —
+/// caller should continue with normal agent routing.
+#[allow(clippy::too_many_arguments)]
 pub async fn try_manual_reply(
     db: &StateDb,
     adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
@@ -719,7 +745,16 @@ pub async fn try_manual_reply(
     inbound_guild_id: Option<&str>,
     inbound_text: &str,
     inbound_sender_id: &str,
+    unknown_inbox: Option<&str>,
 ) -> Option<()> {
+    // Only treat as manual reply when the message is explicitly prefixed.
+    // Without prefix, router will continue to agent dispatch normally.
+    let trimmed = inbound_text.trim_start();
+    let payload_text = trimmed.strip_prefix(MANUAL_REPLY_PREFIX)?.trim_start();
+    if payload_text.is_empty() {
+        return None;
+    }
+
     // Indexed lookup: build the exact candidate strings the router would emit
     // and let the contacts(forward_channel) index do an O(1) match.
     let mut candidates = vec![format!("{}:{}", inbound_platform, inbound_channel_id)];
@@ -733,13 +768,8 @@ pub async fn try_manual_reply(
 
     // We rely on each adapter's own bot-message filter (msg.author.bot in
     // discord.rs, equivalent guards in slack/telegram) to keep the bot's own
-    // outbound from being treated as a manual reply. We do NOT add a guard on
-    // sender_id == "bot" here because real platform IDs are numeric/alphanumeric
-    // and would never equal that literal — it would be dead code.
+    // outbound from being treated as a manual reply.
     let _ = inbound_sender_id;
-    if inbound_text.is_empty() {
-        return Some(());
-    }
 
     info!(
         contact_id = %contact.id,
@@ -752,7 +782,7 @@ pub async fn try_manual_reply(
     // approval is required, the manual reply still goes through the approval
     // gate so a second admin (or the same admin via the work card) must
     // confirm. Otherwise send immediately.
-    let payload = serde_json::json!({"type": "text", "text": inbound_text});
+    let payload = serde_json::json!({"type": "text", "text": payload_text});
     let mut draft = ContactDraft::new(&contact.id, &contact.agent_id, payload);
     draft.via_platform = None;
     let draft_id = match db.insert_contact_draft(&draft) {
@@ -765,9 +795,9 @@ pub async fn try_manual_reply(
     draft.id = draft_id;
 
     if contact.approval_required {
-        // Mirror a work card to the forward channel and stop. Approval click
-        // (or contacts_draft_approve) will trigger the actual send.
-        if let Some(ref fc) = contact.forward_channel {
+        // Mirror a work card to the forward channel (or unknown_inbox fallback)
+        // and stop. Approval click (or contacts_draft_approve) triggers the send.
+        if let Some(fc) = contact.effective_forward_channel(unknown_inbox) {
             if let Some(target) = ForwardTarget::parse(fc) {
                 let card = ContactWorkCard::from_draft(
                     &draft, &contact, "awaiting approval (manual reply)", true,

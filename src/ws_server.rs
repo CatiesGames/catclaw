@@ -2122,10 +2122,12 @@ fn handle_contact_get(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
 
 async fn handle_contact_update(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
     let default_agent = gw.config.read().unwrap().default_agent_id().unwrap_or("main").to_string();
+    let unknown_inbox = gw.config.read().unwrap().contacts.unknown_inbox_channel.clone();
     match crate::contacts::tools::execute_contacts_tool(
         &gw.state_db, &gw.state_db, &gw.adapters,
         &gw.session_manager, &gw.agent_registry,
-        &default_agent, "contacts_update", req.params.clone(),
+        &default_agent, unknown_inbox.as_deref(),
+        "contacts_update", req.params.clone(),
     ).await {
         Ok(v) => WsResponse::ok(req.id, v),
         Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
@@ -2185,7 +2187,8 @@ async fn handle_contact_draft_approve(req: &WsRequest, gw: &Arc<GatewayHandle>) 
         Some(v) => v,
         None => return WsResponse::err(req.id, -32602, "missing id"),
     };
-    match crate::contacts::pipeline::approve_draft(&gw.state_db, &gw.adapters, id).await {
+    let unknown_inbox = gw.config.read().unwrap().contacts.unknown_inbox_channel.clone();
+    match crate::contacts::pipeline::approve_draft(&gw.state_db, &gw.adapters, id, unknown_inbox.as_deref()).await {
         Ok(res) => WsResponse::ok(req.id, json!(res)),
         Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
     }
@@ -2196,7 +2199,8 @@ async fn handle_contact_draft_discard(req: &WsRequest, gw: &Arc<GatewayHandle>) 
         Some(v) => v,
         None => return WsResponse::err(req.id, -32602, "missing id"),
     };
-    match crate::contacts::pipeline::discard_draft(&gw.state_db, &gw.adapters, id).await {
+    let unknown_inbox = gw.config.read().unwrap().contacts.unknown_inbox_channel.clone();
+    match crate::contacts::pipeline::discard_draft(&gw.state_db, &gw.adapters, id, unknown_inbox.as_deref()).await {
         Ok(res) => WsResponse::ok(req.id, json!(res)),
         Err(e) => WsResponse::err(req.id, -1, format!("{e}")),
     }
@@ -2208,7 +2212,8 @@ async fn handle_contact_draft_revision(req: &WsRequest, gw: &Arc<GatewayHandle>)
         None => return WsResponse::err(req.id, -32602, "missing id"),
     };
     let note = req.params.get("note").and_then(|v| v.as_str()).unwrap_or("");
-    match crate::contacts::pipeline::request_revision(&gw.state_db, &gw.adapters, id, note).await {
+    let unknown_inbox = gw.config.read().unwrap().contacts.unknown_inbox_channel.clone();
+    match crate::contacts::pipeline::request_revision(&gw.state_db, &gw.adapters, id, note, unknown_inbox.as_deref()).await {
         Ok(res) => {
             // Fire-and-forget: push the revision instruction back to the agent's session.
             crate::contacts::pipeline::dispatch_revision_to_agent(
