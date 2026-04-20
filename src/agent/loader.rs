@@ -921,6 +921,8 @@ You have access to Discord tools provided by CatClaw via MCP. Use them directly 
 - `discord_delete_channel` — Delete channel (params: channel_id)
 - `discord_edit_permissions` — Set permission overwrites (params: channel_id, target_id, target_type?, allow?, deny?)
 
+**Required permissions for create/edit/delete channels:** the Discord bot role must have the **Manage Channels** permission in the target guild. If a `create_channel` call returns `Missing Permissions`, ask the human admin to grant Manage Channels via Server Settings → Roles → [bot role] → Permissions, then retry. Common contacts use case (`#client-小華`-style per-contact channels) needs this permission.
+
 **Guild:**
 - `discord_get_guilds` — List guilds the bot is in
 - `discord_get_guild_info` — Guild details (params: guild_id)

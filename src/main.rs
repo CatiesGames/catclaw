@@ -454,7 +454,7 @@ enum TaskCommands {
 enum ChannelCommands {
     /// Add a channel adapter
     Add {
-        /// Channel type (discord, telegram, slack)
+        /// Channel type (discord, telegram, slack, line)
         #[arg(rename_all = "lowercase")]
         channel_type: String,
         /// Environment variable name for the token
@@ -469,6 +469,9 @@ enum ChannelCommands {
         /// Environment variable name for the app-level token (Slack Socket Mode only)
         #[arg(long)]
         app_token_env: Option<String>,
+        /// Environment variable name for the channel signing secret (LINE webhook HMAC)
+        #[arg(long)]
+        secret_env: Option<String>,
     },
     /// List configured channels
     List,
@@ -1486,7 +1489,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     guilds,
                     activation,
                     app_token_env,
+                    secret_env,
                 } => {
+                    // LINE requires secret_env for webhook HMAC verification.
+                    if channel_type == "line" && secret_env.is_none() {
+                        eprintln!("Error: LINE channel requires --secret-env <ENV_VAR_NAME> for the channel signing secret.");
+                        std::process::exit(1);
+                    }
                     config.channels.push(crate::config::ChannelConfig {
                         channel_type,
                         token_env,
@@ -1500,7 +1509,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         group_allow: vec![],
                         group_deny: vec![],
                         app_token_env,
-                        secret_env: None,
+                        secret_env,
                     });
                     config.save(&cli.config)?;
                     println!("Channel added. Config saved.");
@@ -2013,7 +2022,7 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
         Config::default_init()
     };
 
-    let total_steps = 3;
+    let total_steps = 4;
 
     // ── Step 1: Claude Code CLI ────────────────────────────────────────
     cli_ui::step_indicator(1, total_steps, "Prerequisites");
@@ -2132,6 +2141,7 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
         ("discord", "Discord", true),
         ("telegram", "Telegram", true),
         ("slack", "Slack", true),
+        ("line", "LINE", true),
     ];
 
     // Load existing .env if present (from ~/.catclaw/.env)
@@ -2584,6 +2594,86 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
             println!();
             cli_ui::status_msg("✅", "Slack configured (tokens saved to .env)");
             println!();
+        } else if ch_type == "line" {
+            println!();
+            cli_ui::section_header("💚", "LINE Official Account Setup");
+            cli_ui::section_empty();
+            cli_ui::section_line(&format!(
+                "{}1.{} Go to {}https://developers.line.biz/console/{} and create / pick a Provider",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::SAPPHIRE, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}2.{} Create a {}Messaging API channel{} (this becomes your OA)",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}3.{} On the {}Messaging API{} tab: issue a {}Channel access token (long-lived){}",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEAL, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}4.{} On the {}Basic settings{} tab: copy the {}Channel secret{}",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEAL, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_line(&format!(
+                "{}5.{} Disable {}Auto-reply messages{} + {}Greeting messages{} (LINE OA Manager → Response settings)",
+                cli_ui::MAUVE, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET, cli_ui::TEXT, cli_ui::RESET
+            ));
+            cli_ui::section_empty();
+            cli_ui::section_hint("Webhook URL will be: <webhook_base_url>/webhook/line — set this in the Messaging API tab AFTER catclaw is running with a public HTTPS endpoint (cloudflared / ngrok / your domain).");
+            cli_ui::section_empty();
+            cli_ui::section_divider();
+            cli_ui::section_empty();
+
+            let token_env = "CATCLAW_LINE_CHANNEL_ACCESS_TOKEN";
+            let secret_env = "CATCLAW_LINE_CHANNEL_SECRET";
+
+            cli_ui::section_footer();
+            let token: String = Password::new()
+                .with_prompt("  Paste your Channel access token")
+                .interact()
+                .unwrap_or_default();
+            if token.is_empty() {
+                cli_ui::status_msg("⚠️", "No token provided — skipping LINE");
+                println!();
+                continue;
+            }
+
+            cli_ui::section_footer();
+            let secret: String = Password::new()
+                .with_prompt("  Paste your Channel secret")
+                .interact()
+                .unwrap_or_default();
+            if secret.is_empty() {
+                cli_ui::status_msg("⚠️", "No secret provided — LINE webhook signature would always fail. Skipping.");
+                println!();
+                continue;
+            }
+
+            write_env_var(&mut env_lines, token_env, &token);
+            write_env_var(&mut env_lines, secret_env, &secret);
+
+            config.channels.push(crate::config::ChannelConfig {
+                channel_type: ch_type.to_string(),
+                token_env: token_env.to_string(),
+                guilds: vec![],
+                activation: "mention".to_string(),
+                overrides: vec![],
+                dm_policy: "open".to_string(),
+                dm_allow: vec![],
+                dm_deny: vec![],
+                group_policy: "open".to_string(),
+                group_allow: vec![],
+                group_deny: vec![],
+                app_token_env: None,
+                secret_env: Some(secret_env.to_string()),
+            });
+
+            std::env::set_var(token_env, &token);
+            std::env::set_var(secret_env, &secret);
+            println!();
+            cli_ui::status_msg("✅", "LINE configured (token + secret saved to .env)");
+            cli_ui::status_msg("ℹ️", "Next: expose port via cloudflared/ngrok and set webhook URL in LINE console.");
+            println!();
         } else {
             // Generic channel setup (for future adapters)
             println!();
@@ -2857,6 +2947,25 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
     if !env_lines.is_empty() {
         std::fs::write(&env_path, env_lines.join("\n") + "\n")?;
     }
+
+    // ── Step 4: Contacts (optional) ───────────────────────────────────
+    cli_ui::step_indicator(4, total_steps, "Contacts (optional)");
+    cli_ui::section_header("👥", "Contacts");
+    cli_ui::section_empty();
+    cli_ui::section_line("Cross-platform identity layer — manage \"clients\" (個案/客戶/學員) across LINE/Discord/Telegram/Slack with per-person forward channel + approval gate.");
+    cli_ui::section_line("Off by default to save ~3-4KB tokens per agent conversation.");
+    cli_ui::section_empty();
+    cli_ui::section_hint("Enable if a single user manages many clients through the bot (nutritionist / trainer / consultant). Otherwise leave off.");
+    cli_ui::section_empty();
+    if cli_ui::section_confirm("Enable contacts subsystem now?", false) {
+        config.contacts.enabled = true;
+        cli_ui::section_ok("Contacts enabled — agents will see contacts_* MCP tools");
+        cli_ui::section_hint("Tip: add the first contact via TUI Contacts tab or `catclaw contact add <name>`. Then bind a platform user id with `catclaw contact bind <id> --platform line --user-id U...`.");
+    } else {
+        cli_ui::section_hint("Enable later: catclaw config set contacts.enabled true");
+    }
+    cli_ui::section_footer();
+    println!();
 
     // ── Create workspace structure ─────────────────────────────────────
     let workspace = &config.general.workspace;
