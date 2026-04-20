@@ -759,9 +759,11 @@ pub async fn try_manual_reply(
         return Some(());
     }
 
-    // approval_required=false: send immediately, with the same CAS gate as
-    // approve_draft so no double-send if the admin also clicks an Approve
-    // button on a stale card.
+    // approval_required=false: send immediately. We still call the CAS so that
+    // the status moves to 'publishing' atomically (matching the rest of the
+    // pipeline's state machine); the draft was just inserted so the claim
+    // always succeeds in this path — the gate is a no-op for racing approvers
+    // because no work card is sent in this branch.
     let claimed = db.claim_contact_draft_for_send(draft_id).unwrap_or(0);
     if claimed == 0 {
         return Some(());

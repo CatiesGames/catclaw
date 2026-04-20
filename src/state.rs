@@ -1492,11 +1492,14 @@ impl StateDb {
         let conn = self.conn.lock().unwrap();
         // We can't index JSON, so do a candidate scan (filtered by agent_id + state
         // to bound the row count). This is fine — sessions per agent are O(100).
+        // Restrict to active/idle: 'suspended' sessions are in limbo after gateway
+        // restart and injecting into them spawns a new subprocess without prior
+        // context being restored — that surprises the agent. 'archived' is final.
         let mut stmt = conn.prepare(
             "SELECT session_key, session_id, agent_id, origin, context_id, parent_session_id,
                     state, last_activity_at, created_at, metadata
              FROM sessions
-             WHERE agent_id = ?1 AND state != 'archived'
+             WHERE agent_id = ?1 AND state IN ('active', 'idle')
              ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(params![agent_id], |row| {
