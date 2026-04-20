@@ -199,6 +199,14 @@ impl ConfigPanel {
             });
         }
 
+        // Contacts subsystem (gates whether contacts_* MCP tools are advertised)
+        entries.push(ConfigEntry {
+            key: "contacts.enabled".to_string(),
+            value: config.contacts.enabled.to_string(),
+            section: "Contacts".to_string(),
+            editable: true,
+        });
+
         // Channels
         for (i, ch) in config.channels.iter().enumerate() {
             entries.push(ConfigEntry {
@@ -468,7 +476,7 @@ impl ConfigPanel {
         if key == "logging.level" {
             return vec!["error".into(), "warn".into(), "info".into(), "debug".into()];
         }
-        if key == "heartbeat.enabled" {
+        if key == "heartbeat.enabled" || key == "contacts.enabled" {
             return vec!["true".into(), "false".into()];
         }
         // channels[N].activation

@@ -17,8 +17,18 @@ use crate::error::{CatClawError, Result};
 use crate::session::manager::SessionManager;
 use crate::state::StateDb;
 
-/// Tool list for tools/list response.
-pub fn build_contacts_tools() -> Vec<Value> {
+/// Tool list for tools/list response. Returns empty when `contacts.enabled=false`
+/// in config so disabled deployments don't pay the ~3-4KB token cost on every
+/// conversation. The schema/CRUD remain available for explicit CLI/TUI use even
+/// when the MCP surface is hidden.
+pub fn build_contacts_tools_if_enabled(enabled: bool) -> Vec<Value> {
+    if !enabled {
+        return vec![];
+    }
+    build_contacts_tools_inner()
+}
+
+fn build_contacts_tools_inner() -> Vec<Value> {
     vec![
         tool(
             "contacts_create",

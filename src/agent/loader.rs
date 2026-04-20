@@ -1282,6 +1282,12 @@ catclaw config set <key> <value>  # Set a value
 | `heartbeat.enabled` | false | Enable periodic heartbeat — requires restart |
 | `heartbeat.interval_mins` | 30 | Minutes between heartbeats — requires restart |
 
+### Contacts Keys
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `contacts.enabled` | false | Advertise `contacts_*` MCP tools to agents (saves ~3-4KB tokens when off). Hot-reload — no restart needed. |
+
 ### Per-Channel Keys (`channels[N].field`)
 
 | Key | Values | Notes |
@@ -1865,6 +1871,9 @@ For full setup guidance, load the `instagram` or `threads` skill.
 
 CatClaw 的 contacts 系統提供「人」的抽象 — 跨 Discord/Telegram/Slack/LINE 統一身份。
 若使用者要把對話對象當「個案」「客戶」「學員」等管理，就用 contacts。
+
+**啟用前提**:`catclaw config set contacts.enabled true` (預設關閉以節省 context tokens)。
+若使用者描述了個案管理需求但你看不到 `contacts_*` 工具,請提示他們開啟此 key。
 
 **核心觀念**:
 - contacts 只管身份、平台綁定、forward 鏡射、approval — **不存業務資料**

@@ -217,6 +217,21 @@ pub struct Config {
     /// Social inbox integration (Instagram + Threads).
     #[serde(default)]
     pub social: SocialConfig,
+
+    /// Contacts subsystem (cross-platform identity, forward/approval pipeline).
+    /// Disabled by default — when off, contacts_* MCP tools are not advertised
+    /// to agents (saves ~3-4KB tokens per conversation start). Inbound
+    /// contact-binding lookup + manual-reply detection still works because
+    /// they're cheap, but the schema/CRUD remain available for explicit CLI/TUI
+    /// use. Flip on when the user actually manages clients via the bot.
+    #[serde(default)]
+    pub contacts: ContactsConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContactsConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -640,6 +655,7 @@ impl Config {
                 let t = self.agents.first().map(|a| a.approval.timeout_secs).unwrap_or(120);
                 Ok(if t == 0 { "120".to_string() } else { t.to_string() })
             }
+            "contacts.enabled" => Ok(self.contacts.enabled.to_string()),
             "webhook_base_url" => Ok(self.general.webhook_base_url.clone().unwrap_or_else(|| format!("http://localhost:{}", self.general.port))),
             "social.instagram.mode" => Ok(self.social.instagram.as_ref().map_or_else(|| "off".to_string(), |c| c.mode.clone())),
             "social.instagram.poll_interval_mins" => Ok(self.social.instagram.as_ref().map_or(5, |c| c.poll_interval_mins).to_string()),
@@ -760,6 +776,11 @@ impl Config {
             "bind_addr" => {
                 self.general.bind_addr = value.to_string();
                 Ok(true)
+            }
+            "contacts.enabled" => {
+                self.contacts.enabled = parse_bool(value)?;
+                // tools/list reads config live each call, so no restart needed.
+                Ok(false)
             }
             "heartbeat.enabled" => {
                 let enabled = parse_bool(value)?;
@@ -1238,6 +1259,7 @@ impl Config {
             mcp_env: HashMap::new(),
             env: HashMap::new(),
             social: SocialConfig::default(),
+            contacts: ContactsConfig::default(),
         }
     }
 }

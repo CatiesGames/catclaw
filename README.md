@@ -507,6 +507,12 @@ Cross-platform identity layer. CatClaw stores **who** you talk to (across Discor
 
 **Use when**: a single user (nutritionist / trainer / consultant / customer-service rep) manages multiple "clients" through the bot, and wants per-client routing, approval, or AI pause/resume.
 
+**Enable** (off by default to save ~3-4KB tokens per agent conversation):
+```bash
+catclaw config set contacts.enabled true
+```
+When disabled, `contacts_*` MCP tools are not advertised to agents. Schema, CLI, and TUI remain functional — you can still build up contacts manually before flipping the switch.
+
 ### Schema
 
 | Table | Purpose |

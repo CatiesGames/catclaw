@@ -52,7 +52,9 @@ async fn handle_mcp(
             let mut tools = build_tool_list(adapters);
             tools.extend(build_social_tools(&gw));
             tools.extend(crate::memory::tools::build_memory_tools());
-            tools.extend(crate::contacts::tools::build_contacts_tools());
+            tools.extend(crate::contacts::tools::build_contacts_tools_if_enabled(
+                gw.config.read().unwrap().contacts.enabled,
+            ));
             let result = serde_json::json!({ "tools": tools });
             jsonrpc_ok(id, result)
         }
@@ -95,7 +97,17 @@ async fn handle_mcp(
 
             // Route contacts tools.
             if tool_name.starts_with("contacts_") {
-                let default_agent = gw.config.read().unwrap().default_agent_id().unwrap_or("main").to_string();
+                let (enabled, default_agent) = {
+                    let cfg = gw.config.read().unwrap();
+                    (cfg.contacts.enabled, cfg.default_agent_id().unwrap_or("main").to_string())
+                };
+                if !enabled {
+                    let response = serde_json::json!({
+                        "content": [{"type":"text","text":"Error: contacts subsystem disabled. Enable with `catclaw config set contacts.enabled true`."}],
+                        "isError": true
+                    });
+                    return jsonrpc_ok(id, response);
+                }
                 match crate::contacts::tools::execute_contacts_tool(
                     &gw.state_db,
                     &gw.state_db,
