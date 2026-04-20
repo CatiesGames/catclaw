@@ -1477,6 +1477,52 @@ impl StateDb {
         Ok(row)
     }
 
+    /// Find the most recent non-archived session whose metadata.sender_id matches
+    /// any of the contact's bound platform user ids. Used by revision dispatch to
+    /// inject the revision instruction back into the agent's existing conversation
+    /// rather than creating a synthetic session.
+    pub fn find_active_session_for_contact(
+        &self,
+        agent_id: &str,
+        platform_user_ids: &[String],
+    ) -> Result<Option<SessionRow>> {
+        if platform_user_ids.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().unwrap();
+        // We can't index JSON, so do a candidate scan (filtered by agent_id + state
+        // to bound the row count). This is fine — sessions per agent are O(100).
+        let mut stmt = conn.prepare(
+            "SELECT session_key, session_id, agent_id, origin, context_id, parent_session_id,
+                    state, last_activity_at, created_at, metadata
+             FROM sessions
+             WHERE agent_id = ?1 AND state != 'archived'
+             ORDER BY last_activity_at DESC",
+        )?;
+        let rows = stmt.query_map(params![agent_id], |row| {
+            Ok(SessionRow {
+                session_key: row.get(0)?,
+                session_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                origin: row.get(3)?,
+                context_id: row.get(4)?,
+                parent_session_id: row.get(5)?,
+                state: row.get(6)?,
+                last_activity_at: row.get(7)?,
+                created_at: row.get(8)?,
+                metadata: row.get(9)?,
+            })
+        })?;
+        for row in rows.flatten() {
+            if let Some(sid) = row.platform_sender_id() {
+                if platform_user_ids.iter().any(|u| u == &sid) {
+                    return Ok(Some(row));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Touch last_active_at for inbound message tracking (used by router for last-active routing).
     pub fn touch_contact_channel(&self, platform: &str, platform_user_id: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
@@ -1587,6 +1633,20 @@ impl StateDb {
             params![status, now, id],
         )?;
         Ok(())
+    }
+
+    /// Conditional UPDATE used as a compare-and-swap gate to prevent double-send
+    /// when multiple admins approve the same draft simultaneously. Returns the
+    /// number of rows affected: 0 means another caller already claimed it.
+    pub fn claim_contact_draft_for_send(&self, id: i64) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE contact_drafts SET status='publishing', updated_at=?1
+             WHERE id=?2 AND status NOT IN ('publishing','sent')",
+            params![now, id],
+        )?;
+        Ok(n)
     }
 
     pub fn update_contact_draft_payload(

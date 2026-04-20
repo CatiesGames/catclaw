@@ -67,6 +67,20 @@ impl LineAdapter {
         let secret = std::env::var(secret_env).map_err(|_| {
             CatClawError::Config(format!("environment variable {} not set", secret_env))
         })?;
+        // Reject empty secret: HMAC accepts any key length, so an empty secret
+        // would let anyone who knows the secret is empty forge a valid signature.
+        if secret.is_empty() {
+            return Err(CatClawError::Config(format!(
+                "environment variable {} is set but empty — LINE channel secret must not be blank",
+                secret_env
+            )));
+        }
+        if token.is_empty() {
+            return Err(CatClawError::Config(format!(
+                "environment variable {} is set but empty — LINE access token must not be blank",
+                config.token_env
+            )));
+        }
         let filter = Arc::new(std::sync::RwLock::new(AdapterFilter::from_config(config)));
         Ok((LineAdapter::new(token, secret, filter.clone()), filter))
     }

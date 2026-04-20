@@ -256,21 +256,32 @@ pub async fn submit_reply(
 }
 
 /// Approve a queued draft and send it.
+///
+/// Uses a SQL compare-and-swap (`claim_contact_draft_for_send`) as the
+/// idempotency gate, so concurrent Approve clicks from multiple admins (or
+/// admin + WS race) only result in a single send. Losing callers return the
+/// existing status without re-sending.
 pub async fn approve_draft(
     db: &StateDb,
     adapters: &Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
     draft_id: i64,
 ) -> Result<OutboundResult> {
+    // CAS: claim before reading the draft. If status is already publishing/sent,
+    // another caller owns the send.
+    let claimed = db.claim_contact_draft_for_send(draft_id)?;
+    if claimed == 0 {
+        let cur = db.get_contact_draft(draft_id)?;
+        let status = cur.as_ref().map(|d| d.status.clone()).unwrap_or_else(|| "unknown".into());
+        return Ok(OutboundResult {
+            draft_id,
+            status: status.clone(),
+            message: format!("draft #{} already claimed by another approver (status={})", draft_id, status),
+        });
+    }
+    // Re-read the draft now that we own it.
     let draft = db
         .get_contact_draft(draft_id)?
         .ok_or_else(|| CatClawError::Other(format!("draft #{} not found", draft_id)))?;
-    if draft.status == "sent" {
-        return Ok(OutboundResult {
-            draft_id,
-            status: "sent".into(),
-            message: "already sent".into(),
-        });
-    }
     let contact = db
         .get_contact(&draft.contact_id)?
         .ok_or_else(|| CatClawError::Other(format!("contact '{}' not found", draft.contact_id)))?;
@@ -391,40 +402,44 @@ pub async fn dispatch_revision_to_agent(
         }
     };
 
-    // Boundary A: only inject if there is an active (or resumable) session.
-    // We look up by deriving the same session_key the original conversation used:
-    //   catclaw:{agent_id}:contacts:contact-{contact_id}
-    // This is a synthetic key — agent uses its normal context_id naming, but
-    // revisions go into a dedicated channel so we don't accidentally pollute a
-    // user-facing session. (The agent will see this in a separate session.)
-    //
-    // Trade-off: the agent loses the original draft's conversation context.
-    // We compensate by including the original payload in the inject text.
-    let session_key = SessionKey::new(&agent.id, "contacts", format!("contact-{}", contact.id));
-    let key_str = session_key.to_key_string();
-    let existing = match db.get_session(&key_str) {
-        Ok(opt) => opt,
+    // Boundary A: only inject if there is an active (non-archived) session for
+    // this agent that has been talking to this contact. We look up by joining
+    // the contact's bound platform user ids against sessions.metadata.sender_id.
+    let channels = match db.list_contact_channels(&contact.id) {
+        Ok(c) => c,
         Err(e) => {
-            warn!(error = %e, draft_id, "dispatch_revision: db error checking session");
+            warn!(error = %e, draft_id, "dispatch_revision: failed to list contact channels");
             return;
         }
     };
-    let session_alive = existing
-        .as_ref()
-        .map(|r| r.state != "archived")
-        .unwrap_or(false);
-    if !session_alive {
-        // Per boundary A: don't auto-spawn. Log and let the admin nudge later.
-        // We keep status=revising so a future tool call (or TUI refresh) can show
-        // the pending revision.
-        info!(
-            draft_id,
-            contact = %contact.display_name,
-            agent_id = %agent.id,
-            "revision pending: no active agent session — admin must follow up manually"
-        );
+    let platform_uids: Vec<String> =
+        channels.iter().map(|c| c.platform_user_id.clone()).collect();
+    if platform_uids.is_empty() {
+        info!(draft_id, "revision pending: contact has no bound channels");
         return;
     }
+    let row = match db.find_active_session_for_contact(&agent.id, &platform_uids) {
+        Ok(opt) => opt,
+        Err(e) => {
+            warn!(error = %e, draft_id, "dispatch_revision: session lookup failed");
+            return;
+        }
+    };
+    let row = match row {
+        Some(r) => r,
+        None => {
+            // Per boundary A: don't auto-spawn. Log and let the admin nudge later.
+            info!(
+                draft_id,
+                contact = %contact.display_name,
+                agent_id = %agent.id,
+                "revision pending: no active agent session — admin must follow up manually"
+            );
+            return;
+        }
+    };
+    // Reconstruct the SessionKey from the row (origin + context_id).
+    let session_key = SessionKey::new(&row.agent_id, &row.origin, row.context_id.clone());
 
     let original_text = match serde_json::from_value::<ContactPayload>(draft.payload.clone()) {
         Ok(p) => p.preview(),
@@ -688,18 +703,27 @@ pub async fn try_manual_reply(
         .ok()
         .flatten()?;
 
-    // Don't echo bot's own messages; many adapters guard against this in their own loop too.
-    if inbound_sender_id == "bot" || inbound_text.is_empty() {
+    // We rely on each adapter's own bot-message filter (msg.author.bot in
+    // discord.rs, equivalent guards in slack/telegram) to keep the bot's own
+    // outbound from being treated as a manual reply. We do NOT add a guard on
+    // sender_id == "bot" here because real platform IDs are numeric/alphanumeric
+    // and would never equal that literal — it would be dead code.
+    let _ = inbound_sender_id;
+    if inbound_text.is_empty() {
         return Some(());
     }
 
     info!(
         contact_id = %contact.id,
         platform = inbound_platform,
-        "manual reply detected — forwarding to contact"
+        approval_required = contact.approval_required,
+        "manual reply detected"
     );
 
-    // Build a draft, mark it as a manual reply (no approval, immediate send).
+    // Build a draft. Branch on contact.approval_required (per plan §3.3): when
+    // approval is required, the manual reply still goes through the approval
+    // gate so a second admin (or the same admin via the work card) must
+    // confirm. Otherwise send immediately.
     let payload = serde_json::json!({"type": "text", "text": inbound_text});
     let mut draft = ContactDraft::new(&contact.id, &contact.agent_id, payload);
     draft.via_platform = None;
@@ -712,6 +736,36 @@ pub async fn try_manual_reply(
     };
     draft.id = draft_id;
 
+    if contact.approval_required {
+        // Mirror a work card to the forward channel and stop. Approval click
+        // (or contacts_draft_approve) will trigger the actual send.
+        if let Some(ref fc) = contact.forward_channel {
+            if let Some(target) = ForwardTarget::parse(fc) {
+                let card = ContactWorkCard::from_draft(
+                    &draft, &contact, "awaiting approval (manual reply)", true,
+                );
+                match send_work_card(adapters, &target, &card).await {
+                    Ok(Some(msg_ref)) => {
+                        let _ = db.update_contact_draft_forward_ref(draft_id, &msg_ref);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(error = %e, contact_id = %contact.id, "manual reply: card send failed");
+                    }
+                }
+            }
+        }
+        let _ = db.update_contact_draft_status(draft_id, "awaiting_approval");
+        return Some(());
+    }
+
+    // approval_required=false: send immediately, with the same CAS gate as
+    // approve_draft so no double-send if the admin also clicks an Approve
+    // button on a stale card.
+    let claimed = db.claim_contact_draft_for_send(draft_id).unwrap_or(0);
+    if claimed == 0 {
+        return Some(());
+    }
     match send_to_contact(db, adapters, &contact, &draft).await {
         Ok(()) => {
             let _ = db.update_contact_draft_sent(draft_id);
