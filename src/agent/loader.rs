@@ -541,6 +541,7 @@ const EMBEDDED_SKILLS: &[(&str, &str)] = &[
     ("telegram", SKILL_TELEGRAM),
     ("slack", SKILL_SLACK),
     ("line", SKILL_LINE),
+    ("catclaw-backend", SKILL_BACKEND),
     ("catclaw", SKILL_CATCLAW),
     ("injection-guard", SKILL_INJECTION_GUARD),
     ("instagram", SKILL_INSTAGRAM),
@@ -1259,25 +1260,19 @@ catclaw config set <key> <value>  # Set a value
 
 ### Environment variables
 
-Channel tokens (Discord/Telegram/Slack/LINE), Meta API tokens (Instagram/Threads),
-and any other external secrets are referenced by `*_env` config keys (e.g.
-`channels[N].token_env = "CATCLAW_LINE_CHANNEL_ACCESS_TOKEN"`). The actual values
-must be set via `catclaw env`:
+Tokens + secrets (LINE/Discord/Slack/Telegram/Meta etc.) are referenced by
+`*_env` config keys (e.g. `channels[N].token_env = "CATCLAW_LINE_CHANNEL_ACCESS_TOKEN"`).
+The actual values go via:
 
 ```bash
-catclaw env list                       # Show all (values masked)
-catclaw env get <KEY>                  # Get one
-catclaw env set <KEY> <VALUE>          # Set one (writes to ~/.catclaw/.env)
-catclaw env remove <KEY>
-catclaw mcp_env set <SERVER> <KEY> <VALUE>   # Per-MCP-server env (separate scope)
+catclaw config env set <KEY> <VALUE>          # Subprocess env (injected to every claude -p)
+catclaw config mcp-env set <SERVER> <KEY> <VALUE>   # Per-MCP-server scope (see User MCP Servers)
+# + matching get/list/remove on both
 ```
 
-`env set` writes to `[env]` in catclaw.toml + `~/.catclaw/.env`; the gateway reads
-both and injects into every claude subprocess. Hot-reloads when gateway is running.
-
-**Do NOT** rely on shell-level `export FOO=bar` for tokens — `catclaw gateway start -d`
-runs as a background daemon (launchd/systemd) and won't inherit interactive shell
-env. Always use `catclaw env set`.
+Both hot-reload on next session spawn. Values masked in all output. Stored in
+`~/.catclaw/.env` + `[env]` / `[mcp_env]` in catclaw.toml. **Don't** `export` in shell —
+daemon mode won't inherit interactive shell env.
 
 ### General Keys
 
@@ -1332,43 +1327,27 @@ Use `catclaw config get channels[0].dm_allow` first when appending to a list.
 
 ## Access Control
 
-**DM Policy:**
-- `open` — Anyone can DM (default)
-- `allowlist` — Only IDs in `dm_allow` can DM
-- `disabled` — Bot ignores all DMs
-
-**Group Policy:**
-- `open` — Anyone in a group can trigger the bot (default)
-- `allowlist` — Only IDs in `group_allow` can trigger
-
-**Deny lists always take priority** over allow lists — a user in both `dm_allow` and `dm_deny` is blocked.
-
-When the user says "block someone", confirm: DM, group, or both? Read current list before setting.
+Per-channel via `dm_policy` / `group_policy` = `open` | `allowlist` | `disabled`
+(see Per-Channel Keys table). Deny list (`*_deny`) always overrides allow list.
+When user says "block someone" — ask: DM, group, or both? Read current list
+(`catclaw config get channels[N].dm_deny`) before appending.
 
 ---
 
 ## Tool Approval
 
-Some tools can be configured to require user approval before each execution. When an approval-required tool is called, the user is prompted to approve or deny in the channel where the conversation originated (TUI banner, Discord embed with buttons, or Telegram inline keyboard).
-
-If no response within the timeout (default 120 seconds), the tool call is automatically denied.
+Some tools can require user approval before each execution. User is prompted
+in the origin channel (TUI banner / Discord embed / Telegram keyboard). Auto-deny
+after `approval.timeout_secs` (default 120).
 
 ```bash
-# Set tools requiring approval (comma-separated)
-catclaw agent tools <name> --approve "Bash,Edit"
-
-# Clear approval requirements
-catclaw agent tools <name> --approve ""
-
-# Change approval timeout (seconds, applies to all agents)
-catclaw config set approval.timeout_secs 120
+catclaw agent tools <name> --approve "Bash,Edit"     # Wildcard OK: "Bash*", "*"
+catclaw agent tools <name> --approve ""              # Clear
 ```
 
-Approval supports wildcard patterns: `"Bash*"` matches all tools starting with Bash, `"*"` matches everything.
-
-**Note:** If you (the agent) have tools marked as requiring approval, your tool calls will pause until the user responds. This is normal — wait for the approval result before proceeding.
-
-**IMPORTANT:** `--approve` configures the approval POLICY (which tools need approval). It does NOT approve a pending request. Pending approvals are handled automatically via the channel UI (Discord buttons, Telegram inline keyboard, TUI banner). You cannot approve or deny a pending request from the CLI — users do this themselves.
+**For the agent:** if your tools require approval, calls block until the user
+responds — wait for result, don't retry. `--approve` sets the POLICY only;
+pending requests can only be resolved by the user via channel UI, not via CLI.
 
 ---
 
@@ -1475,100 +1454,30 @@ catclaw skill uninstall <agent> <skill> # Remove a skill
 
 ## User MCP Servers
 
-Agents can connect to custom MCP servers for additional tools. MCP definitions are shared across all agents (like skills):
+Custom MCP servers shared by all agents. Definitions live in
+`~/.catclaw/workspace/.mcp.json` (edit with `Read`/`Write` tools).
 
-**File location:** `~/.catclaw/workspace/.mcp.json`
-
-All agents see these servers by default. Each agent controls access via the TUI Agents > Tools panel (deny or require approval per server).
-
-### Supported transport types
-
-**HTTP (recommended for cloud services):**
 ```json
 {
   "mcpServers": {
-    "my-api": {
-      "type": "http",
-      "url": "https://api.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${MY_API_KEY}"
-      }
-    }
+    "my-api":    {"type": "http",  "url": "https://api.example.com/mcp",
+                  "headers": {"Authorization": "Bearer ${MY_API_KEY}"}},
+    "local-db":  {"type": "stdio", "command": "npx", "args": ["-y", "@company/mcp-server"]}
   }
 }
 ```
 
-**Stdio (local subprocess):**
-```json
-{
-  "mcpServers": {
-    "local-db": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@company/mcp-server"],
-      "env": {
-        "DB_PATH": "/path/to/database"
-      }
-    }
-  }
-}
-```
+- `${VAR}` / `${VAR:-default}` expand from env at session spawn
+- Tool names become `mcp__{server}__{tool}`
+- Don't put secrets in `.mcp.json` — use `catclaw config mcp-env set <server> <KEY> <VALUE>`
+  (merged into that server's `env` when spawning; masked in all output)
+- Per-agent deny: `catclaw agent tools <name> --deny "mcp__{server}__*"` (or TUI Agents>Tools)
 
-### Rules
+Two env scopes (see also Configuration > Environment variables above):
+- `config env` → OS-level env on the claude subprocess (Bash tools read `$VAR`)
+- `config mcp-env` → scoped to a single MCP server's `env` block
 
-- Environment variables (`${VAR}`, `${VAR:-default}`) are expanded automatically.
-- Tool names become `mcp__{server-name}__{tool}` (e.g. `mcp__my-api__search`).
-- Tools from user MCP servers appear in the TUI Agents > Tools panel under "User MCP Servers" and can be denied or set to require approval.
-- `.mcp.json` only defines **how to connect** — tool definitions come from the MCP server's `tools/list` response.
-- Use `Read` and `Write` tools to create/edit `.mcp.json` directly.
-- Shared MCP servers are available to all agents by default. To disable for a specific agent, use `catclaw agent tools <name> --deny "mcp__{server}__*"` or set to 🚫 in TUI Tools.
-
-### MCP Environment Variables
-
-MCP servers often need API keys or secrets. Rather than putting them in `.mcp.json` in plaintext, store them in `catclaw.toml` via `mcp_env` — they are automatically injected into each server's `env` block when spawning a session.
-
-```bash
-catclaw config mcp-env list              # List all (values are masked)
-catclaw config mcp-env get <server>      # Show env vars for a server
-catclaw config mcp-env set <server> <key> <value>  # Set an env var
-catclaw config mcp-env remove <server> <key>       # Remove an env var
-```
-
-**How it works:** When CatClaw spawns a Claude session, it reads `.mcp.json` for server definitions and merges env vars from `mcp_env.<server>` into each server's `env` field. The combined config is passed via `--mcp-config`.
-
-**Example workflow:**
-```bash
-# 1. Define the server in .mcp.json (no secrets here)
-#    "dotdot": { "command": "npx", "args": ["-y", "dotdot-mcp"] }
-
-# 2. Store the secret separately
-catclaw config mcp-env set dotdot DOTDOT_API_KEY sk-abc123
-
-# 3. Done — next session will have DOTDOT_API_KEY in dotdot's env
-```
-
-Changes take effect on the next session spawn — no gateway restart needed. Values are masked in all output (CLI, TUI, WS responses).
-
-### Subprocess Environment Variables
-
-Environment variables injected into every `claude` subprocess as OS-level env vars. Accessible by any tool (Bash, etc.) the agent uses. Use this for CLI tools that read env vars (e.g., `op` CLI needs `OP_SERVICE_ACCOUNT_TOKEN`).
-
-```bash
-catclaw config env list                  # List all (values are masked)
-catclaw config env get <key>             # Show a specific env var
-catclaw config env set <key> <value>     # Set an env var
-catclaw config env remove <key>          # Remove an env var
-```
-
-**How it works:** When CatClaw spawns a Claude subprocess, it injects all `[env]` entries as OS-level environment variables via `Command::envs()`. The agent's Bash tool can then read them with `$VAR_NAME`.
-
-**Example:**
-```bash
-catclaw config env set OP_SERVICE_ACCOUNT_TOKEN ops_xxx
-# Next session: agent can run `op` CLI and it will find the token
-```
-
-Changes take effect on the next session spawn — no gateway restart needed. Values are masked in all output.
+Both hot-reload on next session spawn.
 
 ---
 
@@ -1655,56 +1564,15 @@ catclaw channel add backend --token-env "my-shared-secret"
 
 ### Backend Channel
 
-The backend channel allows external servers (web apps, mobile backends, etc.) to connect via WebSocket and route messages from multiple end-users to CatClaw agents. Unlike Discord/Telegram/Slack, one backend connection multiplexes many users via `tenant_id` + `user_id`.
+Embed CatClaw into your own web/mobile app backend — one WebSocket connection
+at `ws://<gw>/ws/backend` multiplexes many end-users via `tenant_id` + `user_id`.
+Setup: `catclaw channel add backend --token-env "<shared-secret>"` then
+`catclaw bind "backend:channel:<tenant>" <agent>`.
 
-**Endpoint:** `ws://<gateway>:<port>/ws/backend` (separate from the TUI `/ws` endpoint)
-
-**Setup:**
-1. Add the channel with a shared secret: `catclaw channel add backend --token-env "my-secret-token"`
-   (The `--token-env` value is used directly as the secret. If it matches an env var name, that env var's value is used instead.)
-2. Bind a tenant to an agent: `catclaw bind "backend:channel:<tenant_id>" <agent>`
-
-**Protocol (JSON over WebSocket):**
-
-The backend server connects and authenticates first, then sends messages on behalf of users:
-
-```json
-// 1. Auth (first message, required)
-{"type": "auth", "secret": "<shared_secret>"}
-
-// 2. Session start (when a user connects — carries context + history)
-{"type": "session_start", "tenant_id": "myapp", "user_id": "u123",
- "user_name": "Alice", "user_role": "member",
- "metadata": {"plan": "pro"},
- "history": [
-   {"role": "user", "content": "hello", "timestamp": "2026-04-10T14:30:00Z"},
-   {"role": "assistant", "content": "hi there!"}
- ]}
-
-// 3. Message (user sends a chat message)
-{"type": "message", "tenant_id": "myapp", "user_id": "u123", "text": "how do I reset my password?"}
-
-// 4. Context event (behavioural trigger, not a user message)
-{"type": "context_event", "tenant_id": "myapp", "user_id": "u123",
- "user_name": "Alice", "event": "page_idle",
- "data": {"page": "/pricing", "seconds": 90}}
-
-// 5. Disconnect (user left)
-{"type": "disconnect", "tenant_id": "myapp", "user_id": "u123"}
-```
-
-**CatClaw responds with:**
-```json
-{"type": "response", "tenant_id": "myapp", "user_id": "u123", "text": "You can reset..."}
-{"type": "typing", "tenant_id": "myapp", "user_id": "u123", "active": true}
-```
-
-**Session lifecycle:**
-- `session_start` archives any existing session for that user and stores context (metadata + history) to prepend to the first message
-- Each user gets an independent CatClaw session: `catclaw:<agent>:backend:<tenant>.user.<uid>`
-- `disconnect` cleans up the user mapping (session idles/archives naturally)
-
-**Memory:** Backend-connected agents typically have all memory tools denied (no diary extraction, no Memory Palace). Conversation history is managed by the backend server and injected via `session_start.history`.
+For the JSON protocol (auth / session_start / message / context_event /
+disconnect / response / typing frames) load skill `catclaw-backend`, or read
+`src/channel/backend.rs` — full protocol + session lifecycle + history
+injection + memory-deny recommendation are there.
 
 ---
 
@@ -2604,4 +2472,131 @@ Use `line_*` and `contacts_reply` tools only for:
 - Flex Message Simulator (visual designer): <https://developers.line.biz/flex-simulator/>
 - Rich Menu spec: <https://developers.line.biz/en/docs/messaging-api/using-rich-menus/>
 - Webhook events reference: <https://developers.line.biz/en/reference/messaging-api/#webhook-event-objects>
+"#;
+
+const SKILL_BACKEND: &str = r#"---
+name: catclaw-backend
+description: CatClaw backend channel — JSON-over-WebSocket protocol for embedding CatClaw into a web/mobile app backend. Load when asked to integrate CatClaw as a chat engine for an external app (multiplexed users via tenant_id + user_id), configure the /ws/backend endpoint, or debug backend session lifecycle.
+---
+
+# CatClaw Backend Channel
+
+The backend channel lets an external server (your web/mobile app backend) connect
+to CatClaw over WebSocket and relay chats from many end-users to agents.
+One backend connection = many users, multiplexed via `tenant_id` + `user_id`.
+
+## When to Use
+
+- User is building a web/mobile app and wants CatClaw to power its in-app chat
+- User needs to route multiple end-users to agents without one Discord/Slack/LINE
+  account per user
+- Debugging session mapping, history injection, or typing indicators for an
+  embedded deployment
+
+Don't load for: regular Discord/Telegram/Slack/LINE deployments — they use their
+own channel types.
+
+## Endpoint
+
+`ws://<gateway_host>:<port>/ws/backend` — separate from TUI's `/ws`. Gateway's
+port is `general.port` (default 21130).
+
+## Setup
+
+```bash
+catclaw channel add backend --token-env "<shared-secret>"
+#   --token-env value is used DIRECTLY as the secret. If it happens to match
+#   an env var name, that env var's value is used instead (lookup convention).
+catclaw bind "backend:channel:<tenant_id>" <agent_name>
+#   Backend channel REQUIRES explicit binding per tenant — no default-agent
+#   fallthrough (tenants may carry elevated permissions).
+```
+
+## Protocol (JSON over WebSocket)
+
+### Backend → CatClaw
+
+```json
+// 1. Auth — FIRST message, required before anything else
+{"type": "auth", "secret": "<shared_secret>"}
+
+// 2. session_start — when a user connects (optional but recommended)
+//    Archives any prior session for this user; new session starts fresh with
+//    metadata + history prepended to first agent turn.
+{
+  "type": "session_start",
+  "tenant_id": "myapp",
+  "user_id": "u123",
+  "user_name": "Alice",
+  "user_role": "member",
+  "metadata": {"plan": "pro", "locale": "zh-TW"},
+  "history": [
+    {"role": "user", "content": "hello", "timestamp": "2026-04-10T14:30:00Z"},
+    {"role": "assistant", "content": "hi there!"}
+  ]
+}
+
+// 3. message — a chat turn from the user
+{"type": "message", "tenant_id": "myapp", "user_id": "u123",
+ "text": "how do I reset my password?"}
+
+// 4. context_event — behavioural trigger (page_idle, button_clicked, etc.)
+//    Routed to the agent as a system message (not a user utterance).
+{"type": "context_event", "tenant_id": "myapp", "user_id": "u123",
+ "user_name": "Alice", "event": "page_idle",
+ "data": {"page": "/pricing", "seconds": 90}}
+
+// 5. disconnect — user left. Cleans up user mapping; session idles/archives.
+{"type": "disconnect", "tenant_id": "myapp", "user_id": "u123"}
+```
+
+### CatClaw → Backend
+
+```json
+{"type": "response", "tenant_id": "myapp", "user_id": "u123", "text": "You can reset..."}
+{"type": "typing",   "tenant_id": "myapp", "user_id": "u123", "active": true}
+```
+
+## Session Lifecycle
+
+Each user gets an independent CatClaw session keyed
+`catclaw:<agent>:backend:<tenant>.user.<uid>`.
+
+- `session_start` archives any existing session for that user, then creates a
+  new one. History + metadata prepend to the first agent turn as context.
+- `message` → routed normally via SessionManager → agent → response frame.
+- `context_event` → delivered as `[Context event: <event> — <data>]` system
+  text; agent decides whether to act/respond.
+- `disconnect` → user mapping freed. Session itself idles naturally; archives
+  on the normal schedule.
+
+## Memory Tools Recommendation
+
+Backend-embedded agents usually have **all memory tools denied**:
+```bash
+catclaw agent tools <backend-agent> --deny "memory_*,kg_*"
+```
+Reasons:
+- Conversation history comes from the backend via `session_start.history`
+- Diary extraction / Memory Palace would double-store across sessions
+- Per-user context isolation is the backend's responsibility, not CatClaw's
+
+## Permissions
+
+Backend-bound agents can carry elevated permissions (they see tenant metadata).
+Router **refuses to fall through to the default agent** for backend channel —
+explicit `catclaw bind "backend:channel:<tenant>" <agent>` is required. Without
+binding the message is silently dropped and logged.
+
+## Debugging
+
+- WS endpoint not responding → check `general.port`, firewall, TLS termination
+- Agent never replies → verify `catclaw bind` set; check logs for
+  "backend message rejected: no binding for tenant"
+- History not appearing to agent → only `session_start.history` is injected;
+  raw `message` turns are not pre-loaded
+- Typing frames not showing → `typing` is fire-and-forget; no retry
+
+For the adapter source: `src/channel/backend.rs` (complete JSON schema + error
+paths).
 "#;
