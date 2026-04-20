@@ -1747,148 +1747,41 @@ catclaw uninstall              # Stop gateway, remove service, delete binary
 
 ## Social Inbox
 
-Receive and route Instagram/Threads events (comments, mentions, replies) without going through LLM routing.
-Events flow: poll/webhook → dedup → action router → forward card / auto reply / template / ignore.
+Instagram / Threads 事件收件匣(留言、提及、回覆),獨立於 contacts 系統。
+適合品牌 OA 規模受眾管理。**完整配置、規則、MCP tool 列表載入
+`instagram` 或 `threads` skill** — 那裡有 token / app_id / rules / 43 個配置
+key / 22 個 MCP tool 的完整說明。
+
+常用操作:
+```bash
+catclaw social inbox [--platform ig|threads] [--status pending|forwarded|...]
+catclaw social draft list [--status awaiting_approval]
+catclaw social draft get <id>
+catclaw social poll instagram|threads    # 手動觸發一次 poll
+catclaw social mode instagram webhook    # 切 webhook/polling/off
+catclaw social reprocess <id>            # 卡在無按鈕狀態時重置
+```
+
+TUI: **Social** tab (Alt+9) + **Drafts** tab (Alt+0)。Discord 也支援
+`/social-reprocess id:<id>` slash 命令。
+
+Contacts 系統不涵蓋這一塊 — contacts 走 1:1 客戶管理,Social Inbox 走
+公開留言/提及收件匣,兩者正交。
+
+---
+
+## Issue Tracking
+
+Heartbeat 自動掃 ERROR/WARN log 轉成 issues 追蹤。持續出現的保留,停止
+出現自動移除,明確忽略的永久壓制。
 
 ```bash
-catclaw social inbox                              # List all inbox items
-catclaw social inbox --platform instagram         # Filter by platform
-catclaw social inbox --status pending             # Filter by status
-catclaw social draft list                         # List all drafts
-catclaw social draft list --status awaiting_approval  # Filter by status
-catclaw social draft list --platform instagram    # Filter by platform
-catclaw social draft get <id>                     # Show full draft content + media URL
-catclaw social poll instagram                     # Trigger a manual poll now
-catclaw social poll threads
-catclaw social mode instagram webhook             # Switch mode (webhook/polling/off)
-catclaw social mode threads polling
-catclaw social reprocess <id>                     # Reset inbox item + restore card with buttons
-                                                   # (use when a card lost its buttons / got stuck)
+catclaw issues list [--open] [--agent <name>]
+catclaw issues ignore <agent> <issue-id>    # 永久壓制
+catclaw issues resolve <agent> <issue-id>   # 移除,若再出現會重新冒出
 ```
 
-TUI 對等操作：Social Inbox panel (`Alt+9`) 選中該 row 後按 `r`。Discord 也可用 `/social-reprocess id:<id>` slash command。
-
-### Issue Tracking
-
-Heartbeat automatically scans ERROR/WARN logs and tracks them as issues in `memory/issues.json`.
-Issues that stop appearing are automatically removed. Ignored issues are permanently suppressed.
-
-```bash
-catclaw issues list                               # List all open + ignored issues
-catclaw issues list --open                        # Show only open issues
-catclaw issues list --agent main                  # Filter by agent
-catclaw issues ignore main <issue-id>             # Suppress forever (won't reappear)
-catclaw issues resolve main <issue-id>            # Remove (will reappear if error recurs)
-```
-
-TUI: **Issues** tab (Alt+0) — `i` ignore, `d`/`x` resolve, `r` reload.
-
-### Social Config Keys
-
-| Key | Notes |
-|-----|-------|
-| `webhook_base_url` | Public base URL for webhooks (e.g. `https://myserver.com`). Falls back to `http://localhost:{port}` |
-| `social.instagram.mode` | `webhook` / `polling` / `off` (default: `off`). CLI: `catclaw social mode instagram webhook` — prints the webhook URL. TUI: Config panel, also shows URL. |
-| `social.instagram.poll_interval_mins` | Polling interval (default 5, only when mode=polling) |
-| `social.instagram.admin_channel` | Forward card destination. Format: `discord:channel:<id>` / `telegram:chat:<id>` / `slack:channel:<id>` |
-| `social.instagram.token_env` | Env var name for the Instagram access token (e.g. `CATCLAW_INSTAGRAM_TOKEN`). Catclaw auto-exchanges short-lived tokens for long-lived and auto-refreshes before expiry. |
-| `social.instagram.token_value` | Actual token value — writes to `~/.catclaw/.env`, NOT TOML (masked in TUI) |
-| `social.instagram.app_id` | App ID (client_id) — required for short-lived → long-lived token exchange |
-| `social.instagram.app_secret_env` | Env var name for app secret (HMAC webhook verification + token exchange) |
-| `social.instagram.app_secret_value` | Actual app secret value — writes to `~/.catclaw/.env` (masked) |
-| `social.instagram.webhook_verify_token_env` | Env var name for hub verify token (webhook mode only) |
-| `social.instagram.webhook_verify_token_value` | Actual verify token — writes to `~/.catclaw/.env` (masked) |
-| `social.instagram.user_id` | IG User ID (numeric, from Meta Business Manager) |
-| `social.instagram.subscribe` | Events to subscribe to (CSV): `comments`, `mentions`, `messages` |
-| `social.instagram.agent` | Agent for auto_reply sessions (default: `main`) |
-| `social.instagram.rules.count` | Read-only: number of rules |
-| `social.instagram.rules[N].match` | Rule N event type: `*` / `comments` / `mentions` / `messages` |
-| `social.instagram.rules[N].action` | Rule N action: `forward` / `auto_reply` / `auto_reply_template` / `ignore` |
-| `social.instagram.rules[N].keyword` | Rule N optional keyword filter (empty = clear) |
-| `social.instagram.rules[N].template` | Rule N template key (for `auto_reply_template`) |
-| `social.instagram.rules[N].agent` | Rule N agent override (for `auto_reply`) |
-| `social.instagram.rules.add` | Append a default rule (`match=*, action=forward`) |
-| `social.instagram.rules[N].delete` | Remove rule at index N |
-| `social.instagram.init` | Initialize platform section if not configured (set value to anything) |
-| `social.threads.mode` | `webhook` / `polling` / `off` (default: `off`). CLI: `catclaw social mode threads webhook` — prints the webhook URL. TUI: Config panel, also shows URL. |
-| `social.threads.poll_interval_mins` | Polling interval (default 5, only when mode=polling) |
-| `social.threads.admin_channel` | Forward card destination |
-| `social.threads.token_env` | Env var name for Threads OAuth token (60-day). Catclaw auto-exchanges short-lived tokens and auto-refreshes long-lived tokens daily. |
-| `social.threads.token_value` | Actual token value — writes to `~/.catclaw/.env` (masked) |
-| `social.threads.app_id` | App ID (client_id) — required for short-lived → long-lived token exchange |
-| `social.threads.app_secret_env` | App secret env var name (token exchange) |
-| `social.threads.app_secret_value` | Actual app secret value — writes to `~/.catclaw/.env` (masked) |
-| `social.threads.webhook_verify_token_env` | Hub verify token env var name |
-| `social.threads.webhook_verify_token_value` | Actual verify token — writes to `~/.catclaw/.env` (masked) |
-| `social.threads.user_id` | Threads User ID |
-| `social.threads.subscribe` | Events to subscribe to (CSV): `replies`, `mentions` |
-| `social.threads.agent` | Agent for auto_reply sessions (default: `main`) |
-| `social.threads.rules[N].*` | Same rule fields as instagram (match/action/keyword/template/agent) |
-| `social.threads.rules.add` | Append a default rule |
-| `social.threads.rules[N].delete` | Remove rule at index N |
-| `social.threads.init` | Initialize platform section if not configured |
-
-**Rules via CLI:**
-```bash
-catclaw config set social.instagram.init true          # Initialize if not configured
-catclaw config set social.instagram.rules.add ""       # Add default rule (match=*, forward)
-catclaw config set social.instagram.rules[0].match comments
-catclaw config set social.instagram.rules[0].action auto_reply
-catclaw config set social.instagram.rules[0].keyword "price"
-catclaw config set social.instagram.rules[0].delete "" # Remove rule 0
-catclaw config set social.instagram.token_value "EAA..." # Update token (writes to .env)
-```
-
-**TOML format** (for reference — use CLI/TUI instead):
-```toml
-[[social.instagram.rules]]
-match = "comments"
-action = "forward"
-
-[[social.instagram.rules]]
-match = "mentions"
-keyword = "price"
-action = "auto_reply"
-agent = "support"
-
-[social.instagram.templates]
-thanks = "Thank you for mentioning us!"
-```
-
-### MCP Tools (when social is configured)
-
-Use `instagram_*` and `threads_*` tools in agents to interact programmatically:
-
-| Tool | Notes |
-|------|-------|
-| `instagram_get_profile` | Account info |
-| `instagram_get_media` | List posts |
-| `instagram_get_comments` | Fetch comments |
-| `instagram_reply_comment` | Reply to a specific comment (`comment_id` = the comment you reply TO) |
-| `instagram_upload_media` | Batch upload local images to media_tmp (`file_paths` array), return public URLs |
-| `instagram_reply_template` | Send a template reply |
-| `instagram_delete_comment` | Delete (requires approval) |
-| `instagram_get_insights` | Insights data |
-| `instagram_get_inbox` | Query social_inbox table |
-| `instagram_create_post` | Publish image/carousel post (`image_urls` array, 1-10 images; auto-stages draft) |
-| `instagram_send_dm` | Send DM (auto-stages draft, approval if configured) |
-| `threads_get_profile` | Account info |
-| `threads_get_timeline` | List posts |
-| `threads_get_replies` | Fetch replies |
-| `threads_create_post` | Publish text/image/carousel post (`media_urls` optional array, 0-20 images; auto-stages draft) |
-| `threads_reply` | Reply to a specific post/reply (`reply_to_id` = the reply's own ID, not root post) |
-| `threads_upload_media` | Batch upload local images to media_tmp (`file_paths` array), return public URLs |
-| `threads_reply_template` | Send template reply |
-| `threads_delete_post` | Delete post (requires approval) |
-| `threads_get_insights` | Insights data |
-| `threads_get_inbox` | Query social_inbox table |
-| `threads_keyword_search` | Search posts by keyword |
-
-**Publish flow:** Just call the publish tool (`instagram_create_post`, `threads_create_post`, etc.) — it auto-stages a draft and triggers the approval hook, which sends a review card to the admin channel.
-
-**Image/carousel posts:** Upload each image with `instagram_upload_media` / `threads_upload_media` first, then pass all URLs as an array to the create_post tool. 1 image = single post, 2+ images = carousel.
-
-For full setup guidance, load the `instagram` or `threads` skill.
+TUI: **Issues** tab — `i` 忽略、`d`/`x` 解決、`r` 重讀。
 
 ---
 
