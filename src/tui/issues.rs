@@ -149,11 +149,9 @@ impl Component for IssuesPanel {
         }
         self.drain_events();
         match event.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if !self.items.is_empty() {
-                    self.selected = (self.selected + 1).min(self.items.len() - 1);
-                    self.table_state.select(Some(self.selected));
-                }
+            KeyCode::Char('j') | KeyCode::Down if !self.items.is_empty() => {
+                self.selected = (self.selected + 1).min(self.items.len() - 1);
+                self.table_state.select(Some(self.selected));
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);

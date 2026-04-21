@@ -257,10 +257,8 @@ impl Component for ContactsPanel {
                     self.selected += 1;
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
+            KeyCode::Up | KeyCode::Char('k') if self.selected > 0 => {
+                self.selected -= 1;
             }
             KeyCode::Char('p') | KeyCode::Char('P') if self.sub == SubTab::Contacts => {
                 self.toggle_pause();

@@ -54,7 +54,7 @@ impl MessageRouter {
             .collect();
 
         // Sort by specificity (most specific first)
-        bindings.sort_by(|a, b| b.specificity.cmp(&a.specificity));
+        bindings.sort_by_key(|b| std::cmp::Reverse(b.specificity));
 
         MessageRouter {
             session_manager,

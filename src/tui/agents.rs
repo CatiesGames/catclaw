@@ -557,20 +557,14 @@ impl AgentsPanel {
     /// Scroll the active list down by `n` items (for mouse wheel).
     pub fn scroll_down(&mut self, n: usize) {
         match self.mode {
-            Mode::Tools => {
-                if !self.tool_entries.is_empty() {
-                    self.tool_selected = (self.tool_selected + n).min(self.tool_entries.len() - 1);
-                }
+            Mode::Tools if !self.tool_entries.is_empty() => {
+                self.tool_selected = (self.tool_selected + n).min(self.tool_entries.len() - 1);
             }
-            Mode::Normal => {
-                if !self.agents.is_empty() {
-                    self.selected = (self.selected + n).min(self.agents.len() - 1);
-                }
+            Mode::Normal if !self.agents.is_empty() => {
+                self.selected = (self.selected + n).min(self.agents.len() - 1);
             }
-            Mode::Skills => {
-                if !self.skill_entries.is_empty() {
-                    self.skill_selected = (self.skill_selected + n).min(self.skill_entries.len() - 1);
-                }
+            Mode::Skills if !self.skill_entries.is_empty() => {
+                self.skill_selected = (self.skill_selected + n).min(self.skill_entries.len() - 1);
             }
             _ => {}
         }
