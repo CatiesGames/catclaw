@@ -1218,7 +1218,7 @@ For detailed API behavior, Block Kit, and advanced features:
 
 const SKILL_CATCLAW: &str = r#"---
 name: catclaw
-description: CatClaw system administration. Use when the user asks to configure CatClaw, manage agents, bindings, tasks, skills, channels, sessions, or perform gateway operations.
+description: CatClaw system administration AND end-user workflow. Use when the user asks to configure CatClaw or manage agents / bindings / tasks / skills / channels / sessions / gateway, OR when the user is managing people through the bot — clients, customers, students, patients, contacts (e.g. "add 個案", "promote unknown to client", "set forward channel", "把 X 設為個案", "幫我管小明", manual reply with `>>`, or anything contacts_* / contact-related).
 ---
 
 # CatClaw System Administration
@@ -1770,11 +1770,24 @@ unknown contact 期間的訊息**沒寫到 catclaw 的對話 transcript**,但若
 事實上的歷史記錄。
 
 升級流程建議(使用者說「把小華設為個案」時):
-1. `contacts_list(role="unknown")` → 找到對應 contact id
+1. `contacts_list(role="unknown")` → 找最近一筆(按 created_at DESC),用
+   display_name 跟使用者說的名字對。若不確定就回問:「最近加好友的是
+   `<name>` 對嗎?」避免錯認
 2. (可選但建議) 用 `discord_get_messages(unknown_inbox_channel, limit=50)`
    翻最近訊息,找出該 LINE userId 對應的歷史,給自己脈絡
-3. `contacts_update(id, role="client", tags=[...], forward_channel=...)`
-4. 之後該 contact 入站開始正常派給你 — 你已有上下文,首次回應就能精準
+3. **建專屬頻道**(若使用者沒明確指定):
+   - `discord_get_guilds()` → 拿 guild_id
+   - `discord_create_channel(guild_id, name="個案-小華")` → 拿 channel_id
+   - 失敗多半是 bot 缺 Manage Channels 權限 → 提醒使用者去 Server
+     Settings → Roles 開
+4. `contacts_update(id, role="client", tags=[...], metadata={...},
+   forward_channel="discord:{guild}/{channel}")` 一次寫齊
+5. **教使用者該頻道兩種輸入**(很重要,使用者第一次設定時不知道):
+   「以後這個頻道:
+    - 你直接打字 → 是跟我對話(問狀況、查紀錄、改設定)
+    - 用 `>>` 開頭 → 我會以你名義轉發給小華(手動回覆)
+    - 我傳的草稿會出現綠色卡片,你按按鈕審核」
+6. 之後該 contact 入站開始正常派給你 — 你已有上下文,首次回應就能精準
 
 ### 業務資料建議
 

@@ -3014,6 +3014,33 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
         cli_ui::section_hint("You can enable it later: catclaw gateway install");
     }
 
+    // ── Handoff checklist (only when contacts is enabled) ─────────────
+    if config.contacts.enabled {
+        println!();
+        cli_ui::section_header("📋", "Before handing off to the user");
+        cli_ui::section_empty();
+        cli_ui::section_line("CatClaw is set up, but the end user (e.g. nutritionist) can't");
+        cli_ui::section_line("talk to the agent yet. Two final steps:");
+        cli_ui::section_empty();
+        cli_ui::section_line("1. Have them message the bot once (LINE OA / Discord / etc.)");
+        cli_ui::section_line("   so we learn their platform user ID. They'll get NO reply yet —");
+        cli_ui::section_line("   they're auto-registered as `role=unknown` (no LLM cost).");
+        cli_ui::section_empty();
+        cli_ui::section_line("2. Promote them to admin so the agent will respond:");
+        cli_ui::section_line("   $ catclaw contact list --role unknown    # find their UID");
+        cli_ui::section_line("   $ catclaw contact update <UID> --role admin --tag self");
+        cli_ui::section_empty();
+        cli_ui::section_line("3. (Strongly recommended) Set a review channel for unknown");
+        cli_ui::section_line("   inbound — without it, strangers messaging the OA only show");
+        cli_ui::section_line("   up in logs. Pick a Discord channel the user watches:");
+        cli_ui::section_line("   $ catclaw config set contacts.unknown_inbox_channel \\");
+        cli_ui::section_line("       \"discord:<guild_id>/<channel_id>\"");
+        cli_ui::section_empty();
+        cli_ui::section_hint("Once #2 is done the user can chat naturally — \"幫我新增個案小華\" etc. The agent will guide them through forward channels and approval setup.");
+        cli_ui::section_footer();
+        println!();
+    }
+
     Ok(config)
 }
 

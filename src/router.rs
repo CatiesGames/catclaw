@@ -203,16 +203,22 @@ impl MessageRouter {
                 return Ok(());
             }
 
-            let unknown_inbox = self
-                .session_manager
-                .config_arc()
-                .as_ref()
-                .and_then(|cfg| cfg.read().unwrap().contacts.unknown_inbox_channel.clone());
-            crate::contacts::pipeline::mirror_inbound(
-                &self.adapters, c, platform, &ctx.text, attachments,
-                unknown_inbox.as_deref(),
-            )
-            .await;
+            // Skip mirror for admins: an admin's own inbound is FROM the operator,
+            // not TO them — mirroring it back to a review channel just creates noise
+            // (admin sees their own messages echoed). Mirror is for client / unknown
+            // inbound that the operator needs to monitor.
+            if !matches!(c.role, crate::contacts::ContactRole::Admin) {
+                let unknown_inbox = self
+                    .session_manager
+                    .config_arc()
+                    .as_ref()
+                    .and_then(|cfg| cfg.read().unwrap().contacts.unknown_inbox_channel.clone());
+                crate::contacts::pipeline::mirror_inbound(
+                    &self.adapters, c, platform, &ctx.text, attachments,
+                    unknown_inbox.as_deref(),
+                )
+                .await;
+            }
             if c.ai_paused {
                 tracing::info!(
                     contact_id = %c.id,
