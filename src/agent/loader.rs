@@ -912,7 +912,7 @@ You have access to Discord tools provided by CatClaw via MCP. Use them directly 
 - `discord_list_pins` — List pinned messages (params: channel_id)
 
 **Threads:**
-- `discord_create_thread` — Create thread (params: channel_id, name)
+- `discord_create_thread` — Create thread (params: channel_id, name; optional message_id to start the thread from a specific message)
 - `discord_list_threads` — List active threads (params: guild_id)
 
 **Channels:**

@@ -1054,8 +1054,16 @@ impl ChannelAdapter for DiscordAdapter {
                 let cid = parse_channel_id(&params)?;
                 let name = require_str(&params, "name")?;
                 let builder = CreateThread::new(name);
-                let thread = cid.create_thread(http, builder).await
-                    .map_err(|e| CatClawError::Discord(format!("create_thread: {}", e)))?;
+                let thread = if let Some(mid_str) = params.get("message_id").and_then(|v| v.as_str()) {
+                    let mid = MessageId::new(mid_str.parse::<u64>().map_err(|e| {
+                        CatClawError::Discord(format!("invalid message_id: {}", e))
+                    })?);
+                    cid.create_thread_from_message(http, mid, builder).await
+                        .map_err(|e| CatClawError::Discord(format!("create_thread: {}", e)))?
+                } else {
+                    cid.create_thread(http, builder).await
+                        .map_err(|e| CatClawError::Discord(format!("create_thread: {}", e)))?
+                };
                 Ok(serde_json::json!({
                     "id": thread.id.get().to_string(),
                     "name": thread.name,
@@ -1765,9 +1773,13 @@ fn discord_action_infos() -> Vec<ActionInfo> {
             "type": "object", "properties": {"channel_id": ch}, "required": ["channel_id"]
         })),
         // Threads
-        action("create_thread", "Create a new thread in a channel", serde_json::json!({
+        action("create_thread", "Create a new thread in a channel. If message_id is provided, the thread is started from that message; otherwise a standalone thread is created.", serde_json::json!({
             "type": "object",
-            "properties": {"channel_id": ch, "name": {"type": "string", "description": "Thread name"}},
+            "properties": {
+                "channel_id": ch,
+                "name": {"type": "string", "description": "Thread name"},
+                "message_id": {"type": "string", "description": "Optional: message ID to start the thread from"}
+            },
             "required": ["channel_id", "name"]
         })),
         action("list_threads", "List active threads in a guild", serde_json::json!({
