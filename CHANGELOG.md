@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.0](https://github.com/CatiesGames/catclaw/compare/v0.41.0...v0.42.0) (2026-04-21)
+
+
+### Features
+
+* **contacts:** tighten end-to-end UX (skill trigger / mirror / handoff) ([a92d479](https://github.com/CatiesGames/catclaw/commit/a92d4795bd0bd18581d17ee80b0bf0ffec6294e4))
+
 ## [0.41.0](https://github.com/CatiesGames/catclaw/compare/v0.40.5...v0.41.0) (2026-04-21)
 
 
