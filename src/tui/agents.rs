@@ -78,10 +78,11 @@ enum SkillInputMode {
 }
 
 const KNOWN_MODELS: &[(&str, &str)] = &[
-    ("claude-opus-4-6",        "Opus 4.6 — most capable"),
+    ("claude-opus-4-7",        "Opus 4.7 — newest flagship, 1M context"),
+    ("claude-opus-4-6",        "Opus 4.6 — previous flagship"),
     ("claude-sonnet-4-6",      "Sonnet 4.6 — balanced"),
     ("claude-haiku-4-5-20251001", "Haiku 4.5 — fastest"),
-    ("opus",                   "alias → claude-opus-4-6"),
+    ("opus",                   "alias → claude-opus-4-7"),
     ("sonnet",                 "alias → claude-sonnet-4-6"),
     ("haiku",                  "alias → claude-haiku-4-5-20251001"),
 ];
