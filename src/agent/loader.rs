@@ -924,7 +924,7 @@ You have access to Discord tools provided by CatClaw via MCP. Use them directly 
 - `discord_delete_channel` — Delete channel (params: channel_id)
 - `discord_edit_permissions` — Set permission overwrites (params: channel_id, target_id, target_type?, allow?, deny?)
 
-**Required permissions for create/edit/delete channels:** the Discord bot role must have the **Manage Channels** permission in the target guild. If a `create_channel` call returns `Missing Permissions`, ask the human admin to grant Manage Channels via Server Settings → Roles → [bot role] → Permissions, then retry. Common contacts use case (`#client-小華`-style per-contact channels) needs this permission.
+**Required permissions for create/edit/delete channels:** the Discord bot role must have the **Manage Channels** permission in the target guild. If a `create_channel` call returns `Missing Permissions`, ask the human admin to grant Manage Channels via Server Settings → Roles → [bot role] → Permissions, then retry. Common contacts use case (per-contact forward channels, e.g. one channel per client / 個案 / 學員 / 案件) needs this permission.
 
 **Guild:**
 - `discord_get_guilds` — List guilds the bot is in
@@ -1657,48 +1657,66 @@ TUI: **Issues** tab — `i` 忽略、`d`/`x` 解決、`r` 重讀。
 
 ## Contacts (cross-platform identity)
 
-CatClaw 的 contacts 系統提供「人」的抽象 — 跨 Discord/Telegram/Slack/LINE 統一身份。
-若使用者要把對話對象當「個案」「客戶」「學員」等管理，就用 contacts。
+CatClaw 的 contacts 系統是「人」的抽象,跨 Discord/Telegram/Slack/LINE 統一身份。
+適用於任何「單一使用者管理多位對話對象」的情境 —— 客戶、個案、學員、當事人、
+來談者、潛在客戶、學生家長、粉絲、合作夥伴……。**領域中性**,CatClaw 本身沒有
+寫死任何垂直(營養 / 健身 / 法務 / 客服)的欄位。
 
-**啟用前提**:`catclaw config set contacts.enabled true` (預設關閉以節省 context tokens)。
-若使用者描述了個案管理需求但你看不到 `contacts_*` 工具,請提示他們開啟此 key。
+**啟用前提**:`catclaw config set contacts.enabled true` (預設關閉以節省 context
+tokens)。若使用者描述了對話對象管理需求(「幫我管客戶」「把他設為學員」...)
+但你看不到 `contacts_*` 工具,請提示他們開啟此 key。
 
 **LINE 自動建檔(無 LLM)**:contacts 啟用後,任何 LINE 用戶傳訊或加好友都會自動
 建立 `role=unknown` contact 並綁定 LINE userId — **不會觸發 agent**。這是「儲存
 備查」狀態。
 
 升級流程(由人類發起):
-1. 使用者(陳老師)在 TUI Contacts 看到未分類列表,或從 `unknown_inbox_channel`
-   鏡射看到 unknown 入站
-2. 使用者跟你說「把小華設為個案,糖尿病,目標 1800 大卡」
+1. 使用者在 TUI Contacts 看到未分類列表,或從 `unknown_inbox_channel` 鏡射
+   看到 unknown 入站
+2. 使用者跟你說(任何語氣都算):
+   - 「把 X 設為客戶」「把 X 加為個案」「X 是我新學員」「標成 VIP」
 3. 你呼叫 `contacts_list(role="unknown")` → 找到對應 contact id
 4. 你呼叫 `contacts_update(id, role="client", tags=[...], metadata={...},
    forward_channel="discord:...")`
-5. 之後小華的訊息開始正常派給你處理
+   - tags / metadata 欄位自由 — 依使用者領域設計(見下面「業務資料」)
+5. 之後該人的訊息開始正常派給你處理
 
 不要主動催使用者升級 unknown contact — 等使用者明確指示再操作。
 LINE unfollow 事件會自動把對應 contact 設 `ai_paused=true` + tag `unfollowed`。
 
 **核心觀念**:
 - contacts 只管身份、平台綁定、forward 鏡射、approval — **不存業務資料**
-- 業務資料(個案飲食記錄、健身數據、諮商筆記等)由你自選工具:
-  Notion MCP / memory palace (`memory_*` tools) / 自管 SQLite / 檔案
-- `contacts.external_ref` 欄位可塞自由 JSON 指向外部系統(例如 Notion page id)
-- `contacts.metadata` 可塞慢變 profile(目標、過敏源、tags...)
+- 業務資料(依領域各不相同,如飲食記錄 / 訓練菜單 / 諮商筆記 / 案件進度 /
+  客戶互動史)由你自選工具:Notion MCP / memory palace (`memory_*`) /
+  自管 SQLite / 檔案。**不要**塞進 contacts 表污染 schema。
+- `contacts.external_ref` 欄位可塞自由 JSON 指向外部系統(例如
+  `{"notion_page": "abc123"}` / `{"salesforce_id": "..."}`)
+- `contacts.metadata` 可塞慢變 profile(目標、偏好、限制、角色細節……任何
+  agent 想隨 system prompt 一起看到的小型結構化資料)
 
-**Role 是行為 hint,不是權限**:
-- `admin` — 對方是管理者(會收到指令、要報表)
-- `client` — 對方是被服務的個案/客戶(分析、溫和回覆)
-- `unknown` — 預設,未明確身份
+**Role 是行為 hint,不是權限系統**(CatClaw 不做 RBAC):
+- `admin` — 對方是管理者(會收到指令、要報表、有權下命令)
+- `client` — 對方是被服務的人(諮詢、分析、關懷、回覆服務對象)
+- `unknown` — 預設,尚未由人類確認身份
 
-**未綁 contact 的 sender** = role unknown,行為與沒裝 contacts 系統時完全相同(零回歸)。
+跨領域範例:
+- 營養師:admin=營養師, client=個案, tags=[糖尿病,減重]
+- 健身教練:admin=教練, client=學員, tags=[減脂,新手,PR追蹤]
+- 客服經理:admin=經理, client=客戶, tags=[VIP,B2B,開案中]
+- 律師:admin=律師, client=當事人, tags=[民事,案號XXX]
+- 業務:admin=業務, client=潛在客戶, tags=[hot,已報價,追蹤中]
+
+**未綁 contact 的 sender** = 行為與沒裝 contacts 系統時完全相同(零回歸)。
 
 ### Workflow
 
-1. 個案首次傳訊或 LINE follow → 你看到 `[LINE follow event]` 或一般訊息
-2. 與管理者(admin)確認 → 用 `contacts_create + contacts_bind_channel`
-3. 之後該 sender 的每則訊息 system prompt 會附 `[Contact: name=..., role=..., tags=..., metadata=...]`
-4. 你回覆時用 `contacts_reply` (而非平台原生 send tool)，確保走 forward + approval pipeline
+1. 對方首次傳訊或 LINE follow → 你看到 `[LINE follow event]` 或一般訊息
+2. 與使用者(admin)確認身份 → 用 `contacts_create + contacts_bind_channel`,
+   或從 unknown 升級(見上)
+3. 之後該 sender 的每則訊息 system prompt 會附
+   `[Contact: name=..., role=..., tags=..., metadata=...]`
+4. 你回覆時用 `contacts_reply` (而非平台原生 send tool),確保走
+   forward + approval pipeline
 
 ### MCP Tools
 
@@ -1769,7 +1787,7 @@ unknown contact 期間的訊息**沒寫到 catclaw 的對話 transcript**,但若
 有設 `contacts.unknown_inbox_channel`,所有 unknown 入站都鏡射到該頻道,變成
 事實上的歷史記錄。
 
-升級流程建議(使用者說「把小華設為個案」時):
+升級流程建議(使用者說「把 X 設為客戶/個案/學員/...」時):
 1. `contacts_list(role="unknown")` → 找最近一筆(按 created_at DESC),用
    display_name 跟使用者說的名字對。若不確定就回問:「最近加好友的是
    `<name>` 對嗎?」避免錯認
@@ -1777,15 +1795,18 @@ unknown contact 期間的訊息**沒寫到 catclaw 的對話 transcript**,但若
    翻最近訊息,找出該 LINE userId 對應的歷史,給自己脈絡
 3. **建專屬頻道**(若使用者沒明確指定):
    - `discord_get_guilds()` → 拿 guild_id
-   - `discord_create_channel(guild_id, name="個案-小華")` → 拿 channel_id
+   - `discord_create_channel(guild_id, name="<slug>")` → 拿 channel_id
+     - 命名規則依使用者領域,例如 `客戶-王大華` / `學員-小明` /
+       `案件-2026-0042` / `lead-acme-corp`。不確定就問使用者偏好。
    - 失敗多半是 bot 缺 Manage Channels 權限 → 提醒使用者去 Server
      Settings → Roles 開
 4. `contacts_update(id, role="client", tags=[...], metadata={...},
    forward_channel="discord:{guild}/{channel}")` 一次寫齊
+   - tags / metadata 用使用者該領域的術語 — 不要硬套樣板
 5. **教使用者該頻道兩種輸入**(很重要,使用者第一次設定時不知道):
    「以後這個頻道:
     - 你直接打字 → 是跟我對話(問狀況、查紀錄、改設定)
-    - 用 `>>` 開頭 → 我會以你名義轉發給小華(手動回覆)
+    - 用 `>>` 開頭 → 我會以你名義轉發給對方(手動回覆)
     - 我傳的草稿會出現綠色卡片,你按按鈕審核」
 6. 之後該 contact 入站開始正常派給你 — 你已有上下文,首次回應就能精準
 
@@ -1799,7 +1820,7 @@ unknown contact 期間的訊息**沒寫到 catclaw 的對話 transcript**,但若
 ### CLI
 
 ```bash
-catclaw contact add <name> --role client --tag 糖尿病 --no-approval
+catclaw contact add <name> --role client --tag <whatever> --no-approval
 catclaw contact list [--agent ID] [--role ...]
 catclaw contact show <id>
 catclaw contact update <id> [--role ...] [--forward-channel ...] [--approval|--no-approval]
