@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.44.0](https://github.com/CatiesGames/catclaw/compare/v0.43.0...v0.44.0) (2026-04-21)
+
+
+### Features
+
+* **models:** add Opus 4.7 and point opus alias to it ([1a1226b](https://github.com/CatiesGames/catclaw/commit/1a1226b4ed3d318e249ac150e8448eb933b8aea3))
+
 ## [0.43.0](https://github.com/CatiesGames/catclaw/compare/v0.42.0...v0.43.0) (2026-04-21)
 
 
