@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.43.0](https://github.com/CatiesGames/catclaw/compare/v0.42.0...v0.43.0) (2026-04-21)
+
+
+### Features
+
+* **discord:** support creating thread from a specific message ([bb229fb](https://github.com/CatiesGames/catclaw/commit/bb229fbcee0718f4786217039548544a1a6485de))
+
 ## [0.42.0](https://github.com/CatiesGames/catclaw/compare/v0.41.0...v0.42.0) (2026-04-21)
 
 
