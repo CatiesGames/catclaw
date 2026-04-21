@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.41.0](https://github.com/CatiesGames/catclaw/compare/v0.40.5...v0.41.0) (2026-04-21)
+
+
+### Features
+
+* **contacts:** &gt;&gt; prefix for manual reply, forward fallback to unknown_inbox ([a3a07ff](https://github.com/CatiesGames/catclaw/commit/a3a07ff0f7187bb2d73edbe2706920dfd3b887d1))
+* **contacts+line:** Stage 3+4 — outbound pipeline + LINE adapter MVP ([8608a2c](https://github.com/CatiesGames/catclaw/commit/8608a2cd303451c8d95eee0dccc43d336f0e7aa1))
+* **contacts:** auto-register unknown LINE contacts (no LLM) + unknown_inbox ([fcf7635](https://github.com/CatiesGames/catclaw/commit/fcf76354cdd45725c2b32d2911ead68881dfbe98))
+* **contacts:** gate contacts_* MCP tools behind contacts.enabled flag ([00c6013](https://github.com/CatiesGames/catclaw/commit/00c60131e1b5cc09357e12b14640d0fdff648610))
+* **contacts:** mirror auth-protected attachments via media_tmp; skill hint for channel ID ([cee6f87](https://github.com/CatiesGames/catclaw/commit/cee6f877323255373a791197b6584850ad5e6829))
+* **contacts:** rich work cards + revision dispatch + forward index ([62a2179](https://github.com/CatiesGames/catclaw/commit/62a2179ecd3745ff77c8b71572d0b37c248b27bf))
+* **contacts:** Stage 1+2 — schema/CRUD + MCP tools + CLI ([be7b3d3](https://github.com/CatiesGames/catclaw/commit/be7b3d3a486d08e629c312e93b3b8f7c892f5580))
+* **line+tui:** Stage 5+6 — LINE 進階 (圖片/Rich Menu/Flex/follow) + TUI Contacts panel ([0dac7cf](https://github.com/CatiesGames/catclaw/commit/0dac7cf6bd9935a214758d80e9f454f2f6e94bdd))
+* **onboard+cli:** LINE channel + Contacts in onboard, channel add --secret-env ([5ff1e19](https://github.com/CatiesGames/catclaw/commit/5ff1e19203a7f867155a1ed2f6e05cdebee27c6f))
+
+
+### Bug Fixes
+
+* **contacts:** code review fixes (M5/H1/H3/H2/M4) ([5569897](https://github.com/CatiesGames/catclaw/commit/556989783bd2cf870080028126c746108607d7c4))
+* **contacts:** tighten revision liveness + clarify CAS rationale ([1bb39f0](https://github.com/CatiesGames/catclaw/commit/1bb39f01e5510861eda3290f0dc6cdb5ccb0ea1e))
+* **skill:** register line + catclaw-backend in BUILTIN_SKILL_NAMES ([28719cd](https://github.com/CatiesGames/catclaw/commit/28719cd13e8d72d9ca90811c79ebb78cbec2a20e))
+* **social:** 捨棄草稿後按鈕消失修復 + reprocess 三路兜底 ([6987ec0](https://github.com/CatiesGames/catclaw/commit/6987ec0d51db25a3f2a5562dce9ff2281db83873))
+* **social:** 草稿核准按鈕恢復「發送中...」橘色狀態顯示 ([4053d2e](https://github.com/CatiesGames/catclaw/commit/4053d2e53a0620db1edb515a1ca6b8b54fc6e026))
+
 ## [0.40.5](https://github.com/CatiesGames/catclaw/compare/v0.40.4...v0.40.5) (2026-04-15)
 
 
