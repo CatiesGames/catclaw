@@ -1233,7 +1233,8 @@ All operations use the `catclaw` CLI via the Bash tool. **Never manually edit ca
 catclaw gateway start          # Start in foreground (blocks)
 catclaw gateway start -d       # Start as background daemon
 catclaw gateway stop           # Stop background gateway (SIGTERM)
-catclaw gateway restart        # Stop then start as daemon
+catclaw gateway restart --notify <type>:<channel_id>   # Stop + start, notify channel when back up
+catclaw gateway restart        # (without --notify; you will NOT know when it's done — avoid)
 catclaw gateway status         # Show running status and PID
 ```
 
@@ -1587,9 +1588,15 @@ catclaw update --notify slack:C0A9FFY7QAZ                    # Notify a channel 
 catclaw update --notify slack:C0A9FFY7QAZ --notify-message "I'm back!"  # Custom message
 ```
 
-**IMPORTANT: ALWAYS use `--notify` when self-updating.** The update kills your current process and restarts the gateway — you cannot reply afterwards. Use the channel from the current `[Context: ...]` header so the user knows the update completed.
+**IMPORTANT: ALWAYS use `--notify` when self-updating OR self-restarting.** Both commands kill your current process — you cannot reply afterwards, and **without `--notify` you also won't know whether the restart succeeded** (no signal comes back to your next invocation). Without a notification you may wrongly conclude "the restart didn't happen" and run it again, double-restarting the gateway. Use the channel from the current `[Context: ...]` header so the user (and you) see the confirmation.
 
-`--notify <type>:<channel_id>` sends a message to the specified channel after the gateway restarts. Format: `slack:<id>`, `discord:<id>`, `telegram:<id>`.
+`--notify <type>:<channel_id>` sends a message to the specified channel after the gateway restarts. Format: `slack:<id>`, `discord:<id>`, `telegram:<id>`. The same flag works on `catclaw gateway restart` and `catclaw update`.
+
+Default messages:
+- `catclaw update --notify ...` → `CatClaw updated to v<VERSION> ✅`
+- `catclaw gateway restart --notify ...` → `CatClaw gateway restarted ✅`
+
+When you see the notification land in the channel, the restart is confirmed complete. **Do not run restart / update again** unless the confirmation message fails to arrive within ~30s.
 
 After updating, if a system service is installed, it will be automatically restarted.
 

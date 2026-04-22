@@ -214,7 +214,14 @@ enum GatewayCommands {
     /// Stop the background gateway
     Stop,
     /// Restart the background gateway
-    Restart,
+    Restart {
+        /// Send a notification after restart (format: <type>:<channel_id>, e.g. slack:C0A9FFY7QAZ)
+        #[arg(long, value_name = "CHANNEL_SPEC")]
+        notify: Option<String>,
+        /// Custom notification message (default: auto-generated)
+        #[arg(long, value_name = "MESSAGE")]
+        notify_message: Option<String>,
+    },
     /// Show gateway status
     Status,
     /// Install as a system service (auto-start on boot)
@@ -974,7 +981,24 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     cmd_gateway_stop(&pid_path);
                 }
 
-                GatewayCommands::Restart => {
+                GatewayCommands::Restart { notify, notify_message } => {
+                    // Queue pending notification before restart (read by gateway on startup)
+                    if let Some(ref spec) = notify {
+                        if let Some((ch_type, ch_id)) = spec.split_once(':') {
+                            let msg = notify_message.as_deref().unwrap_or("").to_string();
+                            let msg = if msg.is_empty() {
+                                "CatClaw gateway restarted ✅".to_string()
+                            } else {
+                                msg
+                            };
+                            if let Err(e) = dist::write_pending_notify(ch_type, ch_id, &msg) {
+                                cli_ui::status_msg("⚠️", &format!("Failed to queue notification: {}", e));
+                            }
+                        } else {
+                            cli_ui::status_msg("⚠️", "Invalid --notify format, expected <type>:<channel_id>");
+                        }
+                    }
+
                     if dist::is_service_installed() {
                         // Service-managed: use service restart
                         cli_ui::status_msg("🔄", "Restarting via system service...");
