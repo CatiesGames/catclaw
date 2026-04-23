@@ -480,6 +480,12 @@ pub struct HeartbeatConfig {
 
     #[serde(default = "default_heartbeat_interval")]
     pub interval_mins: u64,
+
+    /// Model to use for heartbeat poll. When unset, falls back to the agent's
+    /// own `model` (or `general.default_model`). Set to e.g. "haiku" to avoid
+    /// burning Opus tokens on simple periodic checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 // Default functions
@@ -661,6 +667,7 @@ impl Config {
             "logging.level" => Ok(self.logging.level.clone()),
             "heartbeat.enabled" => Ok(self.heartbeat.as_ref().is_some_and(|h| h.enabled).to_string()),
             "heartbeat.interval_mins" => Ok(self.heartbeat.as_ref().map_or(30, |h| h.interval_mins).to_string()),
+            "heartbeat.model" => Ok(self.heartbeat.as_ref().and_then(|h| h.model.clone()).unwrap_or_default()),
             "approval.timeout_secs" => {
                 let t = self.agents.first().map(|a| a.approval.timeout_secs).unwrap_or(120);
                 Ok(if t == 0 { "120".to_string() } else { t.to_string() })
@@ -805,7 +812,7 @@ impl Config {
                 if let Some(h) = &mut self.heartbeat {
                     h.enabled = enabled;
                 } else {
-                    self.heartbeat = Some(HeartbeatConfig { enabled, interval_mins: default_heartbeat_interval() });
+                    self.heartbeat = Some(HeartbeatConfig { enabled, interval_mins: default_heartbeat_interval(), model: None });
                 }
                 Ok(true)
             }
@@ -814,9 +821,19 @@ impl Config {
                 if let Some(h) = &mut self.heartbeat {
                     h.interval_mins = mins;
                 } else {
-                    self.heartbeat = Some(HeartbeatConfig { enabled: false, interval_mins: mins });
+                    self.heartbeat = Some(HeartbeatConfig { enabled: false, interval_mins: mins, model: None });
                 }
                 Ok(true)
+            }
+            "heartbeat.model" => {
+                let new_model = if value.is_empty() { None } else { Some(value.to_string()) };
+                if let Some(h) = &mut self.heartbeat {
+                    h.model = new_model;
+                } else {
+                    self.heartbeat = Some(HeartbeatConfig { enabled: false, interval_mins: default_heartbeat_interval(), model: new_model });
+                }
+                // Hot-reload: scheduler reads heartbeat config each tick.
+                Ok(false)
             }
             "logging.level" => {
                 match value {
@@ -1272,6 +1289,7 @@ impl Config {
             heartbeat: Some(HeartbeatConfig {
                 enabled: true,
                 interval_mins: default_heartbeat_interval(),
+                model: None,
             }),
             logging: LoggingConfig::default(),
             mcp_env: HashMap::new(),

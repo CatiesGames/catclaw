@@ -69,6 +69,10 @@ pub struct ScheduledTaskRow {
     /// When true, diary extraction runs after task session completes.
     /// Default false: system-originated sessions skip diary extraction.
     pub remember: bool,
+    /// Model override for this task's session. None = use agent default
+    /// (or general.default_model). Useful for routing cheap routine tasks
+    /// to haiku without changing the agent's default.
+    pub model: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -296,6 +300,10 @@ impl StateDb {
         // Add remember column (default 0 = no memory extraction)
         let _ = conn.execute_batch(
             "ALTER TABLE scheduled_tasks ADD COLUMN remember INTEGER NOT NULL DEFAULT 0;",
+        );
+        // Add model column (nullable — None = use agent default)
+        let _ = conn.execute_batch(
+            "ALTER TABLE scheduled_tasks ADD COLUMN model TEXT;",
         );
 
         // Social inbox tables
@@ -694,7 +702,7 @@ impl StateDb {
     pub fn list_scheduled_tasks(&self) -> Result<Vec<ScheduledTaskRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember
+            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember, model
              FROM scheduled_tasks ORDER BY next_run_at",
         )?;
         let rows = stmt
@@ -713,6 +721,7 @@ impl StateDb {
                     payload: row.get(10)?,
                     keep_context: row.get::<_, i32>(11).unwrap_or(0) != 0,
                     remember: row.get::<_, i32>(12).unwrap_or(0) != 0,
+                    model: row.get(13).unwrap_or(None),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -722,7 +731,7 @@ impl StateDb {
     pub fn list_due_tasks(&self, now: &str) -> Result<Vec<ScheduledTaskRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember
+            "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember, model
              FROM scheduled_tasks WHERE enabled = 1 AND next_run_at <= ?1 ORDER BY next_run_at",
         )?;
         let rows = stmt
@@ -741,6 +750,7 @@ impl StateDb {
                     payload: row.get(10)?,
                     keep_context: row.get::<_, i32>(11).unwrap_or(0) != 0,
                     remember: row.get::<_, i32>(12).unwrap_or(0) != 0,
+                    model: row.get(13).unwrap_or(None),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -750,8 +760,8 @@ impl StateDb {
     pub fn insert_task(&self, task: &ScheduledTaskRow) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO scheduled_tasks (task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO scheduled_tasks (task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember, model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 task.task_type,
                 task.agent_id,
@@ -765,6 +775,7 @@ impl StateDb {
                 task.payload,
                 task.keep_context as i32,
                 task.remember as i32,
+                task.model,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -818,7 +829,7 @@ impl StateDb {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember
+                "SELECT id, task_type, agent_id, name, description, cron_expr, interval_mins, next_run_at, last_run_at, enabled, payload, keep_context, remember, model
                  FROM scheduled_tasks WHERE id = ?1",
                 params![id],
                 |row| {
@@ -836,6 +847,7 @@ impl StateDb {
                         payload: row.get(10)?,
                         keep_context: row.get::<_, i32>(11).unwrap_or(0) != 0,
                         remember: row.get::<_, i32>(12).unwrap_or(0) != 0,
+                        model: row.get(13).unwrap_or(None),
                     })
                 },
             )

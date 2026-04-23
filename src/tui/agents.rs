@@ -93,7 +93,6 @@ const AGENT_FILES: &[(&str, &str)] = &[
     ("IDENTITY.md", "Identity"),
     ("BOOT.md", "Boot prompt"),
     ("HEARTBEAT.md", "Heartbeat task"),
-    ("MEMORY.md", "Long-term memory"),
     ("TOOLS.md", "Tool guidelines"),
     ("AGENTS.md", "Agent roster"),
 ];

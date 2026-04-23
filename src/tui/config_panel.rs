@@ -182,6 +182,12 @@ impl ConfigPanel {
             section: "Heartbeat".to_string(),
             editable: true,
         });
+        entries.push(ConfigEntry {
+            key: "heartbeat.model".to_string(),
+            value: config.heartbeat.as_ref().and_then(|h| h.model.clone()).unwrap_or_default(),
+            section: "Heartbeat".to_string(),
+            editable: true,
+        });
     }
 
         // Approval (global default — per-agent timeout uses this as fallback)
@@ -476,7 +482,7 @@ impl ConfigPanel {
         if key == "streaming" {
             return vec!["true".into(), "false".into()];
         }
-        if key == "default_model" || key == "default_fallback_model" {
+        if key == "default_model" || key == "default_fallback_model" || key == "heartbeat.model" {
             return vec!["opus".into(), "sonnet".into(), "haiku".into(), "".into()];
         }
         if key == "logging.level" {

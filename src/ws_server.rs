@@ -888,6 +888,8 @@ fn handle_tasks_list(req: &WsRequest, db: &Arc<StateDb>) -> WsResponse {
                         "enabled": t.enabled,
                         "payload": t.payload,
                         "keep_context": t.keep_context,
+                        "remember": t.remember,
+                        "model": t.model,
                     })
                 })
                 .collect();

@@ -165,7 +165,8 @@ impl AgentLoader {
         fs::write(workspace.join("TOOLS.md"), TOOLS_TEMPLATE)?;
         fs::write(workspace.join("BOOT.md"), BOOT_TEMPLATE)?;
         fs::write(workspace.join("HEARTBEAT.md"), HEARTBEAT_TEMPLATE)?;
-        fs::write(workspace.join("MEMORY.md"), "")?;
+        // Note: MEMORY.md was the legacy markdown long-term store, fully
+        // replaced by the Memory Palace SQLite. No longer created.
 
         // Default tools.toml
         fs::write(
@@ -718,53 +719,44 @@ const AGENTS_TEMPLATE: &str = r#"# AGENTS.md — Your Workspace
 
 This folder is home. Treat it that way.
 
-## Memory
+## Memory (Memory Palace — automatic)
 
-You wake up fresh each session. These files are your continuity:
+You wake up fresh each session. Memory is handled by the **Memory Palace**:
+a structured SQLite store organized by Wing (your agent id) → Room (topic,
+auto-classified) → Hall (facts/events/discoveries/preferences/advice).
 
-- **Daily notes:** `memory/YYYY-MM-DD.md` — raw logs of what happened
-- **Long-term:** `MEMORY.md` — your curated memories, like long-term memory
+**Automatic flow** — you don't need to manage it manually:
+1. After conversation goes idle (~30 min), the system extracts a diary entry
+   from your transcript into the palace (hall=events, source=diary).
+2. Haiku post-processes the diary to extract facts / preferences / advice
+   (hall=facts/etc., importance=7-9) and KG triples for entities.
+3. Top-importance memories (≥7) auto-load into your boot context next session.
 
-Capture what matters. Decisions, context, things to remember.
+**Active recall** — when you need to look something up:
+- `memory_search "query"` — hybrid full-text + semantic search
+- `memory_list_rooms` / `memory_list_wings` — browse structure
+- `kg_query <entity>` — facts about a person/thing
+
+**Active write** — when you want to remember something deliberately:
+- `memory_write` — explicit memory (set hall, importance, room)
+- `kg_add` — record an entity-relation-entity triple
+
+**No more `MEMORY.md` / `memory/YYYY-MM-DD.md`** — those were the legacy
+markdown system, fully replaced by the palace. If you have an instinct to
+"write this down to a file", use `memory_write` instead.
 
 ### Write It Down — No "Mental Notes"!
 
-- Memory is limited — if you want to remember something, WRITE IT TO A FILE
-- "Mental notes" don't survive session restarts. Files do.
-- When someone says "remember this" → update the relevant memory file
-- When you learn a lesson → document it so future-you doesn't repeat it
-
-### Context Awareness
-
-When a conversation gets very long:
-
-1. **Proactively save important context** — if the conversation has been going on for a while, write key decisions, facts, and the user's current intent to `memory/YYYY-MM-DD.md` before you risk losing them
-2. **Explicitly stated instructions take priority** — if the user said "remember this" or "this is important", that content must be preserved verbatim in memory files, never summarized away
-3. **Don't wait until it's too late** — write things down early and often. It's better to have redundant notes than to lose context
-4. **Recent conversation is the most valuable** — the last few exchanges are what the user cares about right now. Older context can be summarized, but recent intent and decisions should be captured precisely
-
-### Memory System (Automatic)
-
-CatClaw automatically manages your memory in two layers:
-
-1. **Daily diary** — After each conversation goes idle (30 min), the system
-   reads your transcript and writes a diary entry in `memory/YYYY-MM-DD.md`
-   using your personality. You don't need to write daily notes yourself.
-
-2. **Long-term distillation** — Every 3 days during heartbeat, the system
-   asks you to review recent diary entries and update `MEMORY.md` with
-   lasting patterns and learnings.
-
-You can still write to `memory/YYYY-MM-DD.md` or `MEMORY.md` manually
-at any time — the automatic system only appends, never overwrites.
+- "Mental notes" don't survive session restarts. Memories do.
+- When someone says "remember this" → `memory_write` with high importance
+- When you learn a lesson → `memory_write` so future-you doesn't repeat it
 
 ### Session Continuity
 
-Sessions stay alive for up to 7 days of inactivity. This means:
-- If the user chats today and comes back tomorrow, you resume the same conversation with full context
-- Only after 7 days of silence does the session archive and a fresh one begin
-- Before archiving, a summary of the session is saved to `memory/YYYY-MM-DD.md`
-- So even across session boundaries, nothing important is truly lost — it lives in your memory files
+Sessions stay alive for up to 7 days of inactivity:
+- Today's chat continues tomorrow (resume with full context)
+- After 7 days of silence the session archives — but diary extraction +
+  palace facts mean nothing important is lost
 
 ## External vs Internal
 
@@ -1303,6 +1295,7 @@ daemon mode won't inherit interactive shell env.
 |-----|---------|-------|
 | `heartbeat.enabled` | false | Enable periodic heartbeat — requires restart |
 | `heartbeat.interval_mins` | 30 | Minutes between heartbeats — requires restart |
+| `heartbeat.model` | "" (=agent default) | Model override for heartbeat poll. Recommend `haiku` if agent default is Opus — saves ~95% tokens on routine checks. Hot-reload (every tick archives + restarts the heartbeat session, so the next tick picks up the new model). |
 
 ### Contacts Keys
 
@@ -1365,7 +1358,7 @@ catclaw agent tools <name>     # Show current tool permissions
 catclaw agent tools <name> --allow "Read,Edit,Bash" --deny "WebFetch" --approve "Bash"
 ```
 
-`<file>` values: `soul`, `user`, `identity`, `agents`, `tools`, `boot`, `heartbeat`, `memory`
+`<file>` values: `soul`, `user`, `identity`, `agents`, `tools`, `boot`, `heartbeat`
 
 Tool permissions: `--allow` sets the whitelist, `--deny` blocks tools entirely, `--approve` requires user confirmation before each execution. See the **Tool Approval** section above.
 
@@ -1376,11 +1369,13 @@ Agent workspaces: `~/.catclaw/workspace/agents/{agent_id}/`
 | `SOUL.md` | Core personality and values |
 | `USER.md` | Info about the human |
 | `IDENTITY.md` | Agent name, creature, vibe |
-| `MEMORY.md` | Long-term curated memories |
 | `AGENTS.md` | Workspace conventions |
 | `TOOLS.md` | Local setup notes |
 | `BOOT.md` | Startup instructions (prepended to first message) |
 | `HEARTBEAT.md` | Periodic maintenance tasks |
+
+(Long-term memory is **not** a file anymore — it lives in the Memory Palace
+SQLite store. See the Memory Palace tools below.)
 Use `Read` and `Edit` tools directly to view and modify these MD files (personality, etc.). **Do not manually edit `tools.toml` or `catclaw.toml`** — use `catclaw agent tools` and `catclaw config set` instead.
 
 **Memory Palace (MemPalace):**
@@ -1507,6 +1502,7 @@ Scheduling options (pick one, mutually exclusive):
 
 Session behavior:
 - `--keep-context` — Reuse the same session across runs (context persists). **Without this flag (default), each run starts a fresh session with no memory of previous runs.** Use `--keep-context` only when the task needs to remember what it did last time.
+- `--model <name>` — Override the agent's default model for this task only (e.g. `--model haiku`). Useful for cheap routine checks (status pings, log scans, simple reminders) when the agent is otherwise on Opus. With `--keep-context`, model changes propagate on the next run (we re-sync session metadata each tick).
 
 ### Cron Timezone Conversion (IMPORTANT)
 

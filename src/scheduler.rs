@@ -119,7 +119,9 @@ pub async fn run(
         if config.heartbeat_enabled && now >= next_heartbeat {
             let agents: Vec<_> = agent_registry.read().unwrap().list().into_iter().cloned().collect();
             for agent in &agents {
-                execute_heartbeat(agent, &session_manager, &config.log_dir).await;
+                let hb_model = config.social_config.as_ref()
+                    .and_then(|c| c.read().unwrap().heartbeat.as_ref().and_then(|h| h.model.clone()));
+                execute_heartbeat(agent, &session_manager, &config.log_dir, hb_model.as_deref()).await;
             }
             next_heartbeat = now + chrono::Duration::minutes(config.heartbeat_interval_mins as i64);
         }
@@ -446,7 +448,7 @@ async fn tick_user_tasks(
         );
 
         let prompt = task.payload.as_deref().unwrap_or("(no prompt specified)");
-        execute_prompt(&agent, session_manager, state_db, prompt, task.id, task.keep_context, task.remember, embedder).await;
+        execute_prompt(&agent, session_manager, state_db, prompt, task.id, task.keep_context, task.remember, task.model.as_deref(), embedder).await;
 
         // Update schedule: calculate next run or disable if one-shot
         let last_run = now.to_rfc3339();
@@ -475,9 +477,28 @@ async fn tick_user_tasks(
 }
 
 /// Send a heartbeat poll to the agent.
-async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &SessionManager, log_dir: &Path) {
+async fn execute_heartbeat(
+    agent: &crate::agent::Agent,
+    session_manager: &SessionManager,
+    log_dir: &Path,
+    initial_model: Option<&str>,
+) {
     let key = SessionKey::new(&agent.id, "system", "heartbeat");
     let sender = SenderInfo::default();
+
+    // Heartbeat is stateless by design (HEARTBEAT.md should not depend on
+    // prior runs — see SYSTEM_DIRECTIVES). Archive the session every tick so
+    // each run starts fresh with no carried context. This:
+    //   - Keeps token cost flat (~5-8K boot per tick) instead of accumulating
+    //     across runs via --resume.
+    //   - Lets `heartbeat.model` config changes propagate immediately (a
+    //     fresh session uses the new initial_model rather than honouring the
+    //     old session's metadata.model).
+    //   - Mirrors the cron task default (keep_context=false → archive).
+    let session_key_str = key.to_key_string();
+    let _ = session_manager
+        .state_db()
+        .update_session_state(&session_key_str, "archived");
 
     // Scan logs for new ERROR/WARN since last heartbeat, merge into issues.json
     let issues_path = agent.workspace.join("memory").join("issues.json");
@@ -499,7 +520,7 @@ async fn execute_heartbeat(agent: &crate::agent::Agent, session_manager: &Sessio
             &message,
             Priority::Heartbeat,
             &sender,
-            None,
+            initial_model,
             None,
         )
         .await
@@ -530,6 +551,7 @@ async fn execute_prompt(
     task_id: i64,
     keep_context: bool,
     remember: bool,
+    initial_model: Option<&str>,
     embedder: &Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
 ) {
     let context_id = format!("task-{}", task_id);
@@ -541,10 +563,16 @@ async fn execute_prompt(
     if !keep_context {
         let session_key = key.to_key_string();
         let _ = session_manager.state_db().update_session_state(&session_key, "archived");
+    } else {
+        // keep_context: session metadata.model wins over initial_model in
+        // send_and_wait. Force-sync to current task.model so config changes
+        // (e.g. demoting from opus to haiku) actually propagate.
+        let session_key = key.to_key_string();
+        let _ = session_manager.state_db().set_session_model(&session_key, initial_model);
     }
 
     match session_manager
-        .send_and_wait(&key, agent, prompt, Priority::Cron, &sender, None, None)
+        .send_and_wait(&key, agent, prompt, Priority::Cron, &sender, initial_model, None)
         .await
     {
         Ok(response) => {

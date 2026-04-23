@@ -434,6 +434,10 @@ enum TaskCommands {
         /// Keep session context across runs (default: fresh session each time)
         #[arg(long)]
         keep_context: bool,
+        /// Model override for this task (e.g., "haiku" for cheap routine checks).
+        /// Defaults to the agent's own model.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Enable a task
     Enable {
@@ -1382,8 +1386,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     every,
                     at,
                     keep_context,
+                    model,
                 } => {
-                    cmd_task_add(&state_db, &name, &agent, &prompt, in_mins, cron, every, at, config.general.timezone.as_deref(), keep_context)?;
+                    cmd_task_add(&state_db, &name, &agent, &prompt, in_mins, cron, every, at, config.general.timezone.as_deref(), keep_context, model)?;
                 }
                 TaskCommands::Enable { id_or_name } => {
                     let id = resolve_task_id(&state_db, &id_or_name)?;
@@ -3418,10 +3423,9 @@ fn cmd_agent_edit(config: &Config, name: &str, file: &str) -> Result<()> {
         "tools" => "TOOLS.md",
         "boot" => "BOOT.md",
         "heartbeat" => "HEARTBEAT.md",
-        "memory" => "MEMORY.md",
         _ => {
             return Err(crate::error::CatClawError::Agent(format!(
-                "unknown file '{}'. Use: soul, user, identity, agents, tools, boot, heartbeat, memory",
+                "unknown file '{}'. Use: soul, user, identity, agents, tools, boot, heartbeat (long-term memory is in the Memory Palace, not a file — use memory_* MCP tools)",
                 file
             )));
         }
@@ -3647,6 +3651,7 @@ fn cmd_task_get(t: &crate::state::ScheduledTaskRow) {
     println!("Status:   {}", status);
     println!("Schedule: {}", schedule);
     println!("Context:  {}", if t.keep_context { "persistent" } else { "fresh each run" });
+    println!("Model:    {}", t.model.as_deref().unwrap_or("(agent default)"));
     println!("Next run: {}", format_utc_to_local(&t.next_run_at));
     if let Some(ref last) = t.last_run_at {
         println!("Last run: {}", format_utc_to_local(last));
@@ -3748,6 +3753,7 @@ fn cmd_task_add(
     at: Option<String>,
     timezone: Option<&str>,
     keep_context: bool,
+    model: Option<String>,
 ) -> Result<()> {
     let now = chrono::Utc::now();
 
@@ -3813,6 +3819,7 @@ fn cmd_task_add(
         payload: Some(prompt.to_string()),
         keep_context,
         remember: false,
+        model,
     })?;
 
     let next_display = format_utc_to_local(&next_run_at);
