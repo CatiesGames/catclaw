@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.45.0](https://github.com/CatiesGames/catclaw/compare/v0.44.0...v0.45.0) (2026-04-23)
+
+
+### Features
+
+* **scheduler:** per-task + heartbeat model overrides; drop legacy MEMORY.md ([f15bfe5](https://github.com/CatiesGames/catclaw/commit/f15bfe5d6f8414b0ed26978e5252a5f1041f0c2c))
+
+
+### Bug Fixes
+
+* **gateway:** add --notify to restart so agent knows it's back up ([c2090d8](https://github.com/CatiesGames/catclaw/commit/c2090d84d6f79ac09ed4e6b15c1c50c35b46671f))
+
 ## [0.44.0](https://github.com/CatiesGames/catclaw/compare/v0.43.0...v0.44.0) (2026-04-21)
 
 
