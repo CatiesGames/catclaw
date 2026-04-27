@@ -672,53 +672,67 @@ pub fn restart_service() -> Result<(), CatClawError> {
     }
 }
 
-// ── Pending notification (survives gateway restart) ──────────────────
+// ── Pending resume (survives gateway restart) ──────────────────
+//
+// When the agent invokes `catclaw gateway restart --resume` (or
+// `catclaw update --resume`), CatClaw records the session it should
+// auto-resume after coming back up. The gateway reads this file at
+// startup, resumes the session, and injects a continuation prompt so
+// the agent silently picks up where it left off. No channel
+// notification is sent — the agent's next response IS the signal that
+// it is back online.
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct PendingNotify {
-    pub channel_type: String,
-    pub channel_id: String,
-    pub message: String,
+pub struct PendingResume {
+    /// `catclaw:{agent_id}:{origin}:{context_id}` — keys the session in state.db.
+    pub session_key: String,
+    /// "restart" or "update" — used to phrase the continuation prompt.
+    pub kind: String,
+    /// Optional version string (set by `update --resume`).
+    pub version: Option<String>,
     pub created_at: String,
 }
 
-fn pending_notify_path() -> PathBuf {
+fn pending_resume_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".catclaw").join("pending_notify.json")
+    PathBuf::from(home).join(".catclaw").join("pending_resume.json")
 }
 
-/// Write a pending notification to be sent after gateway restart.
-pub fn write_pending_notify(
-    channel_type: &str,
-    channel_id: &str,
-    message: &str,
+/// Queue an auto-resume for the next gateway startup.
+pub fn write_pending_resume(
+    session_key: &str,
+    kind: &str,
+    version: Option<&str>,
 ) -> Result<(), CatClawError> {
-    let notify = PendingNotify {
-        channel_type: channel_type.to_string(),
-        channel_id: channel_id.to_string(),
-        message: message.to_string(),
+    let resume = PendingResume {
+        session_key: session_key.to_string(),
+        kind: kind.to_string(),
+        version: version.map(|s| s.to_string()),
         created_at: chrono::Utc::now().to_rfc3339(),
     };
-    let json = serde_json::to_string_pretty(&notify)
-        .map_err(|e| CatClawError::Config(format!("serialize pending_notify: {}", e)))?;
-    std::fs::write(pending_notify_path(), json)?;
+    let json = serde_json::to_string_pretty(&resume)
+        .map_err(|e| CatClawError::Config(format!("serialize pending_resume: {}", e)))?;
+    if let Some(parent) = pending_resume_path().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(pending_resume_path(), json)?;
     Ok(())
 }
 
-/// Read and delete the pending notification file. Returns None if no file exists.
-pub fn read_and_clear_pending_notify() -> Option<PendingNotify> {
-    let path = pending_notify_path();
+/// Read and delete the pending resume file. Returns None if no file exists or it is stale.
+pub fn read_and_clear_pending_resume() -> Option<PendingResume> {
+    let path = pending_resume_path();
     let data = std::fs::read_to_string(&path).ok()?;
     let _ = std::fs::remove_file(&path);
-    let notify: PendingNotify = serde_json::from_str(&data).ok()?;
-    // Skip if older than 1 hour (stale from a failed restart)
-    if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&notify.created_at) {
-        if chrono::Utc::now().signed_duration_since(created).num_seconds() > 3600 {
-            tracing::warn!("stale pending notification (>1h), discarding");
+    let resume: PendingResume = serde_json::from_str(&data).ok()?;
+    // Skip if older than 10 minutes (stale from a failed restart)
+    if let Ok(created) = chrono::DateTime::parse_from_rfc3339(&resume.created_at) {
+        if chrono::Utc::now().signed_duration_since(created).num_seconds() > 600 {
+            tracing::warn!("stale pending resume (>10min), discarding");
             return None;
         }
     }
-    Some(notify)
+    Some(resume)
 }
 
 /// Interactive uninstall command.

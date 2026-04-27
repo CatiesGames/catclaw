@@ -1225,10 +1225,22 @@ All operations use the `catclaw` CLI via the Bash tool. **Never manually edit ca
 catclaw gateway start          # Start in foreground (blocks)
 catclaw gateway start -d       # Start as background daemon
 catclaw gateway stop           # Stop background gateway (SIGTERM)
-catclaw gateway restart --notify <type>:<channel_id>   # Stop + start, notify channel when back up
-catclaw gateway restart        # (without --notify; you will NOT know when it's done — avoid)
+catclaw gateway restart --resume   # Stop + start; auto-resume the current session after ~5s (USE THIS form when YOU initiate the restart)
+catclaw gateway restart        # (no auto-resume — for the human user to run manually; you will NOT come back automatically)
 catclaw gateway status         # Show running status and PID
+catclaw update --resume        # Self-update + restart + auto-resume (use when YOU initiate an update)
+catclaw update                 # Self-update + restart, no auto-resume (manual form)
 ```
+
+### Self-restart awareness (CRITICAL)
+
+When YOU run `catclaw gateway restart --resume` or `catclaw update --resume`:
+
+1. The gateway will go down and come back in ~5–10 seconds.
+2. You will be **automatically re-entered into the same session** and will receive a system message starting with `[System] Gateway just came back online`.
+3. When you see that marker, the restart you initiated has completed. **Continue the prior task** — do NOT call `catclaw gateway restart` or `catclaw update` again. Doing so creates an infinite restart loop.
+4. If you need to restart for any reason, **always use `--resume`** so the user does not have to ping you again. The plain forms (no `--resume`) are reserved for the human user running the command manually.
+5. Before issuing any restart, briefly tell the user "I'll restart and pick this up automatically" so they know not to worry about the brief silence.
 
 Logs:
 ```bash

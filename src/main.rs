@@ -144,12 +144,11 @@ enum Commands {
         /// Install a specific version (e.g. v0.35.7 or 0.35.7). Allows downgrading.
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
-        /// Send a notification after restart (format: <type>:<channel_id>, e.g. slack:C0A9FFY7QAZ)
-        #[arg(long, value_name = "CHANNEL_SPEC")]
-        notify: Option<String>,
-        /// Custom notification message (default: auto-generated)
-        #[arg(long, value_name = "MESSAGE")]
-        notify_message: Option<String>,
+        /// Auto-resume the most recent channel session after the gateway is back up.
+        /// Intended for the agent to call itself; the agent silently picks up where
+        /// it left off without the user needing to ping it again.
+        #[arg(long)]
+        resume: bool,
     },
 
     /// Uninstall CatClaw (stop gateway, remove service, delete binary)
@@ -215,12 +214,11 @@ enum GatewayCommands {
     Stop,
     /// Restart the background gateway
     Restart {
-        /// Send a notification after restart (format: <type>:<channel_id>, e.g. slack:C0A9FFY7QAZ)
-        #[arg(long, value_name = "CHANNEL_SPEC")]
-        notify: Option<String>,
-        /// Custom notification message (default: auto-generated)
-        #[arg(long, value_name = "MESSAGE")]
-        notify_message: Option<String>,
+        /// Auto-resume the most recent channel session after the gateway is back up.
+        /// Intended for the agent to call itself; the agent silently picks up where
+        /// it left off without the user needing to ping it again.
+        #[arg(long)]
+        resume: bool,
     },
     /// Show gateway status
     Status,
@@ -747,7 +745,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        Some(Commands::Update { check, version, notify, notify_message }) => {
+        Some(Commands::Update { check, version, resume }) => {
             if check {
                 match dist::check_update().await {
                     Ok(Some(version)) => {
@@ -767,21 +765,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     Ok(Some(version)) => {
                         cli_ui::status_msg("✅", &format!("Updated to v{}", version));
 
-                        // Write pending notification before restart
-                        if let Some(ref spec) = notify {
-                            if let Some((ch_type, ch_id)) = spec.split_once(':') {
-                                let msg = notify_message.as_deref().unwrap_or("").to_string();
-                                let msg = if msg.is_empty() {
-                                    format!("CatClaw updated to v{} ✅", version)
-                                } else {
-                                    msg
-                                };
-                                if let Err(e) = dist::write_pending_notify(ch_type, ch_id, &msg) {
-                                    cli_ui::status_msg("⚠️", &format!("Failed to queue notification: {}", e));
-                                }
-                            } else {
-                                cli_ui::status_msg("⚠️", "Invalid --notify format, expected <type>:<channel_id>");
-                            }
+                        // Queue an auto-resume so the gateway silently picks up
+                        // the session the agent was working in. Best effort —
+                        // if no recent channel session is found, skip.
+                        if resume {
+                            queue_pending_resume(&cli.config, "update", Some(&version));
                         }
 
                         // Restart service if installed
@@ -985,22 +973,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     cmd_gateway_stop(&pid_path);
                 }
 
-                GatewayCommands::Restart { notify, notify_message } => {
-                    // Queue pending notification before restart (read by gateway on startup)
-                    if let Some(ref spec) = notify {
-                        if let Some((ch_type, ch_id)) = spec.split_once(':') {
-                            let msg = notify_message.as_deref().unwrap_or("").to_string();
-                            let msg = if msg.is_empty() {
-                                "CatClaw gateway restarted ✅".to_string()
-                            } else {
-                                msg
-                            };
-                            if let Err(e) = dist::write_pending_notify(ch_type, ch_id, &msg) {
-                                cli_ui::status_msg("⚠️", &format!("Failed to queue notification: {}", e));
-                            }
-                        } else {
-                            cli_ui::status_msg("⚠️", "Invalid --notify format, expected <type>:<channel_id>");
-                        }
+                GatewayCommands::Restart { resume } => {
+                    // Queue an auto-resume so the gateway silently picks up the
+                    // session the agent was working in. Best effort.
+                    if resume {
+                        queue_pending_resume(&cli.config, "restart", None);
                     }
 
                     if dist::is_service_installed() {
@@ -3146,6 +3123,42 @@ const SLACK_APP_MANIFEST: &str = r#"{
     "socket_mode_enabled": true
   }
 }"#;
+
+/// Queue an auto-resume for the next gateway startup. Looks up the most
+/// recent channel-originated session and writes it to pending_resume.json.
+/// Best effort — emits a warning when no candidate exists or the lookup fails,
+/// but never blocks the restart/update.
+fn queue_pending_resume(config_path: &std::path::Path, kind: &str, version: Option<&str>) {
+    let config = match Config::load(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            cli_ui::status_msg("⚠️", &format!("--resume: failed to load config: {}", e));
+            return;
+        }
+    };
+    let db = match StateDb::open(&config.general.state_db) {
+        Ok(d) => d,
+        Err(e) => {
+            cli_ui::status_msg("⚠️", &format!("--resume: failed to open state.db: {}", e));
+            return;
+        }
+    };
+    match db.find_most_recent_channel_session() {
+        Ok(Some(row)) => {
+            if let Err(e) = dist::write_pending_resume(&row.session_key, kind, version) {
+                cli_ui::status_msg("⚠️", &format!("--resume: failed to queue: {}", e));
+            } else {
+                cli_ui::status_msg("⏯️", &format!("Will auto-resume session {} after restart", row.session_key));
+            }
+        }
+        Ok(None) => {
+            cli_ui::status_msg("ℹ️", "--resume: no recent channel session found, skipping");
+        }
+        Err(e) => {
+            cli_ui::status_msg("⚠️", &format!("--resume: lookup failed: {}", e));
+        }
+    }
+}
 
 fn write_env_var(lines: &mut Vec<String>, key: &str, value: &str) {
     let prefix = format!("{}=", key);

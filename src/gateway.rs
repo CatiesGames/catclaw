@@ -393,28 +393,29 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
 
     info!("gateway ready");
 
-    // Check for pending update notification (written by `catclaw update --notify`)
-    if let Some(notify) = crate::dist::read_and_clear_pending_notify() {
-        let notify_adapters = adapter_map.clone();
+    // Check for pending auto-resume (written by `catclaw gateway restart --resume`
+    // or `catclaw update --resume`). Silently re-enters the session the agent
+    // was working in and injects a continuation system prompt — no channel
+    // notification is sent. The agent's next response IS the user-visible
+    // signal that it is back online.
+    if let Some(resume) = crate::dist::read_and_clear_pending_resume() {
+        let resume_adapters = adapter_map.clone();
+        let resume_session_manager = session_manager.clone();
+        let resume_registry = agent_registry.clone();
+        let resume_db = state_db.clone();
         tokio::spawn(async move {
             // Wait for adapters to fully connect (WS handshake, auth, etc.)
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            if let Some(adapter) = notify_adapters.get(&notify.channel_type) {
-                let msg = crate::channel::OutboundMessage {
-                    channel_type: crate::channel::ChannelType::Tui,
-                    channel_id: notify.channel_id.clone(),
-                    peer_id: notify.channel_id,
-                    text: notify.message,
-                    thread_id: None,
-                    reply_to_message_id: None,
-                };
-                if let Err(e) = adapter.send(msg).await {
-                    error!(error = %e, "failed to send pending update notification");
-                } else {
-                    info!("sent pending update notification");
-                }
-            } else {
-                warn!(channel_type = %notify.channel_type, "no adapter found for pending notification");
+            if let Err(e) = perform_auto_resume(
+                resume,
+                resume_adapters,
+                resume_session_manager,
+                resume_registry,
+                resume_db,
+            )
+            .await
+            {
+                error!(error = %e, "auto-resume failed — user may be waiting for an agent reply that never comes");
             }
         });
     }
@@ -1185,4 +1186,153 @@ async fn fetch_parent_text(
         let _ = db.upsert_parent_cache(platform, media_id, text, permalink.as_deref());
     }
     result
+}
+
+/// Drive a `pending_resume.json` to completion: resume the indicated session,
+/// inject a continuation system prompt, and stream the response back to its
+/// origin channel. Silent — no "✅ restarted" notification is sent.
+async fn perform_auto_resume(
+    resume: crate::dist::PendingResume,
+    adapters: Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
+    session_manager: Arc<SessionManager>,
+    agent_registry: Arc<std::sync::RwLock<AgentRegistry>>,
+    state_db: Arc<StateDb>,
+) -> Result<()> {
+    use crate::channel::{split_at_boundaries, ChannelType, OutboundMessage};
+    use crate::session::manager::SenderInfo;
+    use crate::session::{Priority, SessionKey};
+
+    let session_key = SessionKey::from_key_string(&resume.session_key)
+        .ok_or_else(|| crate::error::CatClawError::Config(format!(
+            "auto-resume: malformed session_key '{}'", resume.session_key
+        )))?;
+
+    // Verify the session still exists in DB.
+    let row = state_db.get_session(&resume.session_key)?.ok_or_else(|| {
+        crate::error::CatClawError::Config(format!(
+            "auto-resume: session '{}' no longer in DB",
+            resume.session_key
+        ))
+    })?;
+
+    // Skip archived sessions — nothing to resume into.
+    if row.state == "archived" {
+        return Err(crate::error::CatClawError::Config(format!(
+            "auto-resume: session '{}' is archived",
+            resume.session_key
+        )));
+    }
+
+    // Map origin → ChannelType.
+    let channel_type = match session_key.origin.as_str() {
+        "discord" => ChannelType::Discord,
+        "telegram" => ChannelType::Telegram,
+        "slack" => ChannelType::Slack,
+        "line" => ChannelType::Line,
+        "backend" => ChannelType::Backend,
+        other => {
+            return Err(crate::error::CatClawError::Config(format!(
+                "auto-resume: unsupported origin '{}'",
+                other
+            )));
+        }
+    };
+
+    // Locate the adapter.
+    let adapter = adapters
+        .get(channel_type.as_str())
+        .cloned()
+        .ok_or_else(|| {
+            crate::error::CatClawError::Config(format!(
+                "auto-resume: no adapter for origin '{}'",
+                channel_type
+            ))
+        })?;
+
+    // Locate the agent.
+    let agent = {
+        let reg = agent_registry.read().unwrap();
+        reg.get(&session_key.agent_id).cloned()
+    };
+    let agent = agent.ok_or_else(|| {
+        crate::error::CatClawError::Config(format!(
+            "auto-resume: agent '{}' not found in registry",
+            session_key.agent_id
+        ))
+    })?;
+
+    // Reconstruct sender info from session metadata so the continuation
+    // session has the same approval/forwarding context.
+    let channel_id = row.platform_channel_id().unwrap_or_default();
+    let sender = SenderInfo {
+        sender_id: row.platform_sender_id(),
+        sender_name: None,
+        channel_id: if channel_id.is_empty() { None } else { Some(channel_id.clone()) },
+        thread_id: row.platform_thread_id(),
+    };
+
+    let kind_label = match resume.kind.as_str() {
+        "update" => match resume.version.as_deref() {
+            Some(v) => format!("update to v{}", v),
+            None => "update".to_string(),
+        },
+        _ => "restart".to_string(),
+    };
+
+    // Continuation prompt: tell the agent it's back online and should pick
+    // up the prior task without re-triggering another restart.
+    let continuation = format!(
+        "[System] Gateway just came back online ({} you initiated has completed). \
+         Continue the task you were working on before the restart. \
+         Do NOT call `catclaw gateway restart` or `catclaw update` again unless the user explicitly asks for another one.",
+        kind_label
+    );
+
+    info!(session_key = %resume.session_key, kind = %resume.kind, "auto-resume: re-entering session");
+
+    let response = session_manager
+        .send_and_wait(&session_key, &agent, &continuation, Priority::Direct, &sender, None, None)
+        .await?;
+
+    if response.trim() == "NO_REPLY" || response.trim().is_empty() {
+        info!("auto-resume: agent produced no reply (likely already sent via tool use)");
+        return Ok(());
+    }
+
+    if channel_id.is_empty() {
+        return Err(crate::error::CatClawError::Config(
+            "auto-resume: session has no channel_id metadata, cannot deliver reply".into(),
+        ));
+    }
+
+    // peer_id semantics differ per adapter: Discord/Slack/Telegram ignore it
+    // in send(), so channel_id is fine. LINE's send() uses peer_id to obtain a
+    // reply token + decide push target — and there it must be the LINE userId
+    // (which the inbound path stored as sender_id in metadata). Pick the right
+    // value per origin.
+    let peer_id = match channel_type {
+        ChannelType::Line => sender
+            .sender_id
+            .clone()
+            .unwrap_or_else(|| channel_id.clone()),
+        _ => channel_id.clone(),
+    };
+
+    let max_len = adapter.capabilities().max_message_length.saturating_sub(100);
+    for chunk in split_at_boundaries(&response, max_len) {
+        let msg = OutboundMessage {
+            channel_type,
+            channel_id: channel_id.clone(),
+            peer_id: peer_id.clone(),
+            text: chunk.to_string(),
+            thread_id: sender.thread_id.clone(),
+            reply_to_message_id: None,
+        };
+        if let Err(e) = adapter.send(msg).await {
+            error!(error = %e, "auto-resume: failed to send chunk");
+            return Ok(());
+        }
+    }
+
+    Ok(())
 }

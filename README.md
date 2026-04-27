@@ -68,7 +68,8 @@ catclaw gateway status            # Show gateway status
 catclaw tui                       # Launch TUI only (connects to running gateway)
 
 # Updates & auto-start:
-catclaw update                    # Self-update to latest version
+catclaw update                    # Self-update to latest version (manual; for the human user)
+catclaw update --resume           # Self-update + restart + auto-resume the current session (for the agent to call itself)
 catclaw update --check            # Check for updates without installing
 catclaw gateway install           # Install as system service (auto-start on boot)
 catclaw gateway uninstall         # Remove the system service
@@ -124,7 +125,8 @@ catclaw onboard                   # Onboarding: setup wizard â†’ start gateway â
 catclaw gateway start             # Start gateway in foreground
 catclaw gateway start -d          # Start as background daemon
 catclaw gateway stop              # Stop background gateway
-catclaw gateway restart           # Restart daemon
+catclaw gateway restart           # Restart daemon (manual; for the human user)
+catclaw gateway restart --resume  # Restart + auto-resume the current channel session (for the agent to call itself; user does not need to ping again)
 catclaw gateway status            # Show running status and PID
 catclaw onboard                      # Re-run the setup wizard
 catclaw tui                       # Launch TUI only

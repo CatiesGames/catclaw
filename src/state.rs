@@ -598,6 +598,43 @@ impl StateDb {
         Ok(rows)
     }
 
+    /// Find the single most recent non-archived session that originates from
+    /// a real channel (i.e. has a metadata.channel_id). Used by
+    /// `gateway restart --resume` to auto-detect which session the agent is
+    /// currently working in. Returns None when there are no candidates or
+    /// when there is more than one ambiguous candidate within the last few
+    /// minutes.
+    pub fn find_most_recent_channel_session(&self) -> Result<Option<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_key, session_id, agent_id, origin, context_id, parent_session_id, state, last_activity_at, created_at, metadata
+             FROM sessions
+             WHERE state IN ('active', 'idle')
+               AND origin NOT IN ('system', 'tui', 'webui')
+               AND json_extract(metadata, '$.channel_id') IS NOT NULL
+               AND json_extract(metadata, '$.channel_id') != ''
+             ORDER BY last_activity_at DESC
+             LIMIT 1",
+        )?;
+        let row = stmt
+            .query_row([], |row| {
+                Ok(SessionRow {
+                    session_key: row.get(0)?,
+                    session_id: row.get(1)?,
+                    agent_id: row.get(2)?,
+                    origin: row.get(3)?,
+                    context_id: row.get(4)?,
+                    parent_session_id: row.get(5)?,
+                    state: row.get(6)?,
+                    last_activity_at: row.get(7)?,
+                    created_at: row.get(8)?,
+                    metadata: row.get(9)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
     pub fn update_session_state(&self, session_key: &str, state: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
