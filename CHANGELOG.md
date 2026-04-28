@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.46.0](https://github.com/CatiesGames/catclaw/compare/v0.45.0...v0.46.0) (2026-04-28)
+
+
+### Features
+
+* **gateway:** --resume flag for agent-initiated restart/update with silent auto-resume ([4ef7161](https://github.com/CatiesGames/catclaw/commit/4ef7161113727b0a1bef69557a66330c6de529e0))
+
 ## [0.45.0](https://github.com/CatiesGames/catclaw/compare/v0.44.0...v0.45.0) (2026-04-23)
 
 
