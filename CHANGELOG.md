@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.46.1](https://github.com/CatiesGames/catclaw/compare/v0.46.0...v0.46.1) (2026-04-30)
+
+
+### Bug Fixes
+
+* **install:** always print copy-pasteable PATH command ([4d5c6e1](https://github.com/CatiesGames/catclaw/commit/4d5c6e1b76aced074988c3b6632a062b62557c8a))
+
 ## [0.46.0](https://github.com/CatiesGames/catclaw/compare/v0.45.0...v0.46.0) (2026-04-28)
 
 
