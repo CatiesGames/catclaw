@@ -107,19 +107,19 @@ case ":${PATH}:" in
         ;;
     *)
         warn "${INSTALL_DIR} is not in your PATH"
-        SHELL_NAME=$(basename "$SHELL" 2>/dev/null || echo "sh")
+        SHELL_NAME=$(basename "${SHELL:-}" 2>/dev/null || echo "")
         case "$SHELL_NAME" in
-            bash)
-                warn "Add it with: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+            fish)
+                warn "Add it with: fish_add_path ~/.local/bin"
                 ;;
             zsh)
                 warn "Add it with: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
                 ;;
-            fish)
-                warn "Add it with: fish_add_path ~/.local/bin"
-                ;;
             *)
-                warn "Add ${INSTALL_DIR} to your shell's PATH"
+                # bash and unknown shells: bash is the safest default
+                RC_FILE="~/.bashrc"
+                [ "$OS_NAME" = "darwin" ] && RC_FILE="~/.bash_profile"
+                warn "Add it with: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ${RC_FILE} && source ${RC_FILE}"
                 ;;
         esac
         ;;
