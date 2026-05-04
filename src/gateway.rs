@@ -1087,14 +1087,17 @@ async fn handle_social_button_action(
                 "threads" => SocialPlatform::Threads,
                 _ => return,
             };
-            let mut text_with_context = if let Some(h) = hint {
-                let base = row.text.as_deref().unwrap_or("");
-                format!("{}\n\n[Admin hint: {}]", base, h)
-            } else {
-                row.text.as_deref().unwrap_or("").to_string()
-            };
+            // Keep `text` as the raw incoming reply (untrusted). Pass admin hint
+            // and parent post via metadata so execute_auto_reply can render them
+            // in distinct trust regions of the system prompt.
+            let mut metadata: serde_json::Value = row.metadata.as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(h) = hint {
+                metadata["admin_hint"] = serde_json::Value::String(h.to_string());
+            }
             if let Some(ref parent) = parent_context {
-                text_with_context = format!("[Original post they are replying to: {}]\n\n{}", parent, text_with_context);
+                metadata["parent_text"] = serde_json::Value::String(parent.clone());
             }
             let item = SocialItem {
                 platform,
@@ -1103,10 +1106,8 @@ async fn handle_social_button_action(
                 author_id: row.author_id.clone(),
                 author_name: row.author_name.clone(),
                 media_id: row.media_id.clone(),
-                text: Some(text_with_context),
-                metadata: row.metadata.as_deref()
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or(serde_json::json!({})),
+                text: row.text.clone(),
+                metadata,
             };
 
             dispatch_action(
