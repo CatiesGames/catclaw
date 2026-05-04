@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.46.2](https://github.com/CatiesGames/catclaw/compare/v0.46.1...v0.46.2) (2026-05-04)
+
+
+### Bug Fixes
+
+* **social:** manual_reply now opens a modal and publishes directly ([1945d1d](https://github.com/CatiesGames/catclaw/commit/1945d1d9e8d74cf08e3357ef67a6ccfe853c51ba))
+
 ## [0.46.1](https://github.com/CatiesGames/catclaw/compare/v0.46.0...v0.46.1) (2026-05-04)
 
 
