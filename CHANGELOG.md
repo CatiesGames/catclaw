@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.46.1](https://github.com/CatiesGames/catclaw/compare/v0.46.0...v0.46.1) (2026-05-04)
+
+
+### Bug Fixes
+
+* **discord:** stop racing the gateway on social_draft button presses ([52e1855](https://github.com/CatiesGames/catclaw/commit/52e1855f8bd65ca529d75c14ebb03ef17967625a))
+* **install:** always print copy-pasteable PATH command ([4d5c6e1](https://github.com/CatiesGames/catclaw/commit/4d5c6e1b76aced074988c3b6632a062b62557c8a))
+* **social:** isolate untrusted reply content + nudge skill load in auto-reply prompt ([271f0bc](https://github.com/CatiesGames/catclaw/commit/271f0bcd831a70972c31cdb4d5b315f06a8fc8ad))
+
 ## [0.46.0](https://github.com/CatiesGames/catclaw/compare/v0.45.0...v0.46.0) (2026-04-28)
 
 
