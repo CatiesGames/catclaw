@@ -531,11 +531,9 @@ impl EventHandler for Handler {
                 // Social draft button: social_draft:{action}:{draft_id}
                 if let Some(rest) = custom_id.strip_prefix("social_draft:") {
                     let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                    let mut is_discard = false;
                     if parts.len() == 2 {
                         if let Ok(draft_id) = parts[1].parse::<i64>() {
                             // map "approve" → "draft_approve", "discard" → "draft_discard"
-                            is_discard = parts[0] == "discard";
                             let action = format!("draft_{}", parts[0]);
                             let _ = self.social_action_tx.send((draft_id, action, None));
                         } else {
@@ -544,17 +542,14 @@ impl EventHandler for Handler {
                     } else {
                         tracing::warn!(custom_id = %custom_id, "discord: malformed social_draft button ID");
                     }
-                    // For discard: strip buttons immediately for instant feedback.
-                    // For approve: use Acknowledge so the gateway's Publishing card
-                    // update (orange + "發送中...") is not overwritten by this response.
-                    let response = if is_discard {
-                        CreateInteractionResponse::UpdateMessage(
-                            CreateInteractionResponseMessage::new().components(vec![]),
-                        )
-                    } else {
-                        CreateInteractionResponse::Acknowledge
-                    };
-                    let _ = comp.create_response(&ctx.http, response).await;
+                    // Always Acknowledge: the gateway is the single source of truth for
+                    // card state after a button press. Using UpdateMessage here would
+                    // race with the gateway's own edit (Publishing for approve,
+                    // restored-incoming or 已捨棄 for discard) and can blank out the
+                    // buttons the gateway just put back.
+                    let _ = comp
+                        .create_response(&ctx.http, CreateInteractionResponse::Acknowledge)
+                        .await;
                     return;
                 }
 
