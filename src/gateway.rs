@@ -1051,11 +1051,68 @@ async fn handle_social_button_action(
             }
         }
         "manual_reply" => {
-            // Update card to "等待手動回覆" state and remove buttons — admin will reply manually.
-            let base = forward::build_forward_card(&row);
-            let resolved = forward::build_resolved_card(&base, "等待手動回覆");
-            try_update_card(resolved).await;
-            let _ = db.update_social_inbox_status(card_id, "manual");
+            // Two flows:
+            // - With hint (text from Discord modal) → publish directly via Meta API,
+            //   no draft, no approval, no LLM. Card → 已回覆 / 發送失敗.
+            // - Without hint (legacy / non-Discord adapter) → mark "等待手動回覆"
+            //   so the admin can reply in the channel themselves; no auto-send.
+            let manual_text = hint.map(str::trim).filter(|s| !s.is_empty());
+            if let Some(text) = manual_text {
+                // Show "發送中..." immediately so the admin sees feedback.
+                let base = forward::build_forward_card(&row);
+                let publishing = forward::build_publishing_card(&base);
+                try_update_card(publishing).await;
+
+                let cfg = config.read().unwrap().clone();
+                let result: crate::error::Result<String> = match row.platform.as_str() {
+                    "instagram" => {
+                        async {
+                            use crate::social::instagram::InstagramClient;
+                            let ig = cfg.social.instagram.as_ref()
+                                .ok_or_else(|| crate::error::CatClawError::Social("no instagram config".into()))?;
+                            let token = std::env::var(&ig.token_env)
+                                .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", ig.token_env)))?;
+                            let resp = InstagramClient::new(token, ig.user_id.clone())
+                                .reply_comment(&row.platform_id, text)
+                                .await?;
+                            Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+                        }.await
+                    }
+                    "threads" => {
+                        async {
+                            use crate::social::threads::ThreadsClient;
+                            let th = cfg.social.threads.as_ref()
+                                .ok_or_else(|| crate::error::CatClawError::Social("no threads config".into()))?;
+                            let token = std::env::var(&th.token_env)
+                                .map_err(|_| crate::error::CatClawError::Social(format!("env '{}' not set", th.token_env)))?;
+                            let resp = ThreadsClient::new(token, th.user_id.clone())
+                                .reply(&row.platform_id, text)
+                                .await?;
+                            Ok(resp.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+                        }.await
+                    }
+                    p => Err(crate::error::CatClawError::Social(format!("unknown platform '{}'", p))),
+                };
+                match result {
+                    Ok(reply_id) => {
+                        info!(card_id, reply_id = %reply_id, platform = %row.platform, "manual_reply: published");
+                        let resolved = forward::build_resolved_card(&base, "已回覆");
+                        try_update_card(resolved).await;
+                        let _ = db.update_social_inbox_sent(card_id, &reply_id);
+                    }
+                    Err(e) => {
+                        error!(card_id, error = %e, "manual_reply: publish failed");
+                        let resolved = forward::build_resolved_card(&base, "發送失敗");
+                        try_update_card(resolved).await;
+                        let _ = db.update_social_inbox_status(card_id, "failed");
+                    }
+                }
+            } else {
+                let base = forward::build_forward_card(&row);
+                let resolved = forward::build_resolved_card(&base, "等待手動回覆");
+                try_update_card(resolved).await;
+                let _ = db.update_social_inbox_status(card_id, "manual");
+            }
         }
         "ai_reply" => {
             // Update card to "AI 回覆中…" processing state, then dispatch.

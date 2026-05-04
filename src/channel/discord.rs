@@ -560,17 +560,33 @@ impl EventHandler for Handler {
                     if parts.len() == 2 {
                         if let Ok(card_id) = parts[1].parse::<i64>() {
                             let action = parts[0];
-                            // ai_reply_hint opens a modal to collect the hint text.
-                            if action == "ai_reply_hint" {
+                            // ai_reply_hint / manual_reply both open a modal to collect text.
+                            if action == "ai_reply_hint" || action == "manual_reply" {
                                 use serenity::all::{
                                     CreateInputText, CreateModal, InputTextStyle,
                                 };
-                                let modal_id = format!("social:ai_reply_hint_submit:{}", card_id);
-                                let input = CreateInputText::new(InputTextStyle::Paragraph, "回覆建議", "hint")
-                                    .placeholder("請輸入 AI 回覆的方向或建議…")
+                                let (modal_id, title, label, placeholder, max_len) = if action == "ai_reply_hint" {
+                                    (
+                                        format!("social:ai_reply_hint_submit:{}", card_id),
+                                        "建議 AI 回覆",
+                                        "回覆建議",
+                                        "請輸入 AI 回覆的方向或建議…",
+                                        500,
+                                    )
+                                } else {
+                                    (
+                                        format!("social:manual_reply_submit:{}", card_id),
+                                        "手動回覆",
+                                        "回覆內容",
+                                        "輸入要送出的回覆，送出後直接發布。",
+                                        2000,
+                                    )
+                                };
+                                let input = CreateInputText::new(InputTextStyle::Paragraph, label, "text")
+                                    .placeholder(placeholder)
                                     .required(true)
-                                    .max_length(500);
-                                let modal = CreateModal::new(modal_id, "建議 AI 回覆")
+                                    .max_length(max_len);
+                                let modal = CreateModal::new(modal_id, title)
                                     .components(vec![serenity::all::CreateActionRow::InputText(input)]);
                                 let _ = comp.create_response(
                                     &ctx.http,
@@ -580,7 +596,7 @@ impl EventHandler for Handler {
                             }
                             // Strip buttons for terminal actions; keep them for view_original
                             // (which augments the card without ending its lifecycle).
-                            strip_buttons = matches!(action, "ai_reply" | "manual_reply" | "ignore");
+                            strip_buttons = matches!(action, "ai_reply" | "ignore");
                             let _ = self.social_action_tx.send((card_id, action.to_string(), None));
                         }
                     }
@@ -657,21 +673,29 @@ impl EventHandler for Handler {
                         .await;
                     return;
                 }
-                // ai_reply_hint modal submission: social:ai_reply_hint_submit:{card_id}
-                if let Some(rest) = modal.data.custom_id.strip_prefix("social:ai_reply_hint_submit:") {
-                    if let Ok(card_id) = rest.parse::<i64>() {
-                        let hint = modal.data.components.iter()
-                            .flat_map(|row| row.components.iter())
-                            .find_map(|c| {
-                                if let serenity::all::ActionRowComponent::InputText(t) = c {
-                                    if t.custom_id == "hint" {
-                                        return t.value.clone();
-                                    }
+                // ai_reply_hint / manual_reply modal submission.
+                // custom_id formats:
+                //   social:ai_reply_hint_submit:{card_id}  → action=ai_reply,    text passed as hint
+                //   social:manual_reply_submit:{card_id}   → action=manual_reply, text passed as reply body
+                let parsed = if let Some(rest) = modal.data.custom_id.strip_prefix("social:ai_reply_hint_submit:") {
+                    rest.parse::<i64>().ok().map(|id| (id, "ai_reply"))
+                } else if let Some(rest) = modal.data.custom_id.strip_prefix("social:manual_reply_submit:") {
+                    rest.parse::<i64>().ok().map(|id| (id, "manual_reply"))
+                } else {
+                    None
+                };
+                if let Some((card_id, action)) = parsed {
+                    let text = modal.data.components.iter()
+                        .flat_map(|row| row.components.iter())
+                        .find_map(|c| {
+                            if let serenity::all::ActionRowComponent::InputText(t) = c {
+                                if t.custom_id == "text" || t.custom_id == "hint" {
+                                    return t.value.clone();
                                 }
-                                None
-                            });
-                        let _ = self.social_action_tx.send((card_id, "ai_reply".to_string(), hint));
-                    }
+                            }
+                            None
+                        });
+                    let _ = self.social_action_tx.send((card_id, action.to_string(), text));
                     let _ = modal.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await;
                 }
             }
