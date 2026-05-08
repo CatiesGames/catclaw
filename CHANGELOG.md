@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.46.4](https://github.com/CatiesGames/catclaw/compare/v0.46.3...v0.46.4) (2026-05-08)
+
+
+### Bug Fixes
+
+* **contacts:** enforce forward_channel uniqueness across contacts ([a6d6f5a](https://github.com/CatiesGames/catclaw/commit/a6d6f5a292671726c6606874f30bbd085745d50b))
+
 ## [0.46.3](https://github.com/CatiesGames/catclaw/compare/v0.46.2...v0.46.3) (2026-05-08)
 
 
