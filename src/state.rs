@@ -381,8 +381,11 @@ impl StateDb {
             );
             CREATE INDEX IF NOT EXISTS idx_contacts_agent ON contacts(agent_id);
             CREATE INDEX IF NOT EXISTS idx_contacts_role  ON contacts(agent_id, role);
-            CREATE INDEX IF NOT EXISTS idx_contacts_forward
-                ON contacts(forward_channel) WHERE forward_channel IS NOT NULL;
+            -- idx_contacts_forward is created/upgraded after this batch — see
+            -- migrate_contacts_forward_unique() below. It must be a UNIQUE
+            -- index but `CREATE UNIQUE INDEX IF NOT EXISTS` won't upgrade an
+            -- existing non-unique index of the same name, so we handle it
+            -- separately with explicit drop + dedup.
 
             CREATE TABLE IF NOT EXISTS contact_channels (
                 contact_id         TEXT NOT NULL,
@@ -516,6 +519,104 @@ impl StateDb {
             ",
         )?;
 
+        // Idempotent post-batch migrations.
+        Self::migrate_contacts_forward_unique(&conn)?;
+
+        Ok(())
+    }
+
+    /// Ensure `idx_contacts_forward` is a UNIQUE partial index. Old DBs were
+    /// created with a non-unique index of the same name; `CREATE UNIQUE INDEX
+    /// IF NOT EXISTS` won't upgrade them. This helper:
+    ///   1. Inspects sqlite_master to see whether the existing index is unique.
+    ///   2. If not, finds duplicate forward_channel rows, NULLs out all but
+    ///      the most recently-updated one, and warns about the conflict so
+    ///      the operator notices.
+    ///   3. Drops the non-unique index and recreates it as UNIQUE.
+    ///
+    /// Idempotent — runs every startup but is a no-op once the unique index
+    /// is in place.
+    fn migrate_contacts_forward_unique(conn: &rusqlite::Connection) -> Result<()> {
+        // Skip when the contacts table doesn't exist yet (very fresh install
+        // before the migrate batch ran — but we just ran it, so this is more
+        // about being defensive on partially-initialised state).
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='contacts'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !table_exists {
+            return Ok(());
+        }
+
+        let existing_sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_contacts_forward'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let already_unique = existing_sql
+            .as_deref()
+            .map(|s| s.to_ascii_uppercase().contains("UNIQUE"))
+            .unwrap_or(false);
+        if already_unique {
+            return Ok(()); // nothing to do
+        }
+
+        // De-dup: keep the most recently-updated row per forward_channel,
+        // null out the rest. We do this regardless of whether the old index
+        // existed, because a fresh install is also fine (no rows match).
+        let mut stmt = conn.prepare(
+            "SELECT forward_channel, COUNT(*) FROM contacts
+             WHERE forward_channel IS NOT NULL
+             GROUP BY forward_channel
+             HAVING COUNT(*) > 1",
+        )?;
+        let dups: Vec<(String, i64)> = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        for (channel, count) in &dups {
+            tracing::warn!(
+                forward_channel = %channel,
+                duplicate_count = %count,
+                "migrating contacts.forward_channel to unique: clearing duplicates, keeping most-recently-updated row only"
+            );
+            // Null out every row except the latest by updated_at.
+            conn.execute(
+                "UPDATE contacts SET forward_channel = NULL
+                 WHERE forward_channel = ?1
+                   AND id NOT IN (
+                       SELECT id FROM contacts
+                       WHERE forward_channel = ?1
+                       ORDER BY updated_at DESC
+                       LIMIT 1
+                   )",
+                rusqlite::params![channel],
+            )?;
+        }
+
+        if existing_sql.is_some() {
+            conn.execute("DROP INDEX idx_contacts_forward", [])?;
+        }
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_contacts_forward
+             ON contacts(forward_channel) WHERE forward_channel IS NOT NULL",
+            [],
+        )?;
+        if !dups.is_empty() {
+            tracing::info!(
+                cleared = dups.len(),
+                "contacts.forward_channel unique constraint applied"
+            );
+        }
         Ok(())
     }
 

@@ -1912,6 +1912,24 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     }
                     if approval { c.approval_required = true; }
                     if no_approval { c.approval_required = false; }
+
+                    // forward_channel must be unique across contacts (DB enforces
+                    // it; check first for a clear error before SQLite barks).
+                    if let Some(ref new_fc) = c.forward_channel {
+                        if let Ok(Some(other)) =
+                            state_db.find_contact_by_forward_channel(std::slice::from_ref(new_fc))
+                        {
+                            if other.id != c.id {
+                                eprintln!(
+                                    "forward_channel '{}' already used by contact '{}' ({}). \
+                                     Each contact needs its own channel — pick a different one, \
+                                     or first clear the existing contact (catclaw contact update {} --forward-channel '').",
+                                    new_fc, other.id, other.display_name, other.id
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                    }
                     state_db.update_contact(&c)?;
                     println!("Updated contact {}", c.id);
                 }

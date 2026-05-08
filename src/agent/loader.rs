@@ -1789,6 +1789,14 @@ work card 永遠不會出現給管理者看 — 這在 `approval_required=true` 
    Channels 權限,見 discord skill)。常見模式:每個 client 一條 `#client-XXX` 頻道
 查到 ID 後可寫進 memory 避免下次重查。
 
+**forward_channel 必須唯一** — 一個頻道只能綁一個 contact。DB 有 unique
+index 強制這條規則,因為 `>>` 手動回覆是用 forward_channel 反查 contact,
+若兩個 contact 共用同一個頻道,系統無從判斷你想送給誰。`contacts_update` 設
+重複的 forward_channel 會被拒絕,錯誤訊息會明確指出已被誰佔用 + 提供解法。
+若使用者問「能不能多個 client 共用一個 admin channel」,告訴他「不行,每個
+contact 需要自己的頻道,我可以幫你建 `#client-XXX` 子頻道分流」(用
+`discord_create_channel`)。
+
 ### 管理者在 forward_channel 的兩種輸入
 
 forward channel 同時是「跟你對話」與「手動回覆給個案」兩用,系統用前綴區分:

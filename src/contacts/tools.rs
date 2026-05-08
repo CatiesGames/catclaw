@@ -80,7 +80,7 @@ fn build_contacts_tools_inner() -> Vec<Value> {
                     "display_name":{"type":"string"},
                     "role":{"type":"string","enum":["admin","client","unknown"]},
                     "tags":{"type":"array","items":{"type":"string"}},
-                    "forward_channel":{"type":"string","description":"Mirror target like 'discord:guild_id/channel_id'. Pass empty string to clear."},
+                    "forward_channel":{"type":"string","description":"Mirror target like 'discord:guild_id/channel_id'. Must be unique — only one contact can claim a given channel; sharing breaks `>>` manual reply and is rejected. Pass empty string to clear."},
                     "approval_required":{"type":"boolean"},
                     "ai_paused":{"type":"boolean","description":"When true, inbound messages from this contact are NOT dispatched to the agent (manual takeover)."},
                     "external_ref":{"type":"object","description":"Free-form JSON to store pointers into external systems (Notion page id, etc)."},
@@ -325,6 +325,25 @@ pub async fn execute_contacts_tool(
                 } else if v.is_null() {
                     c.forward_channel = None;
                 }
+                // Pre-flight uniqueness check — gives a clear error before the
+                // DB unique constraint fires. Each forward_channel maps to AT
+                // MOST ONE contact (otherwise `>>` manual reply has no way to
+                // pick which contact the admin meant).
+                if let Some(ref new_fc) = c.forward_channel {
+                    if let Ok(Some(other)) =
+                        db.find_contact_by_forward_channel(std::slice::from_ref(new_fc))
+                    {
+                        if other.id != c.id {
+                            return Err(CatClawError::Other(format!(
+                                "forward_channel '{}' is already used by contact '{}' ({}). \
+                                 Each contact must have its own forward_channel — pick a different \
+                                 channel, or first clear the existing contact's forward_channel \
+                                 (contacts_update id={} forward_channel='').",
+                                new_fc, other.id, other.display_name, other.id
+                            )));
+                        }
+                    }
+                }
             }
             if let Some(b) = args.get("approval_required").and_then(|v| v.as_bool()) {
                 c.approval_required = b;
@@ -338,7 +357,19 @@ pub async fn execute_contacts_tool(
             if let Some(v) = args.get("metadata") {
                 c.metadata = v.clone();
             }
-            db.update_contact(&c)?;
+            // Map any remaining UNIQUE-constraint failure (race between
+            // pre-flight check and update) to a friendly message too.
+            if let Err(e) = db.update_contact(&c) {
+                if is_unique_violation(&e) {
+                    return Err(CatClawError::Other(format!(
+                        "forward_channel uniqueness conflict for contact '{}'. Another contact \
+                         claimed the same channel concurrently — refresh contacts_list and retry \
+                         with a different channel.",
+                        c.id
+                    )));
+                }
+                return Err(e);
+            }
             Ok(serde_json::to_value(&c).unwrap_or(Value::Null))
         }
         "contacts_delete" => {
@@ -437,4 +468,12 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| CatClawError::Other(format!("missing argument '{}'", key)))
+}
+
+/// Detect SQLite UNIQUE constraint violations through CatClawError's wrapped
+/// rusqlite::Error. Used to surface friendlier errors when two callers race
+/// past the pre-flight check.
+fn is_unique_violation(err: &CatClawError) -> bool {
+    let s = err.to_string();
+    s.contains("UNIQUE constraint failed") || s.contains("constraint failed: contacts.forward_channel")
 }
