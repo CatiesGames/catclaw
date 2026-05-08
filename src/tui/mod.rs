@@ -249,7 +249,7 @@ impl App {
             agents_panel: agents::AgentsPanel::new(config, config_path.clone(), client.clone()),
             skills_panel: skills::SkillsPanel::new(config),
             tasks_panel: tasks::TasksPanel::new(client.clone()),
-            bindings_panel: bindings::BindingsPanel::new(config, config_path.clone()),
+            bindings_panel: bindings::BindingsPanel::new(config, config_path.clone(), client.clone()),
             config_panel: config_panel::ConfigPanel::new(config, config_path, client.clone()),
             logs_panel: {
                 let mut panel = logs::LogsPanel::new(Some(log_dir), &config.logging.level);

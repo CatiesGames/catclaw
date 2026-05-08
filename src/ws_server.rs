@@ -224,11 +224,35 @@ async fn handle_connection(socket: WebSocket, gw: Arc<GatewayHandle>) {
     info!("WS client disconnected");
 }
 
+/// WS methods that do the disk-first → mutate → write → memory pattern.
+/// These all share `gw.config_write_lock` so two callers can't tear the
+/// catclaw.toml between read-back and write-out (e.g. concurrent
+/// `agents.new` requests both passing duplicate-check on the same snapshot).
+fn is_config_mutating(method: &str) -> bool {
+    matches!(method,
+        "config.set"
+        | "mcp_env.set" | "mcp_env.remove"
+        | "env.set" | "env.remove"
+        | "social.mode"
+        | "agents.new" | "agents.delete"
+        | "agents.set_tools" | "agents.set_model" | "agents.set_default"
+        | "agents.reload_tools"
+        | "bindings.set" | "bindings.delete"
+    )
+}
+
 async fn dispatch(
     req: &WsRequest,
     gw: &Arc<GatewayHandle>,
     event_tx: &mpsc::UnboundedSender<String>,
 ) -> WsResponse {
+    // Serialise all whole-file mutators behind a single tokio Mutex so
+    // disk-first reload + write is atomic across callers.
+    let _write_guard = if is_config_mutating(req.method.as_str()) {
+        Some(gw.config_write_lock.lock().await)
+    } else {
+        None
+    };
     match req.method.as_str() {
         "gateway.status" => handle_gateway_status(req, gw),
         "sessions.list" => handle_sessions_list(req, &gw.state_db),
@@ -241,6 +265,13 @@ async fn dispatch(
         "agents.get" => handle_agents_get(req, gw),
         "agents.default" => handle_agents_default(req, gw),
         "agents.reload_tools" => handle_agents_reload_tools(req, gw),
+        "agents.new" => handle_agents_new(req, gw).await,
+        "agents.delete" => handle_agents_delete(req, gw),
+        "agents.set_tools" => handle_agents_set_tools(req, gw),
+        "agents.set_model" => handle_agents_set_model(req, gw),
+        "agents.set_default" => handle_agents_set_default(req, gw),
+        "bindings.set" => handle_bindings_set(req, gw),
+        "bindings.delete" => handle_bindings_delete(req, gw),
         "tasks.list" => handle_tasks_list(req, &gw.state_db),
         "tasks.enable" => handle_tasks_enable(req, &gw.state_db),
         "tasks.disable" => handle_tasks_disable(req, &gw.state_db),
@@ -806,21 +837,14 @@ fn handle_agents_reload_tools(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRes
         None => return WsResponse::err(req.id, -32602, "missing param: agent_id"),
     };
 
-    // Re-read model from config (catclaw.toml)
+    // Disk-first full reload — same pattern as every other mutating handler.
+    // Avoids the previous partial merge (which only synced model fields).
     let (timeout_secs, model, fallback_model) = {
-        let disk_config = crate::config::Config::load(&gw.config_path).ok();
-        if let Some(ref dc) = disk_config {
-            let mut config = gw.config.write().unwrap();
-            for disk_agent in &dc.agents {
-                if let Some(mem_agent) = config.agents.iter_mut().find(|a| a.id == disk_agent.id) {
-                    mem_agent.model = disk_agent.model.clone();
-                    mem_agent.fallback_model = disk_agent.fallback_model.clone();
-                }
-            }
+        if let Ok(disk) = crate::config::Config::load(&gw.config_path) {
+            *gw.config.write().unwrap() = disk;
         }
         let config = gw.config.read().unwrap();
-        let agent_cfg = config.agents.iter().find(|a| a.id == agent_id);
-        match agent_cfg {
+        match config.agents.iter().find(|a| a.id == agent_id) {
             Some(ac) => (ac.approval.timeout_secs, ac.model.clone(), ac.fallback_model.clone()),
             None => (120, None, None),
         }
@@ -867,6 +891,396 @@ fn handle_agents_reload_tools(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRes
 
     info!(agent_id = %agent_id, "agent config hot-reloaded");
     WsResponse::ok(req.id, json!({"agent_id": agent_id}))
+}
+
+/// Create a new agent: workspace files + catclaw.toml entry + AgentRegistry.
+/// This is the single entry point — CLI / TUI / agent-via-Bash all call here.
+async fn handle_agents_new(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let name = match req.params.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return WsResponse::err(req.id, -32602, "missing param: name"),
+    };
+
+    // Disk-first reload — we only mutate what this handler owns.
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    if full.agents.iter().any(|a| a.id == name) {
+        return WsResponse::err(req.id, -32602, format!("agent '{}' already exists", name));
+    }
+
+    let workspace_root = full.general.workspace.clone();
+    let workspace = workspace_root.join("agents").join(&name);
+
+    // Pure file I/O — safe inside async handler.
+    if let Err(e) = crate::agent::AgentLoader::create_workspace(&workspace, &workspace_root, &name) {
+        return WsResponse::err(req.id, -1, format!("create_workspace failed: {}", e));
+    }
+    // Network — install remote skills (skill-creator from anthropics/skills).
+    // No-op when already installed; only the first-ever new agent on this
+    // machine actually downloads.
+    if let Err(e) = crate::agent::AgentLoader::install_remote_skills(&workspace_root).await {
+        warn!(error = %e, "install_remote_skills failed (non-fatal)");
+    }
+
+    // First-agent-on-empty-gateway invariant: if the new agent is the only
+    // one in `full.agents`, persist `default = true` so a restart restores
+    // the same role and the in-memory registry+router agree.
+    let is_first_agent = full.agents.is_empty();
+    full.agents.push(crate::config::AgentConfig {
+        id: name.clone(),
+        workspace: workspace.clone(),
+        default: is_first_agent,
+        model: None,
+        fallback_model: None,
+        approval: crate::config::ApprovalConfig::default(),
+    });
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+    };
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+
+    // Register the agent in-memory.
+    let new_agent_cfg = full.agents.last().cloned().unwrap();
+    let timezone = full.general.timezone.clone();
+    let default_model = full.general.default_model.clone();
+    let default_fallback_model = full.general.default_fallback_model.clone();
+    *gw.config.write().unwrap() = full;
+
+    match crate::agent::AgentLoader::load(
+        &new_agent_cfg,
+        &workspace_root,
+        default_model.as_deref(),
+        default_fallback_model.as_deref(),
+        timezone.as_deref(),
+    ) {
+        Ok(agent) => {
+            // `add` returns `true` when this agent became the registry's
+            // default (no prior default existed). Sync the router so inbound
+            // messages with no binding match are routed to the new agent
+            // instead of falling through to whatever stale id was set at
+            // gateway startup.
+            let promoted = gw.agent_registry.write().unwrap().add(agent);
+            if promoted {
+                gw.router.set_default_agent_id(name.clone());
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, agent = %name, "agent loaded into config but failed to register; will load on next gateway restart");
+        }
+    }
+
+    info!(agent = %name, "agent created");
+    WsResponse::ok(req.id, json!({"id": name, "workspace": workspace.display().to_string()}))
+}
+
+/// Delete an agent from catclaw.toml + AgentRegistry. Workspace files are NOT
+/// removed (consistent with current `catclaw agent delete` behavior).
+fn handle_agents_delete(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let name = match req.params.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return WsResponse::err(req.id, -32602, "missing param: name"),
+    };
+
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    let target = match full.agents.iter().find(|a| a.id == name).cloned() {
+        Some(a) => a,
+        None => return WsResponse::err(req.id, -32602, format!("agent '{}' not found", name)),
+    };
+    // Refuse to delete the default agent. Otherwise the in-memory router's
+    // default_agent_id would point at a vanished agent until `agents.set_default`
+    // runs (and `Config::default` flags would all be `false`, so a restart
+    // would fall through to `configs.first()` which may not be what the user
+    // wanted). Forcing the user to set a new default first keeps invariants
+    // explicit.
+    if target.default {
+        return WsResponse::err(
+            req.id, -32602,
+            format!(
+                "agent '{}' is the default; promote another via agents.set_default before deleting",
+                name
+            ),
+        );
+    }
+    full.agents.retain(|a| a.id != name);
+
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+    };
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+    *gw.config.write().unwrap() = full;
+    gw.agent_registry.write().unwrap().remove(&name);
+
+    info!(agent = %name, "agent deleted");
+    WsResponse::ok(req.id, json!({
+        "id": name,
+        "workspace": target.workspace.display().to_string(),
+        "note": "workspace files NOT deleted; remove manually if desired",
+    }))
+}
+
+/// Write an agent's tools.toml + reload its in-memory config.
+/// Single-call replacement for "CLI/TUI writes file + calls reload_tools".
+fn handle_agents_set_tools(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let agent_id = match req.params.get("agent_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return WsResponse::err(req.id, -32602, "missing param: agent_id"),
+    };
+    let take_list = |key: &str| -> Vec<String> {
+        req.params.get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    let allowed = take_list("allowed");
+    let denied = take_list("denied");
+    let require_approval = take_list("require_approval");
+
+    // Locate agent workspace via in-memory registry (already populated).
+    let workspace = {
+        let registry = gw.agent_registry.read().unwrap();
+        match registry.get(&agent_id) {
+            Some(a) => a.workspace.clone(),
+            None => return WsResponse::err(req.id, -1, format!("agent not found: {}", agent_id)),
+        }
+    };
+
+    let fmt_list = |v: &[String]| -> String {
+        v.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", ")
+    };
+    let mut content = format!(
+        "allowed = [{}]\ndenied = [{}]\n",
+        fmt_list(&allowed),
+        fmt_list(&denied),
+    );
+    if !require_approval.is_empty() {
+        content.push_str(&format!("require_approval = [{}]\n", fmt_list(&require_approval)));
+    }
+    if let Err(e) = std::fs::write(workspace.join("tools.toml"), content) {
+        return WsResponse::err(req.id, -1, format!("failed to write tools.toml: {}", e));
+    }
+
+    // Disk-first read of approval timeout + model fields. Other handlers
+    // already follow this pattern (lesson #25): never trust in-memory Config
+    // for whole-file decisions.
+    let (timeout_secs, model, fallback_model) = match crate::config::Config::load(&gw.config_path) {
+        Ok(disk) => {
+            let result = match disk.agents.iter().find(|a| a.id == agent_id) {
+                Some(a) => (a.approval.timeout_secs, a.model.clone(), a.fallback_model.clone()),
+                None => (120, None, None),
+            };
+            *gw.config.write().unwrap() = disk;
+            result
+        }
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    let approval = crate::config::ApprovalConfig {
+        require_approval: require_approval.clone(),
+        blocked: denied.clone(),
+        timeout_secs,
+    };
+    let tools = crate::agent::ToolPermissions {
+        allowed,
+        denied,
+        require_approval,
+    };
+    {
+        let mut registry = gw.agent_registry.write().unwrap();
+        registry.reload_agent_config(&agent_id, approval, tools, model, fallback_model);
+    }
+
+    info!(agent_id = %agent_id, "agent tools updated");
+    WsResponse::ok(req.id, json!({"agent_id": agent_id}))
+}
+
+/// Update an agent's model and/or fallback_model in catclaw.toml + registry.
+fn handle_agents_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let agent_id = match req.params.get("agent_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return WsResponse::err(req.id, -32602, "missing param: agent_id"),
+    };
+    // Each field is optional. Use serde_json::Value to distinguish "not provided"
+    // (skip) from "null/empty string" (clear) from "string value" (set).
+    let parse_field = |key: &str| -> Option<Option<String>> {
+        match req.params.get(key) {
+            None => None,
+            Some(v) if v.is_null() => Some(None),
+            Some(v) => match v.as_str() {
+                Some("") => Some(None),
+                Some(s) => Some(Some(s.to_string())),
+                None => None,
+            },
+        }
+    };
+    let model_change = parse_field("model");
+    let fallback_change = parse_field("fallback_model");
+
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    let agent_cfg = match full.agents.iter_mut().find(|a| a.id == agent_id) {
+        Some(a) => a,
+        None => return WsResponse::err(req.id, -32602, format!("agent '{}' not found", agent_id)),
+    };
+    if let Some(m) = model_change.clone() {
+        agent_cfg.model = m;
+    }
+    if let Some(fb) = fallback_change.clone() {
+        agent_cfg.fallback_model = fb;
+    }
+
+    let new_model = agent_cfg.model.clone();
+    let new_fallback = agent_cfg.fallback_model.clone();
+
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+    };
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+    *gw.config.write().unwrap() = full;
+
+    // Re-apply registry (preserve current tools/approval — only model fields change).
+    {
+        let mut registry = gw.agent_registry.write().unwrap();
+        if let Some(agent) = registry.get(&agent_id).cloned() {
+            registry.reload_agent_config(
+                &agent_id,
+                agent.approval.clone(),
+                agent.tools.clone(),
+                new_model,
+                new_fallback,
+            );
+        }
+    }
+
+    info!(agent_id = %agent_id, "agent model updated");
+    WsResponse::ok(req.id, json!({"agent_id": agent_id}))
+}
+
+/// Set an agent as the default. Clears `default=true` on all others.
+fn handle_agents_set_default(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let agent_id = match req.params.get("agent_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return WsResponse::err(req.id, -32602, "missing param: agent_id"),
+    };
+
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    if !full.agents.iter().any(|a| a.id == agent_id) {
+        return WsResponse::err(req.id, -32602, format!("agent '{}' not found", agent_id));
+    }
+    for a in full.agents.iter_mut() {
+        a.default = a.id == agent_id;
+    }
+
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+    };
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+    *gw.config.write().unwrap() = full;
+
+    // Update registry default_id and router default_agent_id together so
+    // unbound inbound messages route to the newly-promoted agent immediately.
+    {
+        let mut registry = gw.agent_registry.write().unwrap();
+        registry.set_default(&agent_id);
+    }
+    gw.router.set_default_agent_id(agent_id.clone());
+
+    info!(agent_id = %agent_id, "default agent set");
+    WsResponse::ok(req.id, json!({"agent_id": agent_id}))
+}
+
+/// Upsert a binding (pattern → agent). Replaces any existing entry with the
+/// same pattern. Hot-reloads the in-memory MessageRouter.
+fn handle_bindings_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let pattern = match req.params.get("pattern").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return WsResponse::err(req.id, -32602, "missing param: pattern"),
+    };
+    let agent = match req.params.get("agent").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return WsResponse::err(req.id, -32602, "missing param: agent"),
+    };
+
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    if !full.agents.iter().any(|a| a.id == agent) {
+        return WsResponse::err(req.id, -32602, format!("agent '{}' not found", agent));
+    }
+    full.bindings.retain(|b| b.pattern != pattern);
+    full.bindings.push(crate::config::BindingConfig {
+        pattern: pattern.clone(),
+        agent: agent.clone(),
+    });
+
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+    };
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+    let new_bindings = full.bindings.clone();
+    *gw.config.write().unwrap() = full;
+
+    // Hot-reload the router — no gateway restart needed any more.
+    gw.router.set_bindings(&new_bindings);
+
+    info!(pattern = %pattern, agent = %agent, "binding set");
+    WsResponse::ok(req.id, json!({"pattern": pattern, "agent": agent}))
+}
+
+/// Remove a binding by pattern. Hot-reloads the router.
+fn handle_bindings_delete(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let pattern = match req.params.get("pattern").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return WsResponse::err(req.id, -32602, "missing param: pattern"),
+    };
+
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    let before = full.bindings.len();
+    full.bindings.retain(|b| b.pattern != pattern);
+    if full.bindings.len() == before {
+        return WsResponse::err(req.id, -32602, format!("binding '{}' not found", pattern));
+    }
+
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+    };
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+    let new_bindings = full.bindings.clone();
+    *gw.config.write().unwrap() = full;
+    gw.router.set_bindings(&new_bindings);
+
+    info!(pattern = %pattern, "binding deleted");
+    WsResponse::ok(req.id, json!({"pattern": pattern}))
 }
 
 fn handle_tasks_list(req: &WsRequest, db: &Arc<StateDb>) -> WsResponse {
@@ -1015,26 +1429,27 @@ fn handle_config_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         return WsResponse::ok(req.id, json!({"needs_restart": false, "key": key, "value": "***"}));
     }
 
-    let (needs_restart, serialized, channels_snapshot) = {
-        let mut config = gw.config.write().unwrap();
-        let needs_restart = match config.apply_config_set(key, value) {
-            Ok(nr) => nr,
-            Err(e) => return WsResponse::err(req.id, -1, format!("{}", e)),
-        };
-        // Serialize while holding the lock, then release before file I/O
-        let serialized = match toml::to_string_pretty(&*config) {
-            Ok(s) => s,
-            Err(e) => return WsResponse::err(req.id, -1, format!("failed to serialize config: {}", e)),
-        };
-        let channels_snapshot = config.channels.clone();
-        (needs_restart, serialized, channels_snapshot)
-        // lock released here
+    // Disk-first reload: avoid clobbering entries added by other paths
+    // (CLI subprocess, agent via Bash) that bypassed the gateway.
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
     };
+    let needs_restart = match full.apply_config_set(key, value) {
+        Ok(nr) => nr,
+        Err(e) => return WsResponse::err(req.id, -1, format!("{}", e)),
+    };
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to serialize config: {}", e)),
+    };
+    let channels_snapshot = full.channels.clone();
 
-    // File I/O outside the lock
     if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
         return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
     }
+    // Commit to in-memory config (replace entirely so any disk-only entries are picked up too)
+    *gw.config.write().unwrap() = full;
 
     // Hot-reload: apply immediate changes
     if !needs_restart {
@@ -1124,32 +1539,23 @@ fn handle_mcp_env_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         None => return WsResponse::err(req.id, -32602, "missing param: value"),
     };
 
-    // Clone → mutate → serialize → write to disk → commit to in-memory config
-    let serialized = {
-        let config = gw.config.read().unwrap();
-        let mut draft = config.mcp_env.clone();
-        draft.entry(server.clone()).or_default().insert(key.clone(), value);
-        // Build a temporary config with the new mcp_env for serialization
-        let mut full = config.clone();
-        full.mcp_env = draft;
-        match toml::to_string_pretty(&full) {
-            Ok(s) => s,
-            Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
-        }
+    // Disk-first reload → mutate → write → commit to in-memory.
+    // Reload from disk (not in-memory clone) so entries added by other paths
+    // (CLI / agent via Bash) aren't clobbered.
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    full.mcp_env.entry(server.clone()).or_default().insert(key.clone(), value);
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
     };
 
     if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
         return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
     }
-
-    // File write succeeded — now commit to in-memory config
-    {
-        let mut config = gw.config.write().unwrap();
-        // Re-parse from serialized to ensure consistency
-        if let Ok(new_config) = toml::from_str::<crate::config::Config>(&serialized) {
-            config.mcp_env = new_config.mcp_env;
-        }
-    }
+    *gw.config.write().unwrap() = full;
 
     info!(server = %server, key = %key, "mcp_env set");
     WsResponse::ok(req.id, json!({"server": server, "key": key}))
@@ -1165,35 +1571,25 @@ fn handle_mcp_env_remove(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse
         None => return WsResponse::err(req.id, -32602, "missing param: key"),
     };
 
-    // Clone → mutate → serialize → write to disk → commit to in-memory config
-    let serialized = {
-        let config = gw.config.read().unwrap();
-        let mut draft = config.mcp_env.clone();
-        if let Some(vars) = draft.get_mut(&server) {
-            vars.remove(&key);
-            if vars.is_empty() {
-                draft.remove(&server);
-            }
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    if let Some(vars) = full.mcp_env.get_mut(&server) {
+        vars.remove(&key);
+        if vars.is_empty() {
+            full.mcp_env.remove(&server);
         }
-        let mut full = config.clone();
-        full.mcp_env = draft;
-        match toml::to_string_pretty(&full) {
-            Ok(s) => s,
-            Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
-        }
+    }
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
     };
 
     if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
         return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
     }
-
-    // File write succeeded — commit to in-memory config
-    {
-        let mut config = gw.config.write().unwrap();
-        if let Ok(new_config) = toml::from_str::<crate::config::Config>(&serialized) {
-            config.mcp_env = new_config.mcp_env;
-        }
-    }
+    *gw.config.write().unwrap() = full;
 
     info!(server = %server, key = %key, "mcp_env removed");
     WsResponse::ok(req.id, json!({"server": server, "key": key}))
@@ -1230,27 +1626,21 @@ fn handle_env_set(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         None => return WsResponse::err(req.id, -32602, "missing param: value"),
     };
 
-    // 1. Write to catclaw.toml [env] section (for subprocess injection)
-    let serialized = {
-        let config = gw.config.read().unwrap();
-        let mut full = config.clone();
-        full.env.insert(key.clone(), value.clone());
-        match toml::to_string_pretty(&full) {
-            Ok(s) => s,
-            Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
-        }
+    // 1. Disk-first reload → mutate → write → commit to in-memory.
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    full.env.insert(key.clone(), value.clone());
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
     };
 
     if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
         return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
     }
-
-    {
-        let mut config = gw.config.write().unwrap();
-        if let Ok(new_config) = toml::from_str::<crate::config::Config>(&serialized) {
-            config.env = new_config.env;
-        }
-    }
+    *gw.config.write().unwrap() = full;
 
     // 2. Write to ~/.catclaw/.env (so gateway process can read via std::env::var)
     write_dotenv(&key, &value);
@@ -1268,26 +1658,20 @@ fn handle_env_remove(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         None => return WsResponse::err(req.id, -32602, "missing param: key"),
     };
 
-    let serialized = {
-        let config = gw.config.read().unwrap();
-        let mut full = config.clone();
-        full.env.remove(&key);
-        match toml::to_string_pretty(&full) {
-            Ok(s) => s,
-            Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
-        }
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    full.env.remove(&key);
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
     };
 
     if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
         return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
     }
-
-    {
-        let mut config = gw.config.write().unwrap();
-        if let Ok(new_config) = toml::from_str::<crate::config::Config>(&serialized) {
-            config.env = new_config.env;
-        }
-    }
+    *gw.config.write().unwrap() = full;
 
     // Remove from .env and process env
     remove_dotenv(&key);
@@ -1590,46 +1974,46 @@ fn handle_social_mode(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
         return WsResponse::err(req.id, -32602, "mode must be webhook, polling, or off");
     }
 
-    let (serialized, webhook_url) = {
-        let mut cfg = gw.config.write().unwrap();
-        match platform.as_str() {
-            "instagram" => {
-                if let Some(ref mut ig) = cfg.social.instagram {
-                    ig.mode = mode.clone();
-                } else {
-                    return WsResponse::err(req.id, -32602, "social.instagram is not configured");
-                }
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    match platform.as_str() {
+        "instagram" => {
+            if let Some(ref mut ig) = full.social.instagram {
+                ig.mode = mode.clone();
+            } else {
+                return WsResponse::err(req.id, -32602, "social.instagram is not configured");
             }
-            "threads" => {
-                if let Some(ref mut th) = cfg.social.threads {
-                    th.mode = mode.clone();
-                } else {
-                    return WsResponse::err(req.id, -32602, "social.threads is not configured");
-                }
-            }
-            _ => return WsResponse::err(req.id, -32602, format!("unknown platform '{}'", platform)),
         }
-        let webhook_url = if mode == "webhook" {
-            let base = cfg.webhook_base_url();
-            let path = match platform.as_str() {
-                "instagram" => "/webhook/instagram",
-                _ => "/webhook/threads",
-            };
-            Some(format!("{}{}", base, path))
-        } else {
-            None
+        "threads" => {
+            if let Some(ref mut th) = full.social.threads {
+                th.mode = mode.clone();
+            } else {
+                return WsResponse::err(req.id, -32602, "social.threads is not configured");
+            }
+        }
+        _ => return WsResponse::err(req.id, -32602, format!("unknown platform '{}'", platform)),
+    }
+    let webhook_url = if mode == "webhook" {
+        let base = full.webhook_base_url();
+        let path = match platform.as_str() {
+            "instagram" => "/webhook/instagram",
+            _ => "/webhook/threads",
         };
-        let serialized = match toml::to_string_pretty(&*cfg) {
-            Ok(s) => s,
-            Err(e) => return WsResponse::err(req.id, -1, format!("failed to serialize config: {}", e)),
-        };
-        (serialized, webhook_url)
-        // lock released here
+        Some(format!("{}{}", base, path))
+    } else {
+        None
+    };
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to serialize config: {}", e)),
     };
 
     if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
         return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
     }
+    *gw.config.write().unwrap() = full;
 
     // webhook mode: immediate (handler reads config on each request).
     // polling / off: requires gateway restart to take effect.

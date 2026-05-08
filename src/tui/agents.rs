@@ -9,7 +9,7 @@ use super::editor::{EditorAction, MdEditor};
 use super::theme::Theme;
 use super::{Action, Component};
 use crate::agent::{AgentLoader, SkillSource};
-use crate::config::{AgentConfig, Config};
+use crate::config::Config;
 use crate::ws_client::GatewayClient;
 
 /// Claude Code built-in tools relevant to CatClaw agents.
@@ -185,6 +185,12 @@ pub struct AgentsPanel {
     /// Channel for async skill install results
     skill_tx: mpsc::UnboundedSender<Result<String, String>>,
     skill_rx: mpsc::UnboundedReceiver<Result<String, String>>,
+    /// Channel for surfacing errors from background WS calls (set_tools,
+    /// set_model, set_default). The success path updates `status_msg`
+    /// optimistically; this channel only delivers failures so the user
+    /// learns when a save did NOT actually reach the gateway.
+    op_err_tx: mpsc::UnboundedSender<String>,
+    op_err_rx: mpsc::UnboundedReceiver<String>,
     /// WS client for hot-reloading agent config in gateway
     client: Arc<GatewayClient>,
     /// Discovered MCP tools per server (fetched from gateway on Tools mode entry)
@@ -200,6 +206,7 @@ impl AgentsPanel {
         let (create_tx, create_rx) = mpsc::unbounded_channel();
         let (skill_tx, skill_rx) = mpsc::unbounded_channel();
         let (mcp_tools_tx, mcp_tools_rx) = mpsc::unbounded_channel();
+        let (op_err_tx, op_err_rx) = mpsc::unbounded_channel();
 
         // Pre-fetch MCP discovered tools so first Tools mode entry has data
         {
@@ -250,6 +257,8 @@ impl AgentsPanel {
             skill_status: None,
             skill_tx,
             skill_rx,
+            op_err_tx,
+            op_err_rx,
             client,
             mcp_discovered_tools: std::collections::HashMap::new(),
             mcp_tools_rx,
@@ -610,13 +619,11 @@ impl AgentsPanel {
                 .map(|e| e.name.clone())
                 .collect();
 
-            // All denied = built-in denied + MCP denied
             let all_denied: Vec<String> = builtin_denied.iter()
                 .chain(mcp_denied.iter())
                 .cloned()
                 .collect();
 
-            // All approval tools (built-in + MCP)
             let approval_tools: Vec<String> = self.tool_entries.iter()
                 .filter(|e| e.require_approval)
                 .map(|e| e.name.clone())
@@ -630,39 +637,28 @@ impl AgentsPanel {
                 builtin_allowed
             };
 
-            // Write everything to tools.toml (allowed, denied, require_approval)
-            let mut content = format!(
-                "allowed = [{}]\ndenied = [{}]\n",
-                final_allowed.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "),
-                all_denied.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "),
-            );
-            if !approval_tools.is_empty() {
-                content.push_str(&format!(
-                    "require_approval = [{}]\n",
-                    approval_tools.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", "),
-                ));
-            }
+            // Update local view immediately for responsive UI; gateway is the
+            // authoritative writer and will write tools.toml on its side.
+            agent.allowed = final_allowed.clone();
+            agent.denied = all_denied.clone();
+            agent.approval_tools = approval_tools.clone();
+            self.status_msg = Some(format!("Tools saved for '{}'", agent.id));
 
-            let tools_path = agent.workspace.join("tools.toml");
-            if std::fs::write(&tools_path, &content).is_ok() {
-                agent.allowed = final_allowed;
-                agent.denied = all_denied;
-                agent.approval_tools = approval_tools;
-                self.status_msg = Some(format!("Tools saved for '{}'", agent.id));
-            } else {
-                self.status_msg = Some("Failed to save tools.toml".into());
-                self.mode = Mode::Normal;
-                return;
-            }
-
-            // Hot-reload in gateway via WS
             let client = self.client.clone();
+            let err_tx = self.op_err_tx.clone();
             let aid = agent.id.clone();
             tokio::spawn(async move {
-                let _ = client.request(
-                    "agents.reload_tools",
-                    serde_json::json!({"agent_id": aid}),
-                ).await;
+                if let Err(e) = client.request(
+                    "agents.set_tools",
+                    serde_json::json!({
+                        "agent_id": aid,
+                        "allowed": final_allowed,
+                        "denied": all_denied,
+                        "require_approval": approval_tools,
+                    }),
+                ).await {
+                    let _ = err_tx.send(format!("Failed to save tools for '{}': {}", aid, e));
+                }
             });
         }
         self.mode = Mode::Normal;
@@ -758,48 +754,34 @@ impl AgentsPanel {
         let agent_id = agent.id.clone();
 
         let new_value = if value.is_empty() { None } else { Some(value.clone()) };
+        let is_model = self.model_edit_field == 0;
 
-        if self.model_edit_field == 0 {
+        if is_model {
             agent.model = new_value.clone();
         } else {
             agent.fallback_model = new_value.clone();
         }
 
-        // Save to catclaw.toml
-        match Config::load(&self.config_path) {
-            Ok(mut config) => {
-                if let Some(ac) = config.agents.iter_mut().find(|a| a.id == agent_id) {
-                    if self.model_edit_field == 0 {
-                        ac.model = new_value;
-                    } else {
-                        ac.fallback_model = new_value;
-                    }
-                }
-                match config.save(&self.config_path) {
-                    Ok(()) => {
-                        let field_name = if self.model_edit_field == 0 { "model" } else { "fallback_model" };
-                        let display = if value.is_empty() { "(cleared)" } else { &value };
-                        self.status_msg = Some(format!("{} {} = {}", agent_id, field_name, display));
+        let field_name = if is_model { "model" } else { "fallback_model" };
+        let display = if value.is_empty() { "(cleared)" } else { &value };
+        self.status_msg = Some(format!("{} {} = {}", agent_id, field_name, display));
 
-                        // Hot-reload in gateway via WS
-                        let client = self.client.clone();
-                        let aid = agent_id.clone();
-                        tokio::spawn(async move {
-                            let _ = client.request(
-                                "agents.reload_tools",
-                                serde_json::json!({"agent_id": aid}),
-                            ).await;
-                        });
-                    }
-                    Err(e) => {
-                        self.status_msg = Some(format!("Failed to save: {}", e));
-                    }
-                }
+        // Gateway is the authoritative writer; send the change via WS.
+        // `agents.set_model` accepts only the field that changed; the other
+        // is left untouched server-side.
+        let client = self.client.clone();
+        let err_tx = self.op_err_tx.clone();
+        let aid = agent_id.clone();
+        let payload = if is_model {
+            serde_json::json!({"agent_id": &aid, "model": new_value})
+        } else {
+            serde_json::json!({"agent_id": &aid, "fallback_model": new_value})
+        };
+        tokio::spawn(async move {
+            if let Err(e) = client.request("agents.set_model", payload).await {
+                let _ = err_tx.send(format!("Failed to save model for '{}': {}", aid, e));
             }
-            Err(e) => {
-                self.status_msg = Some(format!("Failed to load config: {}", e));
-            }
-        }
+        });
 
         self.mode = Mode::Normal;
     }
@@ -822,36 +804,23 @@ impl AgentsPanel {
             return;
         }
 
-        let workspace = self.workspace.join("agents").join(&name);
-        let workspace_root = self.workspace.clone();
-        let config_path = self.config_path.clone();
+        let client = self.client.clone();
         let tx = self.create_tx.clone();
 
         self.status_msg = Some(format!("Creating agent '{}' ...", name));
         self.mode = Mode::Normal;
 
+        // Single source of truth: gateway WS handler creates the workspace,
+        // installs skills, writes catclaw.toml, AND registers the agent in
+        // memory — atomic from the TUI's perspective.
         tokio::spawn(async move {
-            let result: Result<String, String> = async {
-                AgentLoader::create_workspace(&workspace, &workspace_root, &name)
-                    .map_err(|e| e.to_string())?;
-                AgentLoader::install_remote_skills(&workspace_root).await
-                    .map_err(|e: crate::error::CatClawError| e.to_string())?;
-
-                let mut config = Config::load(&config_path)
-                    .map_err(|e| e.to_string())?;
-                if !config.agents.iter().any(|a| a.id == name) {
-                    config.agents.push(AgentConfig {
-                        id: name.clone(),
-                        workspace,
-                        default: false,
-                        model: None,
-                        fallback_model: None,
-                        approval: crate::config::ApprovalConfig::default(),
-                    });
-                    config.save(&config_path).map_err(|e| e.to_string())?;
-                }
-                Ok(name)
-            }.await;
+            let result: Result<String, String> = match client
+                .request("agents.new", serde_json::json!({"name": &name}))
+                .await
+            {
+                Ok(_) => Ok(name),
+                Err(e) => Err(e.to_string()),
+            };
             let _ = tx.send(result);
         });
     }
@@ -860,19 +829,29 @@ impl AgentsPanel {
         while let Ok(result) = self.create_rx.try_recv() {
             match result {
                 Ok(name) => {
-                    // Reload agent list from config
+                    // Sentinel-prefixed names indicate deletion, not creation.
+                    let (status, target_select) = if let Some(stripped) = name.strip_prefix("__deleted__:") {
+                        let deleted_id = stripped.to_string();
+                        (format!("Agent '{}' deleted", deleted_id), None)
+                    } else {
+                        (format!("Agent '{}' created", name), Some(name.clone()))
+                    };
                     if let Ok(config) = Config::load(&self.config_path) {
                         self.agents = Self::load_agents(&config);
                         self.workspace = config.general.workspace.clone();
-                        // Select the newly created agent
-                        if let Some(idx) = self.agents.iter().position(|a| a.id == name) {
-                            self.selected = idx;
+                        if let Some(target) = target_select {
+                            if let Some(idx) = self.agents.iter().position(|a| a.id == target) {
+                                self.selected = idx;
+                            }
+                        }
+                        if self.selected >= self.agents.len() && !self.agents.is_empty() {
+                            self.selected = self.agents.len() - 1;
                         }
                     }
-                    self.status_msg = Some(format!("Agent '{}' created", name));
+                    self.status_msg = Some(status);
                 }
                 Err(e) => {
-                    self.status_msg = Some(format!("Failed to create agent: {}", e));
+                    self.status_msg = Some(format!("Operation failed: {}", e));
                 }
             }
         }
@@ -1005,6 +984,15 @@ impl AgentsPanel {
         }
     }
 
+    /// Drain any background WS errors and surface the most recent one to the
+    /// status line. Replaces any optimistic "saved" message so the user
+    /// learns the change did not actually reach the gateway.
+    fn poll_op_errors(&mut self) {
+        while let Ok(msg) = self.op_err_rx.try_recv() {
+            self.status_msg = Some(msg);
+        }
+    }
+
     fn delete_selected(&mut self) {
         let Some(agent) = self.agents.get(self.selected) else {
             self.mode = Mode::Normal;
@@ -1018,31 +1006,50 @@ impl AgentsPanel {
         }
 
         let agent_id = agent.id.clone();
+        let client = self.client.clone();
+        let tx = self.create_tx.clone(); // reuse the create channel for completion notification
 
-        let config_result = Config::load(&self.config_path);
-        match config_result {
-            Ok(mut config) => {
-                config.agents.retain(|a| a.id != agent_id);
-                match config.save(&self.config_path) {
-                    Ok(()) => {
-                        self.agents.retain(|a| a.id != agent_id);
-                        if self.selected >= self.agents.len() && !self.agents.is_empty() {
-                            self.selected = self.agents.len() - 1;
-                        }
-                        self.status_msg =
-                            Some(format!("Deleted agent '{}' from config", agent_id));
-                    }
-                    Err(e) => {
-                        self.status_msg = Some(format!("Failed to save config: {}", e));
-                    }
-                }
-            }
-            Err(e) => {
-                self.status_msg = Some(format!("Failed to load config: {}", e));
-            }
-        }
-
+        self.status_msg = Some(format!("Deleting agent '{}' ...", agent_id));
         self.mode = Mode::Normal;
+
+        tokio::spawn(async move {
+            let result: Result<String, String> = match client
+                .request("agents.delete", serde_json::json!({"name": &agent_id}))
+                .await
+            {
+                Ok(_) => Ok(format!("__deleted__:{}", agent_id)),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Promote the selected agent to default via WS. Optimistic local update;
+    /// errors surface through `op_err_rx`.
+    fn set_selected_as_default(&mut self) {
+        let Some(agent) = self.agents.get_mut(self.selected) else { return; };
+        if agent.is_default {
+            self.status_msg = Some(format!("'{}' is already the default", agent.id));
+            return;
+        }
+        let agent_id = agent.id.clone();
+        // Flip flags locally.
+        for a in self.agents.iter_mut() {
+            a.is_default = a.id == agent_id;
+        }
+        self.status_msg = Some(format!("'{}' set as default", agent_id));
+
+        let client = self.client.clone();
+        let err_tx = self.op_err_tx.clone();
+        let aid = agent_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client
+                .request("agents.set_default", serde_json::json!({"agent_id": &aid}))
+                .await
+            {
+                let _ = err_tx.send(format!("Failed to set '{}' as default: {}", aid, e));
+            }
+        });
     }
 }
 
@@ -1092,6 +1099,10 @@ impl Component for AgentsPanel {
                         self.mode = Mode::ConfirmDelete;
                         self.status_msg = None;
                     }
+                    Action::None
+                }
+                KeyCode::Char('*') => {
+                    self.set_selected_as_default();
                     Action::None
                 }
                 _ => Action::None,
@@ -1346,6 +1357,7 @@ impl Component for AgentsPanel {
     fn render(&mut self, frame: &mut Frame, area: Rect) {
         self.poll_create();
         self.poll_skills();
+        self.poll_op_errors();
         match &self.mode {
             Mode::Normal | Mode::ConfirmDelete | Mode::EditModel | Mode::CreateAgent => self.render_normal(frame, area),
             Mode::SelectFile => self.render_select_file(frame, area),

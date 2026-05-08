@@ -75,6 +75,12 @@ enum Commands {
         agent: String,
     },
 
+    /// Remove a channel-to-agent binding
+    Unbind {
+        /// Binding pattern to remove (e.g., "discord:channel:123")
+        pattern: String,
+    },
+
     /// Manage configuration
     Config {
         #[command(subcommand)]
@@ -260,6 +266,11 @@ enum AgentCommands {
     },
     /// Delete an agent
     Delete {
+        /// Agent name/ID
+        name: String,
+    },
+    /// Mark an agent as the default (used when no binding matches)
+    SetDefault {
         /// Agent name/ID
         name: String,
     },
@@ -1079,21 +1090,78 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     cmd_agent_tools(&mut config, &cli.config, &name, allow, deny, approve).await?;
                 }
                 AgentCommands::Delete { name } => {
-                    cmd_agent_delete(&mut config, &cli.config, &name)?;
+                    cmd_agent_delete(&mut config, &cli.config, &name).await?;
+                }
+                AgentCommands::SetDefault { name } => {
+                    cmd_agent_set_default(&mut config, &cli.config, &name).await?;
                 }
             }
         }
 
         Some(Commands::Bind { pattern, agent }) => {
-            let mut config = Config::load(&cli.config)?;
-            // Remove existing binding with same pattern
-            config.bindings.retain(|b| b.pattern != pattern);
-            config.bindings.push(config::BindingConfig {
-                pattern: pattern.clone(),
-                agent: agent.clone(),
-            });
-            config.save(&cli.config)?;
-            println!("Bound '{}' → agent '{}' (saved to {})", pattern, agent, cli.config.display());
+            let config = Config::load(&cli.config)?;
+            // Try gateway WS first (hot-reload), fall back to file-only when offline.
+            let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+            if let Ok((client, _event_rx)) =
+                crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await
+            {
+                match client
+                    .request("bindings.set", serde_json::json!({"pattern": &pattern, "agent": &agent}))
+                    .await
+                {
+                    Ok(_) => println!(
+                        "Bound '{}' → agent '{}' (applied immediately)", pattern, agent
+                    ),
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                let mut config = config;
+                config.bindings.retain(|b| b.pattern != pattern);
+                config.bindings.push(config::BindingConfig {
+                    pattern: pattern.clone(),
+                    agent: agent.clone(),
+                });
+                config.save(&cli.config)?;
+                println!(
+                    "Bound '{}' → agent '{}' (gateway not running, saved to {} — will apply on next start)",
+                    pattern, agent, cli.config.display()
+                );
+            }
+        }
+
+        Some(Commands::Unbind { pattern }) => {
+            let config = Config::load(&cli.config)?;
+            let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+            if let Ok((client, _event_rx)) =
+                crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await
+            {
+                match client
+                    .request("bindings.delete", serde_json::json!({"pattern": &pattern}))
+                    .await
+                {
+                    Ok(_) => println!("Unbound '{}' (applied immediately)", pattern),
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                let mut config = config;
+                let before = config.bindings.len();
+                config.bindings.retain(|b| b.pattern != pattern);
+                if config.bindings.len() == before {
+                    eprintln!("No binding matched pattern '{}'", pattern);
+                    std::process::exit(1);
+                }
+                config.save(&cli.config)?;
+                println!(
+                    "Unbound '{}' (gateway not running, saved to {} — will apply on next start)",
+                    pattern, cli.config.display()
+                );
+            }
         }
 
         Some(Commands::Config { command }) => {
@@ -3381,16 +3449,37 @@ fn start_background_gateway_quiet(config_path: &std::path::Path) -> std::result:
 }
 
 async fn cmd_agent_new(config: &mut Config, config_path: &Path, name: &str) -> Result<()> {
-    // Check if agent already exists
+    // Try gateway WS first so the new agent is registered live (no restart).
+    // Falls back to direct file write when the gateway is not running.
+    let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+    if let Ok((client, _event_rx)) =
+        crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await
+    {
+        match client.request("agents.new", serde_json::json!({"name": name})).await {
+            Ok(resp) => {
+                let workspace = resp
+                    .get("workspace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                println!("Agent '{}' created at {} (applied immediately)", name, workspace);
+                println!("Edit SOUL.md: catclaw agent edit {} soul", name);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Fallback: gateway offline → direct file write.
     if config.agents.iter().any(|a| a.id == name) {
         println!("Agent '{}' already exists.", name);
         return Ok(());
     }
-
     let workspace = config.general.workspace.join("agents").join(name);
     AgentLoader::create_workspace(&workspace, &config.general.workspace, name)?;
     AgentLoader::install_remote_skills(&config.general.workspace).await?;
-
     config.agents.push(crate::config::AgentConfig {
         id: name.to_string(),
         workspace: workspace.clone(),
@@ -3401,7 +3490,11 @@ async fn cmd_agent_new(config: &mut Config, config_path: &Path, name: &str) -> R
     });
     config.save(config_path)?;
 
-    println!("Agent '{}' created at {}", name, workspace.display());
+    println!(
+        "Agent '{}' created at {} (gateway not running, saved to file)",
+        name,
+        workspace.display()
+    );
     println!("Edit SOUL.md: catclaw agent edit {} soul", name);
 
     Ok(())
@@ -3495,15 +3588,39 @@ async fn cmd_agent_tools(
         .and_then(|v| v.get("require_approval")?.as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()))
         .unwrap_or_default();
 
-    let final_allowed = if let Some(ref a) = allow {
+    let final_allowed: Vec<String> = if let Some(ref a) = allow {
         a.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
     } else { cur_allowed };
-    let final_denied = if let Some(ref d) = deny {
+    let final_denied: Vec<String> = if let Some(ref d) = deny {
         d.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
     } else { cur_denied };
     let final_approval: Vec<String> = if let Some(ref ap) = approve {
         ap.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
     } else { cur_approval };
+
+    // Try gateway WS first — gateway writes tools.toml on its side and reloads
+    // the AgentRegistry in one step. Fall back to local file write when offline.
+    let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+    if let Ok((client, _event_rx)) = crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await {
+        match client.request(
+            "agents.set_tools",
+            serde_json::json!({
+                "agent_id": name,
+                "allowed": final_allowed,
+                "denied": final_denied,
+                "require_approval": final_approval,
+            }),
+        ).await {
+            Ok(_) => {
+                println!("Updated tools for agent '{}' (applied immediately)", name);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     let fmt_list = |v: &[String]| -> String {
         v.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(", ")
@@ -3513,17 +3630,7 @@ async fn cmd_agent_tools(
         content.push_str(&format!("require_approval = [{}]\n", fmt_list(&final_approval)));
     }
     std::fs::write(&tools_path, content)?;
-
-    // Notify gateway to hot-reload (best-effort, ignore if gateway not running)
-    let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
-    if let Ok((client, _event_rx)) = crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await {
-        match client.request("agents.reload_tools", serde_json::json!({"agent_id": name})).await {
-            Ok(_) => println!("Updated tools for agent '{}' (applied immediately)", name),
-            Err(_) => println!("Updated tools for agent '{}' (restart gateway to apply)", name),
-        }
-    } else {
-        println!("Updated tools for agent '{}' (gateway not running, will apply on next start)", name);
-    }
+    println!("Updated tools for agent '{}' (gateway not running, will apply on next start)", name);
 
     Ok(())
 }
@@ -3859,7 +3966,29 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
-fn cmd_agent_delete(config: &mut Config, config_path: &Path, name: &str) -> Result<()> {
+async fn cmd_agent_delete(config: &mut Config, config_path: &Path, name: &str) -> Result<()> {
+    let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+    if let Ok((client, _event_rx)) =
+        crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await
+    {
+        match client.request("agents.delete", serde_json::json!({"name": name})).await {
+            Ok(resp) => {
+                let workspace = resp.get("workspace").and_then(|v| v.as_str()).unwrap_or("");
+                println!(
+                    "Agent '{}' removed from config (applied immediately). Workspace at {} was NOT deleted.",
+                    name, workspace
+                );
+                println!("Delete manually if needed: rm -rf {}", workspace);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Fallback: gateway offline → direct file write.
     let idx = config
         .agents
         .iter()
@@ -3872,12 +4001,41 @@ fn cmd_agent_delete(config: &mut Config, config_path: &Path, name: &str) -> Resu
     config.save(config_path)?;
 
     println!(
-        "Agent '{}' removed from config. Workspace at {} was NOT deleted.",
+        "Agent '{}' removed from config (gateway not running). Workspace at {} was NOT deleted.",
         name,
         agent.workspace.display()
     );
     println!("Delete manually if needed: rm -rf {}", agent.workspace.display());
 
+    Ok(())
+}
+
+async fn cmd_agent_set_default(config: &mut Config, config_path: &Path, name: &str) -> Result<()> {
+    let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+    if let Ok((client, _event_rx)) =
+        crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await
+    {
+        match client.request("agents.set_default", serde_json::json!({"agent_id": name})).await {
+            Ok(_) => {
+                println!("Agent '{}' is now the default (applied immediately)", name);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Fallback: gateway offline → flip flags directly.
+    if !config.agents.iter().any(|a| a.id == name) {
+        return Err(crate::error::CatClawError::Agent(format!("agent '{}' not found", name)));
+    }
+    for a in config.agents.iter_mut() {
+        a.default = a.id == name;
+    }
+    config.save(config_path)?;
+    println!("Agent '{}' is now the default (gateway not running, saved to file)", name);
     Ok(())
 }
 

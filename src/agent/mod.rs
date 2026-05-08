@@ -615,8 +615,20 @@ impl AgentRegistry {
         self.agents.values().collect()
     }
 
-    pub fn add(&mut self, agent: Agent) {
-        self.agents.insert(agent.id.clone(), agent);
+    /// Insert an agent. If no default is currently set (e.g. zero-agent
+    /// gateway being seeded for the first time), the new agent becomes the
+    /// default. Returns `true` when this call promoted the agent to default
+    /// so the caller can sync `MessageRouter.default_agent_id`.
+    pub fn add(&mut self, agent: Agent) -> bool {
+        let id = agent.id.clone();
+        let promoted = self.default_id.is_none();
+        if promoted {
+            self.default_id = Some(id.clone());
+        }
+        let mut to_insert = agent;
+        to_insert.is_default = promoted;
+        self.agents.insert(id, to_insert);
+        promoted
     }
 
     pub fn remove(&mut self, id: &str) -> Option<Agent> {
@@ -649,5 +661,17 @@ impl AgentRegistry {
         for agent in self.agents.values_mut() {
             agent.timezone = tz.clone();
         }
+    }
+
+    /// Mark `agent_id` as the default. Updates the `is_default` flag on all
+    /// agents and the registry's `default_id`. No-op if the agent is unknown.
+    pub fn set_default(&mut self, agent_id: &str) {
+        if !self.agents.contains_key(agent_id) {
+            return;
+        }
+        for (id, agent) in self.agents.iter_mut() {
+            agent.is_default = id == agent_id;
+        }
+        self.default_id = Some(agent_id.to_string());
     }
 }

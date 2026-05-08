@@ -58,6 +58,16 @@ pub struct GatewayHandle {
     /// LINE adapter (if configured). Stored as concrete type so the webhook
     /// handler can call `handle_webhook_payload` + `verify_signature` directly.
     pub line_adapter: Option<Arc<LineAdapter>>,
+    /// Message router (held so WS handlers can hot-reload bindings).
+    /// `MessageRouter::set_bindings` takes `&self` and uses an internal RwLock.
+    pub router: Arc<crate::router::MessageRouter>,
+    /// Serialises every WS handler that does the disk-first → mutate → write
+    /// → memory pattern. Without this, two concurrent calls (e.g. two
+    /// `agents.new` requests racing) would both pass their duplicate-check
+    /// against the same disk snapshot and produce a torn write. The critical
+    /// section spans an `.await` (e.g. `install_remote_skills`), hence
+    /// `tokio::sync::Mutex` instead of `std::sync::Mutex`.
+    pub config_write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Start gateway services (DB, agents, session manager, channel adapters, scheduler)
@@ -356,10 +366,11 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
 
     let router_adapters = adapter_map.clone();
     let router_event_bus = event_bus.clone();
+    let router_for_loop = router.clone();
     tokio::spawn(async move {
         info!("gateway message router ready");
         while let Some(msg) = msg_rx.recv().await {
-            let router = router.clone();
+            let router = router_for_loop.clone();
             let adapter = router_adapters.get(msg.channel_type.as_str()).cloned();
             let bus = router_event_bus.clone();
 
@@ -618,6 +629,8 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         embedder: embedder.clone(),
         backend_adapter,
         line_adapter,
+        router,
+        config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // 10. Start gateway server (WS + MCP on single port)

@@ -1365,10 +1365,13 @@ pending requests can only be resolved by the user via channel UI, not via CLI.
 catclaw agent new <name>       # Create new agent (also installs default skills)
 catclaw agent list             # List all agents
 catclaw agent edit <name> <file>  # Open file in $EDITOR
-catclaw agent delete <name>    # Remove agent from config
+catclaw agent delete <name>    # Remove agent from config (workspace files preserved)
+catclaw agent set-default <name>  # Mark as default (used when no binding matches)
 catclaw agent tools <name>     # Show current tool permissions
 catclaw agent tools <name> --allow "Read,Edit,Bash" --deny "WebFetch" --approve "Bash"
 ```
+
+All `catclaw agent` commands hot-reload through the running gateway via WS — changes apply immediately, no restart needed. If the gateway is offline, the change is saved to `catclaw.toml` and loads on next start. The default agent cannot be deleted; promote a different agent first with `set-default`.
 
 `<file>` values: `soul`, `user`, `identity`, `agents`, `tools`, `boot`, `heartbeat`
 
@@ -1418,8 +1421,11 @@ Transcripts saved to transcripts/{session_id}.jsonl.
 Bindings route messages from a specific channel/context to a specific agent.
 
 ```bash
-catclaw bind <pattern> <agent>
+catclaw bind   <pattern> <agent>   # Add or replace a binding
+catclaw unbind <pattern>           # Remove a binding
 ```
+
+Both commands talk to the running gateway via WS, so changes apply immediately — no gateway restart needed. (When the gateway is offline, the change is written to `catclaw.toml` and loads on next start.)
 
 **Pattern format** (most specific wins):
 

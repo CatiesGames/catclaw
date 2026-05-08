@@ -1,12 +1,15 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
+use tokio::sync::mpsc;
 
 use super::theme::Theme;
 use super::{Action, Component};
 use crate::config::{BindingConfig, Config};
+use crate::ws_client::GatewayClient;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Mode {
@@ -21,7 +24,6 @@ enum Mode {
 }
 
 pub struct BindingsPanel {
-    config_path: PathBuf,
     bindings: Vec<BindingConfig>,
     selected: usize,
     mode: Mode,
@@ -35,14 +37,23 @@ pub struct BindingsPanel {
     autocomplete_idx: usize,
     /// Status message
     status_msg: Option<String>,
+    /// WS client — gateway is the sole writer of catclaw.toml + router state
+    client: Arc<GatewayClient>,
+    /// Reports failures from background WS calls so the user notices when a
+    /// "saved" message was actually lost in transit.
+    op_err_tx: mpsc::UnboundedSender<String>,
+    op_err_rx: mpsc::UnboundedReceiver<String>,
 }
 
 impl BindingsPanel {
-    pub fn new(config: &Config, config_path: PathBuf) -> Self {
+    /// `_config_path` is unused (the gateway is the sole writer now), but kept
+    /// in the signature so the construction site looks identical to its
+    /// siblings (agents/config panels).
+    pub fn new(config: &Config, _config_path: PathBuf, client: Arc<GatewayClient>) -> Self {
         let agent_ids: Vec<String> = config.agents.iter().map(|a| a.id.clone()).collect();
+        let (op_err_tx, op_err_rx) = mpsc::unbounded_channel();
 
         BindingsPanel {
-            config_path,
             bindings: config.bindings.clone(),
             selected: 0,
             mode: Mode::Normal,
@@ -51,27 +62,17 @@ impl BindingsPanel {
             agent_ids,
             autocomplete_idx: 0,
             status_msg: None,
+            client,
+            op_err_tx,
+            op_err_rx,
         }
     }
 
-    /// Reload bindings from disk
-    fn refresh(&mut self) {
-        if let Ok(config) = Config::load(&self.config_path) {
-            self.bindings = config.bindings;
-            if self.selected >= self.bindings.len() && !self.bindings.is_empty() {
-                self.selected = self.bindings.len() - 1;
-            }
+    /// Drain background WS errors and surface the latest one.
+    fn poll_op_errors(&mut self) {
+        while let Ok(msg) = self.op_err_rx.try_recv() {
+            self.status_msg = Some(msg);
         }
-    }
-
-    /// Save current bindings back to catclaw.toml
-    fn save_to_toml(&self) -> std::result::Result<(), String> {
-        let mut config = Config::load(&self.config_path)
-            .map_err(|e| format!("Failed to load config: {}", e))?;
-        config.bindings = self.bindings.clone();
-        config
-            .save(&self.config_path)
-            .map_err(|e| format!("Failed to save config: {}", e))
     }
 
     /// Get autocomplete suggestions filtered by current agent_buf input
@@ -106,23 +107,26 @@ impl BindingsPanel {
             return;
         }
 
-        // Remove existing binding with same pattern
+        // Optimistic local update; gateway is authoritative.
         self.bindings.retain(|b| b.pattern != pattern);
         self.bindings.push(BindingConfig {
             pattern: pattern.clone(),
             agent: agent.clone(),
         });
+        self.status_msg = Some(format!("✅ Bound '{}' → '{}'", pattern, agent));
 
-        match self.save_to_toml() {
-            Ok(()) => {
-                self.status_msg = Some(format!("✅ Bound '{}' → '{}'", pattern, agent));
+        let client = self.client.clone();
+        let err_tx = self.op_err_tx.clone();
+        let p = pattern.clone();
+        let a = agent.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.request(
+                "bindings.set",
+                serde_json::json!({"pattern": &p, "agent": &a}),
+            ).await {
+                let _ = err_tx.send(format!("Failed to save binding '{}': {}", p, e));
             }
-            Err(e) => {
-                self.status_msg = Some(format!("❌ {}", e));
-                // Revert
-                self.refresh();
-            }
-        }
+        });
 
         self.mode = Mode::Normal;
         self.pattern_buf.clear();
@@ -133,19 +137,22 @@ impl BindingsPanel {
         if let Some(entry) = self.bindings.get(self.selected) {
             let pattern = entry.pattern.clone();
             self.bindings.retain(|b| b.pattern != pattern);
-
-            match self.save_to_toml() {
-                Ok(()) => {
-                    if self.selected >= self.bindings.len() && !self.bindings.is_empty() {
-                        self.selected = self.bindings.len() - 1;
-                    }
-                    self.status_msg = Some(format!("🗑️ Deleted binding '{}'", pattern));
-                }
-                Err(e) => {
-                    self.status_msg = Some(format!("❌ {}", e));
-                    self.refresh();
-                }
+            if self.selected >= self.bindings.len() && !self.bindings.is_empty() {
+                self.selected = self.bindings.len() - 1;
             }
+            self.status_msg = Some(format!("🗑️ Deleted binding '{}'", pattern));
+
+            let client = self.client.clone();
+            let err_tx = self.op_err_tx.clone();
+            let p = pattern.clone();
+            tokio::spawn(async move {
+                if let Err(e) = client.request(
+                    "bindings.delete",
+                    serde_json::json!({"pattern": &p}),
+                ).await {
+                    let _ = err_tx.send(format!("Failed to delete binding '{}': {}", p, e));
+                }
+            });
         }
         self.mode = Mode::Normal;
     }
@@ -277,6 +284,7 @@ impl Component for BindingsPanel {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect) {
+        self.poll_op_errors();
         let status_height = if matches!(self.mode, Mode::AddPattern) { 2 } else { 1 };
         let chunks = Layout::default()
             .direction(Direction::Vertical)

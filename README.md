@@ -170,7 +170,10 @@ catclaw bind "discord:channel:222222" research    # Bind a channel to an agent
 catclaw bind "telegram:*" main                    # Bind all Telegram to main
 catclaw bind "slack:channel:C12345" research      # Bind a Slack channel to an agent
 catclaw bind "*" main                             # Global fallback
+catclaw unbind "discord:channel:222222"           # Remove a binding
 ```
+
+Bindings hot-reload through the running gateway — no restart needed. When the gateway is offline, changes save to `catclaw.toml` and load on next start.
 
 ### Sessions
 

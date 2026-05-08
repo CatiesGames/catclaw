@@ -18,9 +18,15 @@ const MAX_DOWNLOAD_SIZE: u64 = 50 * 1024 * 1024;
 pub struct MessageRouter {
     session_manager: Arc<SessionManager>,
     agent_registry: Arc<std::sync::RwLock<AgentRegistry>>,
-    /// Bindings from catclaw.toml
-    bindings: Vec<BindingEntry>,
-    default_agent_id: String,
+    /// Bindings from catclaw.toml. Wrapped in RwLock so the WS server can
+    /// hot-reload them without restarting the gateway. The lock is only
+    /// acquired inside the synchronous `resolve_agent()` — never held across
+    /// an `.await` (see CLAUDE.md lesson #3).
+    bindings: std::sync::RwLock<Vec<BindingEntry>>,
+    /// Default agent for unmatched messages. Wrapped so WS handlers can
+    /// hot-update when the user runs `agents.set_default` or when the first
+    /// agent is added on a previously-empty gateway.
+    default_agent_id: std::sync::RwLock<String>,
     /// Workspace root for storing downloaded attachments
     workspace: PathBuf,
     /// HTTP client for downloading attachments
@@ -44,23 +50,11 @@ impl MessageRouter {
         default_agent_id: String,
         workspace: PathBuf,
     ) -> Self {
-        let mut bindings: Vec<BindingEntry> = config_bindings
-            .iter()
-            .map(|b| BindingEntry {
-                pattern: b.pattern.clone(),
-                agent_id: b.agent.clone(),
-                specificity: pattern_specificity(&b.pattern),
-            })
-            .collect();
-
-        // Sort by specificity (most specific first)
-        bindings.sort_by_key(|b| std::cmp::Reverse(b.specificity));
-
         MessageRouter {
             session_manager,
             agent_registry,
-            bindings,
-            default_agent_id,
+            bindings: std::sync::RwLock::new(build_binding_entries(config_bindings)),
+            default_agent_id: std::sync::RwLock::new(default_agent_id),
             workspace,
             http_client: reqwest::Client::new(),
             adapters: Arc::new(HashMap::new()),
@@ -70,6 +64,21 @@ impl MessageRouter {
     /// Inject the adapter map (after gateway constructs it). Call once at startup.
     pub fn set_adapters(&mut self, adapters: Arc<HashMap<String, Arc<dyn ChannelAdapter>>>) {
         self.adapters = adapters;
+    }
+
+    /// Replace the binding table at runtime. Called from the WS handler when
+    /// bindings change so we don't need to restart the gateway.
+    pub fn set_bindings(&self, config_bindings: &[BindingConfig]) {
+        let new_entries = build_binding_entries(config_bindings);
+        *self.bindings.write().unwrap() = new_entries;
+    }
+
+    /// Update the fallback agent used when no binding matches. Invoked from
+    /// `agents.set_default`, and from `agents.new` when the first-ever agent
+    /// is created on a previously-empty gateway. Lock semantics match
+    /// `set_bindings` — write lock acquired and released inside this sync fn.
+    pub fn set_default_agent_id(&self, id: String) {
+        *self.default_agent_id.write().unwrap() = id;
     }
 
     /// Convert inbound attachments into a list of human-friendly mirror lines
@@ -577,17 +586,35 @@ impl MessageRouter {
             Some("*".to_string()),
         ];
 
-        // Find the most specific matching binding
+        // Find the most specific matching binding. The read lock is acquired
+        // and released entirely inside this synchronous function — never held
+        // across an `.await` (CLAUDE.md lesson #3).
+        let bindings = self.bindings.read().unwrap();
         for candidate in candidates.into_iter().flatten() {
-            for binding in &self.bindings {
+            for binding in bindings.iter() {
                 if binding.pattern == candidate {
                     return (binding.agent_id.clone(), true);
                 }
             }
         }
+        drop(bindings);
 
-        (self.default_agent_id.clone(), false)
+        (self.default_agent_id.read().unwrap().clone(), false)
     }
+}
+
+/// Build BindingEntry vec from raw config (compute specificity, sort).
+fn build_binding_entries(config_bindings: &[BindingConfig]) -> Vec<BindingEntry> {
+    let mut entries: Vec<BindingEntry> = config_bindings
+        .iter()
+        .map(|b| BindingEntry {
+            pattern: b.pattern.clone(),
+            agent_id: b.agent.clone(),
+            specificity: pattern_specificity(&b.pattern),
+        })
+        .collect();
+    entries.sort_by_key(|b| std::cmp::Reverse(b.specificity));
+    entries
 }
 
 /// Format a byte count into a human-readable string (e.g., "12.3 KB", "1.5 MB").
