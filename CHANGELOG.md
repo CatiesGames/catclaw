@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.46.3](https://github.com/CatiesGames/catclaw/compare/v0.46.2...v0.46.3) (2026-05-08)
+
+
+### Bug Fixes
+
+* **gateway:** unify all config writes through WS to prevent silent data loss ([22096f0](https://github.com/CatiesGames/catclaw/commit/22096f0ab23fe944a6300a6887dc063e47d6f318))
+
 ## [0.46.2](https://github.com/CatiesGames/catclaw/compare/v0.46.1...v0.46.2) (2026-05-04)
 
 
