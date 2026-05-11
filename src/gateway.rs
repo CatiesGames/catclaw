@@ -171,6 +171,13 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 adapter_filters.push(filter);
                 let adapter = Arc::new(da);
 
+                // Wire state_db + Config so the Discord Handler can auto-register
+                // DM senders as unknown contacts. Must happen before start(),
+                // since Handler captures the value at start() time.
+                adapter
+                    .set_contacts_context(state_db.clone(), gw_config.clone())
+                    .await;
+
                 // Take approval_rx before moving adapter into the start task
                 if let Some(rx) = adapter.take_approval_rx().await {
                     approval_receivers.push(rx);

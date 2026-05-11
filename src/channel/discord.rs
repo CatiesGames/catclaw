@@ -38,6 +38,16 @@ pub struct DiscordAdapter {
     contact_action_tx: mpsc::UnboundedSender<crate::contacts::ContactAction>,
     contact_action_rx:
         tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<crate::contacts::ContactAction>>>,
+    /// State DB + Config for DM-only contact auto-registration. Injected by
+    /// gateway via `set_contacts_context` before `start()`. None = registration
+    /// disabled (older callers without contacts wiring).
+    contacts_state: RwLock<Option<ContactsContext>>,
+}
+
+#[derive(Clone)]
+struct ContactsContext {
+    state_db: Arc<crate::state::StateDb>,
+    config: Arc<std::sync::RwLock<crate::config::Config>>,
 }
 
 struct Handler {
@@ -49,6 +59,9 @@ struct Handler {
     social_action_tx: mpsc::UnboundedSender<(i64, String, Option<String>)>,
     /// Channel to send contact work-card button actions back to gateway.
     contact_action_tx: mpsc::UnboundedSender<crate::contacts::ContactAction>,
+    /// Contacts context for DM-only auto-registration. None if gateway didn't
+    /// inject it (contacts feature off or older test setup).
+    contacts: Option<ContactsContext>,
 }
 
 impl DiscordAdapter {
@@ -67,7 +80,21 @@ impl DiscordAdapter {
             social_action_rx: tokio::sync::Mutex::new(Some(social_action_rx)),
             contact_action_tx,
             contact_action_rx: tokio::sync::Mutex::new(Some(contact_action_rx)),
+            contacts_state: RwLock::new(None),
         }
+    }
+
+    /// Inject the state DB + shared Config so the Handler can auto-register
+    /// DM senders as `role=unknown` contacts (mirroring the LINE adapter).
+    /// Must be called BEFORE `start()` — Handler reads the value once at
+    /// `start()` time and captures it by clone.
+    pub async fn set_contacts_context(
+        &self,
+        state_db: Arc<crate::state::StateDb>,
+        config: Arc<std::sync::RwLock<crate::config::Config>>,
+    ) {
+        let mut slot = self.contacts_state.write().await;
+        *slot = Some(ContactsContext { state_db, config });
     }
 
     /// Take the approval receiver (called once by gateway to wire into approval handling).
@@ -212,6 +239,36 @@ impl EventHandler for Handler {
         };
 
         let guild_id_str = msg.guild_id.map(|g| g.get().to_string());
+
+        // DM-only contact auto-registration. Guild messages are workspace
+        // chat (admin ↔ agent) and intentionally bypass the contacts system —
+        // see lesson #28 in CLAUDE.md. Mirror the LINE adapter's behavior:
+        // create a `role=unknown` contact + bind discord user_id, idempotent.
+        if is_dm {
+            if let Some(ref cx) = self.contacts {
+                let contacts_enabled = {
+                    let cfg = cx.config.read().unwrap();
+                    cfg.contacts.enabled
+                };
+                if contacts_enabled {
+                    let default_agent = {
+                        let cfg = cx.config.read().unwrap();
+                        cfg.default_agent_id().unwrap_or("main").to_string()
+                    };
+                    let display_name = msg
+                        .author
+                        .global_name
+                        .clone()
+                        .unwrap_or_else(|| msg.author.name.clone());
+                    ensure_unknown_discord_contact(
+                        &cx.state_db,
+                        &default_agent,
+                        &sender_id,
+                        &display_name,
+                    );
+                }
+            }
+        }
 
         let ctx = MsgContext {
             channel_type: ChannelType::Discord,
@@ -732,12 +789,14 @@ impl ChannelAdapter for DiscordAdapter {
             | GatewayIntents::MESSAGE_CONTENT
             | GatewayIntents::GUILDS;
 
+        let contacts = self.contacts_state.read().await.clone();
         let handler = Handler {
             msg_tx,
             filter: self.filter.clone(),
             approval_tx: self.approval_tx.clone(),
             social_action_tx: self.social_action_tx.clone(),
             contact_action_tx: self.contact_action_tx.clone(),
+            contacts,
         };
 
         let mut client = Client::builder(&self.token, intents)
@@ -1969,4 +2028,46 @@ fn build_contact_work_card_components(
     };
 
     (embed, components)
+}
+
+/// Idempotent DM contact registration for Discord. Mirrors LINE's
+/// `ensure_unknown_contact`: if the discord user_id is already bound, no-op;
+/// otherwise create a `role=unknown` contact (with the supplied display_name)
+/// and bind the channel. All failures log + return — non-fatal.
+fn ensure_unknown_discord_contact(
+    db: &crate::state::StateDb,
+    default_agent_id: &str,
+    user_id: &str,
+    display_name: &str,
+) {
+    match db.get_contact_by_platform_user("discord", user_id) {
+        Ok(Some(_)) => return, // already bound
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, user_id, "ensure_unknown_discord_contact: lookup failed");
+            return;
+        }
+    }
+    let name = if display_name.is_empty() {
+        format!("Discord:{}", &user_id[..user_id.len().min(8)])
+    } else {
+        display_name.to_string()
+    };
+    let contact = crate::contacts::Contact::new(default_agent_id, name);
+    let contact_id = contact.id.clone();
+    if let Err(e) = db.insert_contact(&contact) {
+        tracing::warn!(error = %e, user_id, "ensure_unknown_discord_contact: insert failed");
+        return;
+    }
+    let mut ch = crate::contacts::ContactChannel::new(&contact_id, "discord", user_id);
+    ch.is_primary = true;
+    if let Err(e) = db.upsert_contact_channel(&ch) {
+        tracing::warn!(error = %e, user_id, contact_id = %contact_id, "ensure_unknown_discord_contact: bind failed");
+        return;
+    }
+    tracing::info!(
+        user_id,
+        contact_id = %contact_id,
+        "auto-registered unknown Discord DM contact"
+    );
 }

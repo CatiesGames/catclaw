@@ -884,6 +884,19 @@ Discord uses a variant of Markdown:
 
 **Do NOT use MCP tools to reply to the current conversation.** Just output your response text — the gateway sends it automatically. MCP tools below are for proactive operations only (e.g. "post in #general", "react to a message").
 
+## Contacts (DM only)
+
+CatClaw treats Discord DMs and guild messages **asymmetrically**:
+
+- **DM inbound** → if `contacts.enabled=true`, the sender is auto-registered as a `role=unknown` contact. The router then routes the message through the contacts pipeline (mirror to forward_channel, approval gate, etc.) — same as LINE. After you promote the contact to `client`, your terminal text replies automatically go through `submit_reply` → approval work card.
+- **Guild inbound** → completely OUT of scope for contacts. Even if the sender's Discord user_id has been bound to a contact (cross-platform identity), guild messages are NOT routed through the contacts pipeline. Guilds are treated as a workspace where admin chats with the agent.
+
+**Practical rules:**
+- Customer service / personal client conversations → use **DM**, contacts pipeline handles approval + audit trail.
+- Team workspace / admin → agent dialogue → use **guild channels**, plain routing, no contact gates.
+- The same person can have BOTH (e.g. admin who also wants to test the DM flow): their DM goes through pipeline, their guild messages don't.
+- Cross-platform identity: a single contact can be bound to LINE userId + Discord user_id simultaneously. `contacts_reply` picks the right adapter from `via_platform` or last-active channel.
+
 ## Platform Operations
 
 You have access to Discord tools provided by CatClaw via MCP. Use them directly as tool calls:
@@ -1687,9 +1700,20 @@ CatClaw 的 contacts 系統是「人」的抽象,跨 Discord/Telegram/Slack/LINE
 tokens)。若使用者描述了對話對象管理需求(「幫我管客戶」「把他設為學員」...)
 但你看不到 `contacts_*` 工具,請提示他們開啟此 key。
 
-**LINE 自動建檔(無 LLM)**:contacts 啟用後,任何 LINE 用戶傳訊或加好友都會自動
-建立 `role=unknown` contact 並綁定 LINE userId — **不會觸發 agent**。這是「儲存
-備查」狀態。
+**平台自動建檔(無 LLM)**:contacts 啟用後,**LINE 全部訊息**和 **Discord DM**
+會自動建立 `role=unknown` contact 並綁定 platform user_id — **不會觸發 agent**。
+這是「儲存備查」狀態。
+
+**Discord 不對稱設計**:
+- Discord DM 進入 contacts 系統(同 LINE 邏輯)。
+- Discord guild(server)頻道**不進入** contacts — 那是 admin 跟你的工作場域,
+  guild 訊息照標準 dispatch 走、不會被 contact pipeline 攔截、不需要 approval。
+- 即使某 Discord 用戶已被綁為 contact,他在 guild 發訊息仍然走標準路徑(只有
+  他 DM 你時才走 contacts pipeline)。
+- 用戶可以**跨平台**綁定同一個 contact(同時綁 LINE userId 跟 Discord
+  user_id),`contacts_reply` 自動依 via_platform / last-active 挑出送的平台。
+- Telegram / Slack 目前**未實作**自動建檔 — 需要 contacts 時手動 `contacts_create
+  + contacts_bind_channel`。
 
 升級流程(由人類發起):
 1. 使用者在 TUI Contacts 看到未分類列表,或從 `unknown_inbox_channel` 鏡射
