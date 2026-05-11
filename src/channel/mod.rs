@@ -144,6 +144,24 @@ pub trait ChannelAdapter: Send + Sync {
     /// Send an outbound message
     async fn send(&self, msg: OutboundMessage) -> Result<()>;
 
+    /// Send a plain-text message directly to a platform user (DM). On most
+    /// platforms a "user id" is also a valid send target, so the default just
+    /// forwards to `send` with the user id in both `channel_id` and `peer_id`.
+    /// Discord overrides this: a user id is NOT a channel id there — the
+    /// adapter must open a DM channel first (`create_dm_channel`) before
+    /// posting. Used by the contacts pipeline for outbound replies.
+    async fn send_to_user(&self, user_id: &str, text: &str) -> Result<()> {
+        self.send(OutboundMessage {
+            channel_type: ChannelType::Tui, // placeholder; concrete adapters ignore
+            channel_id: user_id.to_string(),
+            peer_id: user_id.to_string(),
+            text: text.to_string(),
+            thread_id: None,
+            reply_to_message_id: None,
+        })
+        .await
+    }
+
     /// Start a typing indicator (returns guard that stops on drop)
     async fn start_typing(&self, channel_id: &str, peer_id: &str) -> Result<TypingGuard>;
 

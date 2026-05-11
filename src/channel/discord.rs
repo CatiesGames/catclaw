@@ -849,6 +849,28 @@ impl ChannelAdapter for DiscordAdapter {
         Ok(())
     }
 
+    /// DM a Discord user. Unlike LINE, a Discord user id is NOT a channel id —
+    /// we must open (or reuse) a DM channel via `create_dm_channel` first.
+    /// serenity caches the DM channel, so repeat calls are cheap.
+    async fn send_to_user(&self, user_id: &str, text: &str) -> Result<()> {
+        let http = self.http.read().await;
+        let http = http
+            .as_ref()
+            .ok_or_else(|| CatClawError::Discord("not connected".to_string()))?;
+        let uid = user_id
+            .parse::<u64>()
+            .map_err(|_| CatClawError::Discord(format!("invalid discord user id '{}'", user_id)))?;
+        let dm = UserId::new(uid)
+            .create_dm_channel(http)
+            .await
+            .map_err(|e| CatClawError::Discord(format!("failed to open DM channel: {}", e)))?;
+        dm.id
+            .send_message(http, CreateMessage::new().content(text))
+            .await
+            .map_err(|e| CatClawError::Discord(format!("failed to send DM: {}", e)))?;
+        Ok(())
+    }
+
     async fn send_approval(
         &self,
         channel_id: &str,

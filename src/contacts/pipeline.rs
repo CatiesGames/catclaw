@@ -551,16 +551,11 @@ async fn send_to_contact(
         }
     };
 
-    adapter
-        .send(OutboundMessage {
-            channel_type: ChannelType::Tui, // placeholder — concrete adapters ignore (see send_approval)
-            channel_id: chosen.platform_user_id.clone(),
-            peer_id: chosen.platform_user_id.clone(),
-            text,
-            thread_id: None,
-            reply_to_message_id: None,
-        })
-        .await
+    // `send_to_user` is the right call here, not `send`: the bound channel
+    // identifier is a *user id*, which on Discord is not a channel id (needs
+    // a DM channel opened first). Most adapters' default impl just forwards
+    // to `send` with the user id as channel_id, which is correct for them.
+    adapter.send_to_user(&chosen.platform_user_id, &text).await
 }
 
 /// Mirror an inbound message to a specific target string (e.g. unknown_inbox_channel).
