@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.48.1](https://github.com/CatiesGames/catclaw/compare/v0.48.0...v0.48.1) (2026-05-11)
+
+
+### Bug Fixes
+
+* **contacts:** DM contact replies on Discord — open DM channel first ([f728254](https://github.com/CatiesGames/catclaw/commit/f728254cbee19b3884137a66a081478edff46293))
+
 ## [0.48.0](https://github.com/CatiesGames/catclaw/compare/v0.47.1...v0.48.0) (2026-05-11)
 
 
