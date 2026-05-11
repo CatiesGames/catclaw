@@ -8,3 +8,5 @@
 /my-agents
 *.p12
 *.certSigningRequest
+.DS_Store
+/.claude/
