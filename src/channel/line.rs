@@ -396,6 +396,36 @@ impl LineAdapter {
         Ok(())
     }
 
+    /// Push a plain text message to a userId / groupId / roomId. Used by the
+    /// `send_message` MCP tool for proactive outreach (the router's own
+    /// inbound-reply path uses `send` + `contacts::pipeline::submit_reply` —
+    /// don't repurpose this for replying to current inbound).
+    async fn send_text(&self, target: &str, text: &str) -> Result<Value> {
+        let body = serde_json::json!({
+            "to": target,
+            "messages": [{
+                "type": "text",
+                "text": text,
+            }]
+        });
+        let resp = self
+            .http
+            .post(format!("{}/message/push", LINE_API))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CatClawError::Channel(format!("line text push: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let txt = resp.text().await.unwrap_or_default();
+            return Err(CatClawError::Channel(format!(
+                "line text push failed: {} {}", status, txt
+            )));
+        }
+        Ok(serde_json::json!({"sent": true, "target": target}))
+    }
+
     /// Send a Flex message either via reply token or push.
     async fn send_flex(&self, target: &str, alt_text: &str, contents: Value) -> Result<Value> {
         let body = serde_json::json!({
@@ -591,8 +621,19 @@ impl ChannelAdapter for LineAdapter {
         self.push_text(&target, &msg.text).await
     }
 
-    async fn start_typing(&self, _channel_id: &str, _peer_id: &str) -> Result<TypingGuard> {
-        // LINE has Loading Animation API but it's optional — skip for MVP.
+    async fn start_typing(&self, channel_id: &str, peer_id: &str) -> Result<TypingGuard> {
+        // LINE's loading-animation API only supports 1:1 user chats. In the
+        // LINE adapter we build MsgContext with channel_id == peer_id ==
+        // userId for `source.type == "user"`; group/room have channel_id =
+        // groupId/roomId != peer_id. So channel_id == peer_id is the 1:1
+        // signal. Fire-and-forget: API errors are logged but don't fail the
+        // route (it's a UX nicety, not correctness-critical). Auto-expires
+        // server-side after the requested seconds — no cleanup needed.
+        if channel_id == peer_id && !peer_id.is_empty() {
+            if let Err(e) = self.show_loading(peer_id, 60).await {
+                tracing::debug!(error = %e, user_id = peer_id, "line show_loading failed (non-fatal)");
+            }
+        }
         Ok(TypingGuard::noop())
     }
 
@@ -715,8 +756,20 @@ fn line_actions() -> Vec<ActionInfo> {
             }),
         },
         ActionInfo {
+            name: "send_message".into(),
+            description: "Push a plain text message to a LINE userId/groupId/roomId. Use ONLY for proactive outreach (broadcasts, group messages, follow-ups to users you're not currently chatting with). DO NOT use this to reply to the inbound you're currently handling — the router automatically routes your terminal text reply through the contacts approval pipeline. Bypassing that for current-conversation replies skips approval gates.".into(),
+            params_schema: serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "target":{"type":"string","description":"LINE userId / groupId / roomId"},
+                    "text":{"type":"string","description":"Message text (max 5000 chars)"}
+                },
+                "required":["target","text"]
+            }),
+        },
+        ActionInfo {
             name: "send_flex".into(),
-            description: "Send a Flex message (rich UI) to a user/group/room. `contents` follows LINE Flex Message JSON schema.".into(),
+            description: "Send a Flex message (rich UI) to a user/group/room. `contents` follows LINE Flex Message JSON schema. Use ONLY for proactive outreach — for replies to current inbound, use `contacts_reply` with `{type:'flex', contents:{...}}` so the message flows through the approval pipeline.".into(),
             params_schema: serde_json::json!({
                 "type":"object",
                 "properties":{
@@ -807,6 +860,11 @@ async fn execute_line_action(adapter: &LineAdapter, action: &str, params: Value)
         "get_profile" => {
             let user_id = s("line_user_id")?;
             adapter.line_get(&format!("/profile/{}", user_id)).await
+        }
+        "send_message" => {
+            let target = s("target")?;
+            let text = s("text")?;
+            adapter.send_text(&target, &text).await
         }
         "send_flex" => {
             let target = s("target")?;

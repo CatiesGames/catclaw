@@ -1739,10 +1739,20 @@ LINE unfollow 事件會自動把對應 contact 設 `ai_paused=true` + tag `unfol
 4. **你的終端文字回應會自動走 contacts pipeline** — router 在送出前攔截,
    走 `submit_reply` (內部依 approval_required 分支:true → work card 等審
    核;false → 直接送出 + 工作卡 audit trail)。你只要正常寫文字就好,不
-   需要顯式呼叫 `contacts_reply`。**唯二需要顯式呼叫**: (a) 主動 outreach
-   (對方沒問你、你主動聯絡,沒有正在處理的 inbound)、(b) rich payload
-   (flex / image)。**絕對不要**用平台原生 send tool (line_send_*、
-   discord_send_message 等) 回覆 contact — 那會繞過 pipeline。
+   需要顯式呼叫 `contacts_reply`。
+
+   **路徑邊界 (重要)**:
+   - 正在處理當下 inbound、要回覆同一個對話 → **寫文字就好**, router 強制
+     走 pipeline,平台 send tool (line_send_message / discord_send_message
+     等) 不該用於這個場景,**用了就繞過 approval**。
+   - 主動 outreach (對方沒問你、你主動聯絡 contact;或 rich payload) →
+     **用 `contacts_reply`**, 仍走 pipeline。
+   - 對 *非 contact* 對象 (廣播、群組訊息、不在 contacts 表的 user) →
+     用平台 send tool (`line_send_message` / `line_send_flex` /
+     `discord_send_message` 等),直接送、不走 pipeline (因為沒有 contact
+     可以申請審核)。
+   - 簡單記:**目標是 contact 就走 pipeline (寫文字 or contacts_reply);
+     目標不是 contact 才用平台 send tool**。
 
 ### MCP Tools
 
@@ -2528,17 +2538,40 @@ Strategies to stay under quota:
 - Batch related notifications into one Flex carousel instead of multiple texts
 - Use `contacts_ai_pause` for users you don't need to actively message
 
-## Important: How to Reply
+## How to Reply — Two Paths
 
-**Do NOT use `line_send_flex` or any `line_*` MCP tool to reply to the current conversation.** The gateway handles your text response — just write naturally.
+There are two clearly-separated paths for sending LINE messages. Use the right one for your situation:
 
-What happens behind the scenes when the inbound is from a `role=client` or `role=unknown` contact: the router intercepts your terminal text and routes it through `contacts::pipeline::submit_reply` automatically. If the contact's `approval_required=true`, your reply goes to a work card in the forward channel and waits for admin approval before LINE actually sees it. If `approval_required=false`, the reply auto-sends and a "sent" card mirrors what was relayed. Either way, admins get an audit trail in the forward channel.
+### Path A: Reply to current inbound — just write text
 
-This means writing `contacts_reply` yourself is redundant for the normal "reply to the current inbound" case — just write text and the router handles it. Use `contacts_reply` explicitly for **proactive** outreach (reaching out to a contact whose inbound you're NOT currently handling, e.g. follow-up reminders) or when you need rich (flex / image) payloads.
+When you're handling an inbound LINE message and want to reply to that same conversation, **don't call any tool**. Write your text response normally. The gateway:
 
-Use `line_*` MCP tools only for:
-- Proactive operations on the LINE platform itself (broadcasts, Rich Menu setup, quota checks)
-- NEVER for replying to the contact you're currently chatting with
+1. Shows a "typing..." animation in the LINE chat (LINE's loading-animation API, 1:1 only — auto-handled).
+2. Intercepts your terminal text and routes it through `contacts::pipeline::submit_reply`.
+3. Branches on `approval_required`: true → work card in forward channel awaiting admin approval; false → auto-send + audit-trail card.
+
+This is the ONLY safe way to reply to a contact you're currently chatting with. It guarantees the approval gate fires when configured.
+
+### Path B: Proactive outreach — explicit MCP tools
+
+When you want to message someone you're NOT currently chatting with (broadcast, follow-up reminder, message a different user/group), use the LINE MCP tools directly:
+
+- `line_send_message` — plain text push to userId / groupId / roomId
+- `line_send_flex` — rich Flex Message UI
+
+These send immediately without an approval gate (since there's no "current conversation" context). Use them deliberately — every call goes straight to LINE.
+
+### Forbidden: using Path B for current-conversation replies
+
+If you call `line_send_message` / `line_send_flex` to reply to the contact you're currently chatting with, you bypass the approval pipeline entirely. The admin won't see a work card, `approval_required=true` won't fire, and you'll have sent an unreviewed message. **Always use Path A** for "replying to inbound" — write text, let the router handle it.
+
+### contacts_reply
+
+`contacts_reply` is mostly for two cases:
+- **Proactive outreach to a managed contact**: when you need rich payload (flex/image) and the recipient is a `role=client` contact (use `{type:"flex", contents:{...}}`).
+- **Cross-platform reach**: contact bound on multiple platforms; pipeline picks the right adapter via `via_platform` or last-active channel.
+
+For normal text replies to current inbound, `contacts_reply` is redundant with Path A — just write text.
 
 ## Official Documentation
 
