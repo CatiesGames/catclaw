@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.47.0](https://github.com/CatiesGames/catclaw/compare/v0.46.4...v0.47.0) (2026-05-11)
+
+
+### Features
+
+* **line:** add send_message MCP + wire start_typing to show_loading ([6e63012](https://github.com/CatiesGames/catclaw/commit/6e63012eea2fba3f4002e8762746ccc43c1bb673))
+
+
+### Bug Fixes
+
+* **contacts:** route agent terminal reply through approval pipeline ([d0fc89c](https://github.com/CatiesGames/catclaw/commit/d0fc89c1f3d82b3f7cd5f7f75ab07ff15c5f19f8))
+
 ## [0.46.4](https://github.com/CatiesGames/catclaw/compare/v0.46.3...v0.46.4) (2026-05-08)
 
 
