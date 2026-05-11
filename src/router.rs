@@ -542,6 +542,58 @@ impl MessageRouter {
         if response.trim() == "NO_REPLY" || response.trim().is_empty() {
             return Ok(());
         }
+
+        // Contact pipeline gate: every agent reply destined for a non-admin
+        // contact MUST flow through `submit_reply`. The pipeline branches
+        // internally on `approval_required`: true → work card + await approval;
+        // false → auto-send + work card showing what was just sent. This gives
+        // admins a consistent audit trail in the forward channel and prevents
+        // the router from being a structural bypass of the approval gate
+        // (analogous to CLAUDE.md lesson #18 which forbids direct platform
+        // sends from agents — same principle applied to the router's own
+        // outbound path).
+        //
+        // Admin contacts are excluded: they ARE the operator, so their inbound
+        // shouldn't generate work cards reviewing their own messages.
+        if let Some(ref c) = contact {
+            let needs_gate = !matches!(c.role, crate::contacts::ContactRole::Admin);
+            if needs_gate {
+                let unknown_inbox = self
+                    .session_manager
+                    .config_arc()
+                    .as_ref()
+                    .and_then(|cfg| cfg.read().unwrap().contacts.unknown_inbox_channel.clone());
+                let payload = serde_json::json!({"type": "text", "text": response});
+                match crate::contacts::pipeline::submit_reply(
+                    self.session_manager.state_db(),
+                    &self.adapters,
+                    &c.id,
+                    payload,
+                    Some(platform.to_string()),
+                    unknown_inbox.as_deref(),
+                )
+                .await
+                {
+                    Ok(result) => {
+                        tracing::info!(
+                            contact_id = %c.id,
+                            draft_id = result.draft_id,
+                            status = %result.status,
+                            "agent reply routed through contact pipeline"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            contact_id = %c.id,
+                            "failed to enqueue agent reply via contact pipeline; reply NOT sent"
+                        );
+                    }
+                }
+                return Ok(());
+            }
+        }
+
         let max_len = adapter.capabilities().max_message_length.saturating_sub(100);
         let chunks = split_at_boundaries(&response, max_len);
 

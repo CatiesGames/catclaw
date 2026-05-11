@@ -1736,8 +1736,13 @@ LINE unfollow 事件會自動把對應 contact 設 `ai_paused=true` + tag `unfol
    或從 unknown 升級(見上)
 3. 之後該 sender 的每則訊息 system prompt 會附
    `[Contact: name=..., role=..., tags=..., metadata=...]`
-4. 你回覆時用 `contacts_reply` (而非平台原生 send tool),確保走
-   forward + approval pipeline
+4. **你的終端文字回應會自動走 contacts pipeline** — router 在送出前攔截,
+   走 `submit_reply` (內部依 approval_required 分支:true → work card 等審
+   核;false → 直接送出 + 工作卡 audit trail)。你只要正常寫文字就好,不
+   需要顯式呼叫 `contacts_reply`。**唯二需要顯式呼叫**: (a) 主動 outreach
+   (對方沒問你、你主動聯絡,沒有正在處理的 inbound)、(b) rich payload
+   (flex / image)。**絕對不要**用平台原生 send tool (line_send_*、
+   discord_send_message 等) 回覆 contact — 那會繞過 pipeline。
 
 ### MCP Tools
 
@@ -2525,11 +2530,15 @@ Strategies to stay under quota:
 
 ## Important: How to Reply
 
-**Do NOT use `line_send_flex` or any `line_*` MCP tool to reply to the current conversation.** The gateway sends your text response automatically — just write naturally.
+**Do NOT use `line_send_flex` or any `line_*` MCP tool to reply to the current conversation.** The gateway handles your text response — just write naturally.
 
-Use `line_*` and `contacts_reply` tools only for:
-- Replying to a contact (use `contacts_reply` — goes through approval pipeline)
-- Proactive operations (broadcasts, Rich Menu setup, quota checks)
+What happens behind the scenes when the inbound is from a `role=client` or `role=unknown` contact: the router intercepts your terminal text and routes it through `contacts::pipeline::submit_reply` automatically. If the contact's `approval_required=true`, your reply goes to a work card in the forward channel and waits for admin approval before LINE actually sees it. If `approval_required=false`, the reply auto-sends and a "sent" card mirrors what was relayed. Either way, admins get an audit trail in the forward channel.
+
+This means writing `contacts_reply` yourself is redundant for the normal "reply to the current inbound" case — just write text and the router handles it. Use `contacts_reply` explicitly for **proactive** outreach (reaching out to a contact whose inbound you're NOT currently handling, e.g. follow-up reminders) or when you need rich (flex / image) payloads.
+
+Use `line_*` MCP tools only for:
+- Proactive operations on the LINE platform itself (broadcasts, Rich Menu setup, quota checks)
+- NEVER for replying to the contact you're currently chatting with
 
 ## Official Documentation
 
