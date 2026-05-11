@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.47.1](https://github.com/CatiesGames/catclaw/compare/v0.47.0...v0.47.1) (2026-05-11)
+
+
+### Bug Fixes
+
+* **contacts:** remove ambiguous Pause/Resume buttons from work cards ([2368edf](https://github.com/CatiesGames/catclaw/commit/2368edff2ea0a696daa6bbea4626697dc5f266f6))
+
 ## [0.47.0](https://github.com/CatiesGames/catclaw/compare/v0.46.4...v0.47.0) (2026-05-11)
 
 
