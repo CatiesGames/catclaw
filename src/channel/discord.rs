@@ -503,16 +503,6 @@ impl EventHandler for Handler {
                                 strip_buttons = true;
                             }
                         }
-                        "pause" => {
-                            let _ = self
-                                .contact_action_tx
-                                .send(crate::contacts::ContactAction::Pause(arg.to_string()));
-                        }
-                        "resume" => {
-                            let _ = self
-                                .contact_action_tx
-                                .send(crate::contacts::ContactAction::Resume(arg.to_string()));
-                        }
                         _ => {
                             tracing::warn!(custom_id = %custom_id, "discord: unknown contact action");
                         }
@@ -1957,6 +1947,13 @@ fn build_contact_work_card_components(
     let components: Vec<CreateActionRow> = if !show_actions {
         vec![]
     } else {
+        // Pause/Resume are intentionally NOT exposed as buttons: a single
+        // contact has exactly one ai_paused state (true xor false), so any
+        // single-row layout is misleading (offers a no-op or wrong button).
+        // Pause/resume stays available via `catclaw contact pause/resume <id>`
+        // CLI and `contacts_ai_pause` / `contacts_ai_resume` MCP tools, where
+        // intent is unambiguous.
+        let _ = contact_id;
         let primary = vec![
             CreateButton::new(format!("contact:approve:{}", draft_id))
                 .label("✅ 核准送出")
@@ -1968,18 +1965,7 @@ fn build_contact_work_card_components(
                 .label("🗑 捨棄")
                 .style(ButtonStyle::Danger),
         ];
-        let secondary = vec![
-            CreateButton::new(format!("contact:pause:{}", contact_id))
-                .label("⏸ 暫停 AI")
-                .style(ButtonStyle::Secondary),
-            CreateButton::new(format!("contact:resume:{}", contact_id))
-                .label("▶ 恢復 AI")
-                .style(ButtonStyle::Secondary),
-        ];
-        vec![
-            CreateActionRow::Buttons(primary),
-            CreateActionRow::Buttons(secondary),
-        ]
+        vec![CreateActionRow::Buttons(primary)]
     };
 
     (embed, components)

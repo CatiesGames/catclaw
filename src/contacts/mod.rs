@@ -215,8 +215,4 @@ pub enum ContactAction {
     Discard(i64),
     /// (draft_id, revision_note)
     Revise(i64, String),
-    /// (contact_id)
-    Pause(String),
-    /// (contact_id)
-    Resume(String),
 }

@@ -597,12 +597,6 @@ impl ChannelAdapter for SlackAdapter {
                                             let _ = contact_action_tx.send(ContactAction::Revise(id, note));
                                         }
                                     }
-                                    "pause" => {
-                                        let _ = contact_action_tx.send(ContactAction::Pause(arg.to_string()));
-                                    }
-                                    "resume" => {
-                                        let _ = contact_action_tx.send(ContactAction::Resume(arg.to_string()));
-                                    }
                                     _ => {}
                                 }
                                 continue;
@@ -1710,15 +1704,9 @@ fn build_contact_work_card_blocks(params: &serde_json::Value) -> serde_json::Val
                  "text":{"type":"plain_text","text":"🗑 捨棄"},"style":"danger"},
             ]
         }));
-        blocks.push(serde_json::json!({
-            "type": "actions",
-            "elements": [
-                {"type":"button","action_id":format!("contact:pause:{}", contact_id),
-                 "text":{"type":"plain_text","text":"⏸ 暫停 AI"}},
-                {"type":"button","action_id":format!("contact:resume:{}", contact_id),
-                 "text":{"type":"plain_text","text":"▶ 恢復 AI"}},
-            ]
-        }));
+        // Pause/Resume buttons intentionally omitted — see discord.rs comment.
+        // Use `catclaw contact pause/resume <id>` or contacts_ai_pause/resume MCP.
+        let _ = contact_id;
     }
     serde_json::Value::Array(blocks)
 }

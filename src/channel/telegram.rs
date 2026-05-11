@@ -359,12 +359,6 @@ impl ChannelAdapter for TelegramAdapter {
                                             let _ = contact_action_tx.send(ContactAction::Discard(id));
                                         }
                                     }
-                                    "pause" => {
-                                        let _ = contact_action_tx.send(ContactAction::Pause(arg.to_string()));
-                                    }
-                                    "resume" => {
-                                        let _ = contact_action_tx.send(ContactAction::Resume(arg.to_string()));
-                                    }
                                     _ => {}
                                 }
                             }
@@ -1154,15 +1148,14 @@ fn build_contact_work_card_telegram(
         contact_name, role, via, status, preview, draft_id,
         contact_id.chars().take(8).collect::<String>(),
     );
+    // Pause/Resume buttons intentionally omitted — see discord.rs comment.
+    // Use `catclaw contact pause/resume <id>` or contacts_ai_pause/resume MCP.
+    let _ = contact_id;
     let kb = if show_actions {
         Some(InlineKeyboardMarkup::new(vec![
             vec![
                 InlineKeyboardButton::callback("✅ 核准", format!("contact:approve:{}", draft_id)),
                 InlineKeyboardButton::callback("🗑 捨棄", format!("contact:discard:{}", draft_id)),
-            ],
-            vec![
-                InlineKeyboardButton::callback("⏸ 暫停 AI", format!("contact:pause:{}", contact_id)),
-                InlineKeyboardButton::callback("▶ 恢復 AI", format!("contact:resume:{}", contact_id)),
             ],
         ]))
     } else {

@@ -1766,8 +1766,8 @@ LINE unfollow 事件會自動把對應 contact 設 `ai_paused=true` + tag `unfol
 | `contacts_bind_channel` | 綁定 LINE userId / Discord id / TG user_id 等 |
 | `contacts_unbind_channel` | 解綁 |
 | `contacts_reply` | **唯一回覆出口**,走 outbound pipeline |
-| `contacts_ai_pause` | 暫停 AI(個案訊息只鏡射不派給你) |
-| `contacts_ai_resume` | 恢復 AI |
+| `contacts_ai_pause` | 暫停 AI(個案訊息只鏡射不派給你)。Work card 不再有 pause/resume 按鈕 — 改用此工具或 `catclaw contact pause <id>` CLI,避免「兩顆按鈕同時顯示卻只有一顆有效」的歧義。 |
+| `contacts_ai_resume` | 恢復 AI(對應 `catclaw contact resume <id>`)。 |
 | `contacts_drafts_list` | 列待審草稿 |
 | `contacts_draft_approve` | 核准送出 |
 | `contacts_draft_discard` | 丟棄草稿 |

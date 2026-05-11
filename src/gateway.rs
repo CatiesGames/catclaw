@@ -569,22 +569,6 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                         }
                         pipeline::dispatch_revision_to_agent(&ca_db, &ca_sm, &ca_ar, id).await;
                     }
-                    ContactAction::Pause(contact_id) => {
-                        if let Ok(Some(mut c)) = ca_db.get_contact(&contact_id) {
-                            c.ai_paused = true;
-                            if let Err(e) = ca_db.update_contact(&c) {
-                                warn!(contact_id = %contact_id, error = %e, "contact pause failed");
-                            }
-                        }
-                    }
-                    ContactAction::Resume(contact_id) => {
-                        if let Ok(Some(mut c)) = ca_db.get_contact(&contact_id) {
-                            c.ai_paused = false;
-                            if let Err(e) = ca_db.update_contact(&c) {
-                                warn!(contact_id = %contact_id, error = %e, "contact resume failed");
-                            }
-                        }
-                    }
                 }
             }
         });
