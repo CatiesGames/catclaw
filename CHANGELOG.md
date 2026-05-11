@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.48.0](https://github.com/CatiesGames/catclaw/compare/v0.47.1...v0.48.0) (2026-05-11)
+
+
+### Features
+
+* **contacts:** Discord DM enters contacts pipeline, guild stays out ([c0ac2d9](https://github.com/CatiesGames/catclaw/commit/c0ac2d9f92421da1ef1a267e6480da2b40cc42a6))
+
 ## [0.47.1](https://github.com/CatiesGames/catclaw/compare/v0.47.0...v0.47.1) (2026-05-11)
 
 
