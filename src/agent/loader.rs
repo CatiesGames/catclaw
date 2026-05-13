@@ -1302,6 +1302,7 @@ daemon mode won't inherit interactive shell env.
 | `max_concurrent_sessions` | 3 | Max parallel sessions — requires restart |
 | `session_idle_timeout_mins` | 30 | Idle before session pauses |
 | `session_archive_timeout_hours` | 168 | Hours before archival |
+| `session_retention_days` | 30 | Days to keep archived sessions (rows + transcripts) before permanent deletion; 0 = never. Pruned in the 6-hourly cleanup pass — requires restart |
 | `streaming` | true | Streaming mode (true/false) |
 | `default_model` | — | e.g. "sonnet", "opus", "" to clear |
 | `default_fallback_model` | — | Fallback when primary is overloaded |

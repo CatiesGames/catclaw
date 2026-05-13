@@ -155,6 +155,11 @@ impl StateDb {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Incremental auto-vacuum so reclaiming space after archived-session
+        // cleanup is cheap (PRAGMA incremental_vacuum) instead of a full
+        // table-locking VACUUM. Only takes effect on a freshly-created DB;
+        // existing DBs keep their current mode (cleanup falls back to VACUUM).
+        let _ = conn.pragma_update(None, "auto_vacuum", "INCREMENTAL");
 
         let db = StateDb {
             conn: Mutex::new(conn),
@@ -697,6 +702,56 @@ impl StateDb {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Delete archived sessions whose `last_activity_at` is older than
+    /// `older_than_days`. Returns `(agent_id, session_id)` for each deleted
+    /// row so the caller can also remove the transcript jsonl files (those
+    /// live under the agent workspace, which this layer doesn't know about).
+    /// `older_than_days == 0` is a no-op (retention disabled).
+    pub fn delete_old_archived_sessions(&self, older_than_days: u64) -> Result<Vec<(String, String)>> {
+        if older_than_days == 0 {
+            return Ok(vec![]);
+        }
+        let cutoff = (Utc::now() - chrono::Duration::days(older_than_days as i64)).to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT agent_id, session_id FROM sessions
+             WHERE state = 'archived' AND last_activity_at < ?1",
+        )?;
+        let victims: Vec<(String, String)> = stmt
+            .query_map(rusqlite::params![cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        if !victims.is_empty() {
+            conn.execute(
+                "DELETE FROM sessions WHERE state = 'archived' AND last_activity_at < ?1",
+                rusqlite::params![cutoff],
+            )?;
+        }
+        Ok(victims)
+    }
+
+    /// Reclaim disk space after deletions. Uses `PRAGMA incremental_vacuum` if
+    /// the DB was created with `auto_vacuum=INCREMENTAL`; otherwise falls back
+    /// to a full `VACUUM` (which briefly takes an exclusive lock — fine for a
+    /// 6-hourly maintenance pass). Best-effort: errors are returned but the
+    /// caller should treat them as non-fatal.
+    pub fn reclaim_space(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mode: i64 = conn
+            .pragma_query_value(None, "auto_vacuum", |row| row.get(0))
+            .unwrap_or(0);
+        if mode == 2 {
+            // INCREMENTAL — reclaim all currently-free pages
+            conn.execute("PRAGMA incremental_vacuum", [])?;
+        } else {
+            conn.execute("VACUUM", [])?;
+        }
+        Ok(())
     }
 
     /// Find the single most recent non-archived session that originates from

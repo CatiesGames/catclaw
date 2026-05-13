@@ -386,6 +386,7 @@ state_db = "./state.sqlite"
 max_concurrent_sessions = 3
 session_idle_timeout_mins = 30
 session_archive_timeout_hours = 168
+session_retention_days = 30         # delete archived sessions + transcripts after N days (0 = never)
 port = 21130                        # WS + MCP on single port
 streaming = true
 default_model = "opus"              # optional: opus, sonnet, haiku

@@ -783,8 +783,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                             queue_pending_resume(&cli.config, "update", Some(&version));
                         }
 
-                        // Restart service if installed
+                        // Restart service if installed. Rewrite the unit file
+                        // first so unit-level changes from this release (e.g.
+                        // Type=notify + watchdog + memory limits) get picked
+                        // up — `service_install` is idempotent.
                         if dist::is_service_installed() {
+                            if let Err(e) = dist::service_install(&cli.config) {
+                                cli_ui::status_msg("⚠️", &format!("Service unit refresh failed: {}", e));
+                            }
                             cli_ui::status_msg("🔄", "Restarting service...");
                             if let Err(e) = dist::restart_service() {
                                 cli_ui::status_msg("⚠️", &format!("Service restart failed: {}", e));

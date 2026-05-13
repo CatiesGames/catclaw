@@ -27,6 +27,8 @@ pub struct SchedulerConfig {
     pub archive_timeout_hours: u64,
     /// Archive check interval in minutes
     pub archive_check_interval_mins: u64,
+    /// Days to keep archived sessions before permanent deletion (0 = never).
+    pub session_retention_days: u64,
     /// Workspace root path (for attachment cleanup)
     pub workspace: std::path::PathBuf,
     /// Social polling: send SocialItems into the ingest pipeline.
@@ -46,6 +48,7 @@ impl Default for SchedulerConfig {
             heartbeat_interval_mins: 30,
             archive_timeout_hours: 168, // 7 days
             archive_check_interval_mins: 360, // 6 hours
+            session_retention_days: 30,
             workspace: std::path::PathBuf::from("./workspace"),
             social_item_tx: None,
             social_config: None,
@@ -133,6 +136,9 @@ pub async fn run(
             let max_age_days = config.archive_timeout_hours / 24;
             crate::router::cleanup_old_attachments(&config.workspace, max_age_days.max(1));
             crate::social::cleanup_old_media(&config.workspace, max_age_days.max(1));
+            // Delete archived sessions past the retention window + their
+            // transcript files, then reclaim the freed DB pages.
+            prune_old_sessions(&session_manager, &agent_registry, config.session_retention_days);
             next_archive = now + chrono::Duration::minutes(config.archive_check_interval_mins as i64);
         }
 
@@ -629,6 +635,57 @@ async fn execute_archive(
         Err(e) => {
             error!(error = %e, "failed to find stale sessions");
         }
+    }
+}
+
+/// Delete archived sessions older than `retention_days` (rows + transcript
+/// files), then reclaim the freed DB pages. No-op when retention_days == 0.
+fn prune_old_sessions(
+    session_manager: &SessionManager,
+    agent_registry: &Arc<std::sync::RwLock<AgentRegistry>>,
+    retention_days: u64,
+) {
+    if retention_days == 0 {
+        return;
+    }
+    let db = session_manager.state_db();
+    let victims = match db.delete_old_archived_sessions(retention_days) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(error = %e, "prune_old_sessions: delete failed");
+            return;
+        }
+    };
+    if victims.is_empty() {
+        return;
+    }
+    // Remove transcript jsonl files: {agent_workspace}/transcripts/*{session_id}.jsonl
+    // (filename is either "{session_id}.jsonl" or "{label}_{session_id}.jsonl").
+    let mut removed_files = 0usize;
+    {
+        let reg = agent_registry.read().unwrap();
+        for (agent_id, session_id) in &victims {
+            let Some(agent) = reg.get(agent_id) else { continue };
+            let dir = agent.workspace.join("transcripts");
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let suffix = format!("{}.jsonl", session_id);
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let matches = name == suffix || name.ends_with(&format!("_{}", suffix));
+                if matches && std::fs::remove_file(entry.path()).is_ok() {
+                    removed_files += 1;
+                }
+            }
+        }
+    }
+    info!(
+        sessions = victims.len(),
+        transcript_files = removed_files,
+        "pruned archived sessions past retention window"
+    );
+    if let Err(e) = db.reclaim_space() {
+        warn!(error = %e, "prune_old_sessions: reclaim_space failed (non-fatal)");
     }
 }
 

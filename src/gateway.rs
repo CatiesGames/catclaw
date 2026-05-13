@@ -333,6 +333,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
             heartbeat_interval_mins: config.heartbeat.as_ref().map_or(30, |h| h.interval_mins),
             archive_timeout_hours: config.general.session_archive_timeout_hours,
             archive_check_interval_mins: 360, // every 6 hours
+            session_retention_days: config.general.session_retention_days,
             workspace: config.general.workspace.clone(),
             social_item_tx: Some(social_item_tx.clone()),
             social_config: Some(gw_config.clone()),
@@ -645,6 +646,23 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
 
     // Start all services
     let _handle = start(&config, config_path).await?;
+
+    // systemd Type=notify: tell systemd we're up, then keep the watchdog fed.
+    // If the tokio runtime ever freezes (deadlock / swap thrash), the watchdog
+    // pings stop and systemd restarts us instead of leaving the unit stuck.
+    // No-op when not run under a notify unit.
+    if crate::dist::under_systemd_notify() {
+        crate::dist::notify_ready();
+        // WatchdogSec=120 in the unit → ping every 45s for a comfortable margin.
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(45));
+            loop {
+                tick.tick().await;
+                crate::dist::notify_watchdog();
+            }
+        });
+        info!("systemd: sent READY=1, watchdog ping every 45s");
+    }
 
     // Block until shutdown signal
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

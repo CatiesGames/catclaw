@@ -471,6 +471,25 @@ fn service_install_linux(exe: &Path, config_path: &Path) -> Result<(), CatClawEr
             .map_err(|e| CatClawError::Service(format!("failed to create systemd user dir: {}", e)))?;
     }
 
+    // Type=notify + watchdog: the gateway sends sd_notify(READY=1) once it's up
+    // and sd_notify(WATCHDOG=1) every ~45s. If the tokio runtime freezes (e.g.
+    // a deadlock or the box gets dragged into swap thrash), the watchdog stops
+    // firing and systemd restarts the unit instead of leaving it stuck for ~45
+    // minutes (prod incident 2026-05-13).
+    //
+    // MemoryHigh/MemoryMax: soft+hard memory caps for the gateway's cgroup
+    // (which includes spawned `claude` subprocesses). When a runaway subprocess
+    // blows past MemoryMax, the cgroup OOM-killer kills the biggest offender
+    // (usually that subprocess; sometimes the gateway, which systemd restarts
+    // in ~10s) — far better than the whole VM thrashing. Values assume a host
+    // with ≥8 GiB RAM: BGE-M3 model RSS ~1.8 GiB + one opus session ~1 GiB +
+    // headroom. Tune via `systemctl --user edit catclaw` if your host differs.
+    // NOTE: memory accounting in *user* units needs cgroup delegation
+    // (systemd ≥ v244 with `DefaultMemoryAccounting=yes`, true on most modern
+    // distros). If unavailable systemd silently ignores these directives.
+    //
+    // TimeoutStartSec=300: first run downloads the ~560 MB BGE-M3 model
+    // synchronously before READY=1; give it room on slow links.
     let content = format!(
         r#"[Unit]
 Description=CatClaw AI Gateway
@@ -478,10 +497,14 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 ExecStart="{exe}" --config "{config}" gateway start
 Restart=always
 RestartSec=5
+TimeoutStartSec=300
+WatchdogSec=120
+MemoryHigh=3G
+MemoryMax=4G
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
 
 [Install]
@@ -794,4 +817,47 @@ pub async fn cmd_uninstall(config_path: &Path) {
     cli_ui::status_msg("ℹ️", "Config and workspace files are preserved.");
     cli_ui::status_msg("ℹ️", &format!("To remove everything: rm -rf {}", catclaw_dir));
     println!();
+}
+
+// ── systemd sd_notify protocol ────────────────────────────────────────────
+//
+// Minimal hand-rolled implementation of the sd_notify(3) protocol (no crate
+// dependency). The unit is `Type=notify` with `WatchdogSec`, so the gateway
+// must send `READY=1` once it's up and `WATCHDOG=1` periodically. When
+// `NOTIFY_SOCKET` isn't set (not run under systemd, or older unit) every call
+// is a silent no-op, so it's safe to call unconditionally.
+
+/// True if running under a systemd `Type=notify` unit (NOTIFY_SOCKET present).
+pub fn under_systemd_notify() -> bool {
+    std::env::var_os("NOTIFY_SOCKET").is_some()
+}
+
+/// Send a raw sd_notify message (e.g. "READY=1", "WATCHDOG=1"). No-op when
+/// NOTIFY_SOCKET is unset. Errors are swallowed — notify is best-effort and
+/// must never take the gateway down.
+pub fn sd_notify(msg: &str) {
+    let Some(path) = std::env::var_os("NOTIFY_SOCKET") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    // systemd uses an abstract namespace socket when the path starts with '@';
+    // std::os::unix::net::UnixDatagram doesn't speak abstract sockets, so for
+    // the (rare) abstract case we just skip — the common case is a real path
+    // like /run/user/<uid>/systemd/notify.
+    if path.as_os_str().to_string_lossy().starts_with('@') {
+        return;
+    }
+    if let Ok(sock) = std::os::unix::net::UnixDatagram::unbound() {
+        let _ = sock.send_to(msg.as_bytes(), &path);
+    }
+}
+
+/// Convenience: emit `READY=1`.
+pub fn notify_ready() {
+    sd_notify("READY=1");
+}
+
+/// Convenience: emit `WATCHDOG=1`.
+pub fn notify_watchdog() {
+    sd_notify("WATCHDOG=1");
 }
