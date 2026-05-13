@@ -117,6 +117,12 @@ impl ConfigPanel {
                 editable: true,
             },
             ConfigEntry {
+                key: "session_retention_days".to_string(),
+                value: config.general.session_retention_days.to_string(),
+                section: "General".to_string(),
+                editable: true,
+            },
+            ConfigEntry {
                 key: "streaming".to_string(),
                 value: config.general.streaming.to_string(),
                 section: "General".to_string(),
@@ -287,21 +293,8 @@ impl ConfigPanel {
             }
         }
 
-        // Embedding
-        if let Some(emb) = &config.embedding {
-            entries.push(ConfigEntry {
-                key: "provider".to_string(),
-                value: emb.provider.clone(),
-                section: "Embedding".to_string(),
-                editable: false,
-            });
-            entries.push(ConfigEntry {
-                key: "model".to_string(),
-                value: emb.model.clone(),
-                section: "Embedding".to_string(),
-                editable: false,
-            });
-        }
+        // (No "Embedding" section — embedding is always in-process BGE-M3,
+        // nothing to configure.)
 
         // Social Inbox
         let base = config.webhook_base_url();

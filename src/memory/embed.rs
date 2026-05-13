@@ -7,6 +7,14 @@ use crate::error::{CatClawError, Result};
 /// Model is downloaded on first use (~560MB) and cached in ~/.cache/huggingface/.
 pub struct Embedder {
     model: Arc<Mutex<fastembed::TextEmbedding>>,
+    /// Caps concurrent embedding inference to 1. BGE-M3 inference is CPU- and
+    /// RAM-heavy; on small VMs N concurrent `memory_write`s would stack N
+    /// spikes and push the box into swap thrash (seen in prod 2026-05-13).
+    /// Serializing is also fine for throughput — the model is behind a Mutex
+    /// anyway, so callers already wait; the semaphore just makes them wait in
+    /// the async layer instead of pinning a blocking thread on a contended
+    /// lock.
+    inference_gate: Arc<tokio::sync::Semaphore>,
 }
 
 impl Embedder {
@@ -33,15 +41,23 @@ impl Embedder {
 
         Ok(Self {
             model: Arc::new(Mutex::new(model)),
+            inference_gate: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
 
     /// Embed one or more texts. Returns one Vec<f32> per input text.
-    /// Uses spawn_blocking to avoid holding a std::sync::Mutex on the tokio thread
-    /// during CPU-bound embedding work.
+    /// Acquires the inference gate (max 1 concurrent) before doing CPU-bound
+    /// work on a blocking thread, so concurrent callers queue in the async
+    /// layer rather than stacking blocking threads on a contended Mutex.
     pub async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
         let model = self.model.clone();
+        let _permit = self
+            .inference_gate
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| CatClawError::Memory(format!("embedding gate closed: {}", e)))?;
         tokio::task::spawn_blocking(move || {
             let mut m = model.lock().unwrap();
             m.embed(&owned, None)
@@ -49,6 +65,7 @@ impl Embedder {
         })
         .await
         .map_err(|e| CatClawError::Memory(format!("embed task join failed: {}", e)))?
+        // _permit drops here, releasing the gate
     }
 
     /// Embed a single text.

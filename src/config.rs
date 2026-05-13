@@ -182,9 +182,6 @@ pub struct Config {
     pub collaboration: CollaborationConfig,
 
     #[serde(default)]
-    pub embedding: Option<EmbeddingConfig>,
-
-    #[serde(default)]
     pub memory: Option<MemoryConfig>,
 
     #[serde(default)]
@@ -260,6 +257,12 @@ pub struct GeneralConfig {
 
     #[serde(default = "default_archive_timeout")]
     pub session_archive_timeout_hours: u64,
+
+    /// Days to keep archived sessions (rows + transcript files) before they're
+    /// permanently deleted. Archived sessions otherwise accumulate forever,
+    /// bloating state.db and the transcripts dir. 0 = never delete. Default 30.
+    #[serde(default = "default_session_retention_days")]
+    pub session_retention_days: u64,
 
     /// Port for the gateway server (WS + MCP share this port, default: 21130).
     #[serde(default = "default_ws_port", alias = "ws_port")]
@@ -446,17 +449,9 @@ pub struct CollaborationConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingConfig {
-    #[serde(default = "default_embedding_provider")]
-    pub provider: String,
-
-    #[serde(default = "default_ollama_url")]
-    pub ollama_url: String,
-
-    #[serde(default = "default_embedding_model")]
-    pub model: String,
-}
+// (Removed `EmbeddingConfig` — embedding has always been in-process fastembed
+// BGE-M3, never configurable. The old `[embedding] provider = "ollama"` was a
+// dead config read by nobody at runtime; see CLAUDE.md.)
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
@@ -508,6 +503,9 @@ fn default_idle_timeout() -> u64 {
 fn default_archive_timeout() -> u64 {
     168 // 7 days
 }
+fn default_session_retention_days() -> u64 {
+    30
+}
 fn default_ws_port() -> u16 {
     21130
 }
@@ -534,15 +532,6 @@ fn default_group_policy() -> String {
 }
 fn is_default_group_policy(v: &str) -> bool {
     v == "open"
-}
-fn default_embedding_provider() -> String {
-    "ollama".to_string()
-}
-fn default_ollama_url() -> String {
-    "http://localhost:11434".to_string()
-}
-fn default_embedding_model() -> String {
-    "nomic-embed-text".to_string()
 }
 fn default_chunk_size() -> usize {
     400
@@ -658,6 +647,7 @@ impl Config {
             "max_concurrent_sessions" => Ok(self.general.max_concurrent_sessions.to_string()),
             "session_idle_timeout_mins" => Ok(self.general.session_idle_timeout_mins.to_string()),
             "session_archive_timeout_hours" => Ok(self.general.session_archive_timeout_hours.to_string()),
+            "session_retention_days" => Ok(self.general.session_retention_days.to_string()),
             "port" | "ws_port" => Ok(self.general.port.to_string()),
             "bind_addr" => Ok(self.general.bind_addr.clone()),
             "streaming" => Ok(self.general.streaming.to_string()),
@@ -788,6 +778,10 @@ impl Config {
             "session_archive_timeout_hours" => {
                 self.general.session_archive_timeout_hours = value.parse().map_err(|_| CatClawError::Config("invalid number".into()))?;
                 Ok(true)
+            }
+            "session_retention_days" => {
+                self.general.session_retention_days = value.parse().map_err(|_| CatClawError::Config("invalid number".into()))?;
+                Ok(true) // scheduler reads this on startup; restart to apply
             }
             "port" | "ws_port" => {
                 self.general.port = value.parse().map_err(|_| CatClawError::Config("invalid port".into()))?;
@@ -1255,6 +1249,7 @@ impl Config {
                 max_concurrent_sessions: default_max_concurrent(),
                 session_idle_timeout_mins: default_idle_timeout(),
                 session_archive_timeout_hours: default_archive_timeout(),
+                session_retention_days: default_session_retention_days(),
                 port: default_ws_port(),
                 bind_addr: default_bind_addr(),
                 streaming: default_streaming(),
@@ -1275,11 +1270,6 @@ impl Config {
             }],
             bindings: vec![],
             collaboration: CollaborationConfig::default(),
-            embedding: Some(EmbeddingConfig {
-                provider: default_embedding_provider(),
-                ollama_url: default_ollama_url(),
-                model: default_embedding_model(),
-            }),
             memory: Some(MemoryConfig {
                 chunk_size_tokens: default_chunk_size(),
                 chunk_overlap_tokens: default_chunk_overlap(),
