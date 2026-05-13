@@ -48,7 +48,17 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        # Retry on transient network failures during build dependency
+        # download — most commonly ort-sys fetching the ONNX Runtime
+        # prebuilt from cdn.pyke.io. Real compile errors still fail
+        # (every attempt fails the same way), they just take longer.
+        run: |
+          for attempt in 1 2 3; do
+            if cargo build --release --target ${{ matrix.target }}; then exit 0; fi
+            echo "::warning::cargo build attempt $attempt failed; retrying in 10s..."
+            sleep 10
+          done
+          exit 1
 
       # macOS: import Apple Developer certificate and codesign the binary
       - name: Import Apple certificate

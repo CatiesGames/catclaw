@@ -15,5 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --release
+      # Retry to absorb transient CDN/DNS failures during build (notably
+      # ort-sys downloading the ONNX Runtime prebuilt from cdn.pyke.io —
+      # seen failing with "failed to lookup address information" on CI).
+      # Real compile errors still surface (every attempt fails the same
+      # way → final exit 1), they just take ~20s longer to report.
+      - name: cargo check
+        run: |
+          for attempt in 1 2 3; do
+            if cargo check --release; then exit 0; fi
+            echo "::warning::cargo check attempt $attempt failed; retrying in 10s..."
+            sleep 10
+          done
+          exit 1
       - run: cargo clippy -- -D warnings
