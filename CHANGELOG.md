@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.49.0](https://github.com/CatiesGames/catclaw/compare/v0.48.1...v0.49.0) (2026-05-13)
+
+
+### Features
+
+* **ops:** systemd memory limits + watchdog, prune old archived sessions ([2685f0a](https://github.com/CatiesGames/catclaw/commit/2685f0a4000318ca21c98696366ca7fe1a161cf4))
+
+
+### Bug Fixes
+
+* **memory:** throttle embedding inference + remove dead [embedding] config ([3dc47fb](https://github.com/CatiesGames/catclaw/commit/3dc47fb540d7024ebceeec7f548654cc72dcd809))
+
 ## [0.48.1](https://github.com/CatiesGames/catclaw/compare/v0.48.0...v0.48.1) (2026-05-11)
 
 
