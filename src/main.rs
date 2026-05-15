@@ -240,6 +240,13 @@ enum AgentCommands {
     New {
         /// Agent name/ID
         name: String,
+        /// Runtime: claude (default) or codex
+        #[arg(long, default_value = "claude")]
+        runtime: String,
+        /// Optional path to codex auth.json (only meaningful for --runtime codex).
+        /// Defaults to ~/.codex/auth.json.
+        #[arg(long)]
+        codex_auth_path: Option<PathBuf>,
     },
     /// List all agents
     List,
@@ -1083,8 +1090,34 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Agent { command }) => {
             let mut config = Config::load(&cli.config)?;
             match command {
-                AgentCommands::New { name } => {
-                    cmd_agent_new(&mut config, &cli.config, &name).await?;
+                AgentCommands::New { name, runtime, codex_auth_path } => {
+                    let runtime_enum = match runtime.as_str() {
+                        "claude" => crate::agent::Runtime::Claude,
+                        "codex" => crate::agent::Runtime::Codex,
+                        other => {
+                            cli_ui::status_msg(
+                                "❌",
+                                &format!("unknown runtime: {} (must be 'claude' or 'codex')", other),
+                            );
+                            std::process::exit(1);
+                        }
+                    };
+                    if matches!(runtime_enum, crate::agent::Runtime::Claude)
+                        && codex_auth_path.is_some()
+                    {
+                        cli_ui::status_msg(
+                            "⚠️",
+                            "--codex-auth-path is ignored for claude runtime",
+                        );
+                    }
+                    cmd_agent_new(
+                        &mut config,
+                        &cli.config,
+                        &name,
+                        runtime_enum,
+                        codex_auth_path,
+                    )
+                    .await?;
                 }
                 AgentCommands::List => {
                     cmd_agent_list(&config);
@@ -3474,14 +3507,25 @@ fn start_background_gateway_quiet(config_path: &std::path::Path) -> std::result:
     Ok(())
 }
 
-async fn cmd_agent_new(config: &mut Config, config_path: &Path, name: &str) -> Result<()> {
+async fn cmd_agent_new(
+    config: &mut Config,
+    config_path: &Path,
+    name: &str,
+    runtime: crate::agent::Runtime,
+    codex_auth_path: Option<PathBuf>,
+) -> Result<()> {
     // Try gateway WS first so the new agent is registered live (no restart).
     // Falls back to direct file write when the gateway is not running.
     let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
     if let Ok((client, _event_rx)) =
         crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await
     {
-        match client.request("agents.new", serde_json::json!({"name": name})).await {
+        let mut params = serde_json::json!({"name": name});
+        params["runtime"] = serde_json::Value::String(runtime.as_str().to_string());
+        if let Some(ref p) = codex_auth_path {
+            params["codex_auth_path"] = serde_json::Value::String(p.display().to_string());
+        }
+        match client.request("agents.new", params).await {
             Ok(resp) => {
                 let workspace = resp
                     .get("workspace")
@@ -3506,6 +3550,12 @@ async fn cmd_agent_new(config: &mut Config, config_path: &Path, name: &str) -> R
     let workspace = config.general.workspace.join("agents").join(name);
     AgentLoader::create_workspace(&workspace, &config.general.workspace, name)?;
     AgentLoader::install_remote_skills(&config.general.workspace).await?;
+    // For codex runtime, also set up the per-agent .codex-home/ with the auth
+    // symlink so the agent is immediately spawnable. Preflight inside
+    // setup_codex_home verifies the auth target exists before writing.
+    if matches!(runtime, crate::agent::Runtime::Codex) {
+        AgentLoader::setup_codex_home(&workspace, codex_auth_path.as_deref())?;
+    }
     config.agents.push(crate::config::AgentConfig {
         id: name.to_string(),
         workspace: workspace.clone(),
@@ -3513,8 +3563,8 @@ async fn cmd_agent_new(config: &mut Config, config_path: &Path, name: &str) -> R
         model: None,
         fallback_model: None,
         approval: crate::config::ApprovalConfig::default(),
-        runtime: crate::agent::Runtime::default(),
-        codex_auth_path: None,
+        runtime,
+        codex_auth_path,
     });
     config.save(config_path)?;
 
@@ -3625,6 +3675,28 @@ async fn cmd_agent_tools(
     let final_approval: Vec<String> = if let Some(ref ap) = approve {
         ap.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
     } else { cur_approval };
+
+    // Codex-runtime warning: native shell/apply_patch are controlled by
+    // sandbox_mode, not tools.toml. Setting them here has no enforcement
+    // effect for codex agents (catclaw approval gate doesn't cover them).
+    // This is a documented limitation — codex agent skill should keep agents
+    // off of shell-curl-Meta-API workarounds via SKILL guidance instead.
+    if matches!(agent.runtime, crate::agent::Runtime::Codex) {
+        const CODEX_NATIVE_TOOLS: &[&str] = &["shell", "apply_patch", "Bash", "Read", "Write", "Edit"];
+        for list in [&final_denied, &final_approval, &final_allowed] {
+            for entry in list.iter() {
+                if CODEX_NATIVE_TOOLS.iter().any(|t| t.eq_ignore_ascii_case(entry)) {
+                    cli_ui::status_msg(
+                        "⚠️",
+                        &format!(
+                            "'{}' is a codex native tool — controlled by sandbox_mode, not tools.toml. Setting it here has no effect.",
+                            entry
+                        ),
+                    );
+                }
+            }
+        }
+    }
 
     // Try gateway WS first — gateway writes tools.toml on its side and reloads
     // the AgentRegistry in one step. Fall back to local file write when offline.

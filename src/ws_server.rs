@@ -953,6 +953,28 @@ async fn handle_agents_new(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRespon
         _ => return WsResponse::err(req.id, -32602, "missing param: name"),
     };
 
+    // Optional runtime/codex_auth_path params (Phase B.7.1). Default runtime
+    // = claude preserves existing behaviour for callers that don't pass it.
+    let runtime = match req.params.get("runtime").and_then(|v| v.as_str()) {
+        Some("codex") => crate::agent::Runtime::Codex,
+        Some("claude") | None => crate::agent::Runtime::Claude,
+        Some(other) => {
+            return WsResponse::err(
+                req.id,
+                -32602,
+                format!(
+                    "invalid runtime: {} (must be 'claude' or 'codex')",
+                    other
+                ),
+            )
+        }
+    };
+    let codex_auth_path = req
+        .params
+        .get("codex_auth_path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from);
+
     // Disk-first reload — we only mutate what this handler owns.
     let mut full = match crate::config::Config::load(&gw.config_path) {
         Ok(c) => c,
@@ -968,6 +990,16 @@ async fn handle_agents_new(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRespon
     // Pure file I/O — safe inside async handler.
     if let Err(e) = crate::agent::AgentLoader::create_workspace(&workspace, &workspace_root, &name) {
         return WsResponse::err(req.id, -1, format!("create_workspace failed: {}", e));
+    }
+    // For codex runtime, build the per-agent .codex-home/ + verify the auth
+    // target now so we fail loudly on agent creation (not at first message).
+    if matches!(runtime, crate::agent::Runtime::Codex) {
+        if let Err(e) = crate::agent::AgentLoader::setup_codex_home(
+            &workspace,
+            codex_auth_path.as_deref(),
+        ) {
+            return WsResponse::err(req.id, -1, format!("setup_codex_home failed: {}", e));
+        }
     }
     // Network — install remote skills (skill-creator from anthropics/skills).
     // No-op when already installed; only the first-ever new agent on this
@@ -987,8 +1019,8 @@ async fn handle_agents_new(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRespon
         model: None,
         fallback_model: None,
         approval: crate::config::ApprovalConfig::default(),
-        runtime: crate::agent::Runtime::default(),
-        codex_auth_path: None,
+        runtime,
+        codex_auth_path,
     });
     let serialized = match toml::to_string_pretty(&full) {
         Ok(s) => s,
@@ -1241,7 +1273,27 @@ fn handle_agents_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRespon
     }
 
     info!(agent_id = %agent_id, "agent model updated");
-    WsResponse::ok(req.id, json!({"agent_id": agent_id}))
+
+    // Codex agents bind their model + developer_instructions at thread start
+    // (Phase B PoC verified — resume can't change them). Surface a notice so
+    // the caller knows existing threads will keep the prior model until a
+    // new thread is started. New threads pick up the change automatically.
+    let codex_thread_bound_notice = {
+        let cfg = gw.config.read().unwrap();
+        cfg.agents
+            .iter()
+            .find(|a| a.id == agent_id)
+            .map(|a| matches!(a.runtime, crate::agent::Runtime::Codex))
+            .unwrap_or(false)
+    };
+    let mut result = json!({"agent_id": agent_id});
+    if codex_thread_bound_notice {
+        result["note"] = json!(
+            "codex runtime: config saved; existing threads keep the prior model. \
+             New threads pick up the change."
+        );
+    }
+    WsResponse::ok(req.id, result)
 }
 
 /// Set an agent as the default. Clears `default=true` on all others.
