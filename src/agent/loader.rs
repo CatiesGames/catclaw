@@ -1461,7 +1461,9 @@ pending requests can only be resolved by the user via channel UI, not via CLI.
 ## Agents
 
 ```bash
-catclaw agent new <name>       # Create new agent (also installs default skills)
+catclaw agent new <name>                                # Create new agent (claude runtime, default)
+catclaw agent new <name> --runtime codex                # Create a codex-runtime agent (uses ~/.codex/auth.json)
+catclaw agent new <name> --runtime codex --codex-auth-path /path/to/auth.json   # codex agent with per-agent auth
 catclaw agent list             # List all agents
 catclaw agent edit <name> <file>  # Open file in $EDITOR
 catclaw agent delete <name>    # Remove agent from config (workspace files preserved)
@@ -1469,6 +1471,32 @@ catclaw agent set-default <name>  # Mark as default (used when no binding matche
 catclaw agent tools <name>     # Show current tool permissions
 catclaw agent tools <name> --allow "Read,Edit,Bash" --deny "WebFetch" --approve "Bash"
 ```
+
+### Runtime: claude vs codex
+
+CatClaw can drive two CLI runtimes:
+
+- **claude** (default) — `claude -p` subprocesses with PreToolUse hook + `--mcp-config` for catclaw's MCP server.
+- **codex** — `codex exec` subprocesses with isolated `CODEX_HOME` per agent. Approval gate runs inside catclaw's MCP server (codex's user-level hooks don't fire in exec mode).
+
+**catclaw user surfaces are identical across runtimes** — same approval cards (Discord embed / Telegram inline keyboard / Slack Block Kit / LINE Flex), same `tools.toml` schema, same TUI panels, same WS protocol. Switching `runtime = "codex"` in `catclaw.toml` doesn't change how an admin interacts with the bot.
+
+**What does differ (model-level, not catclaw-controllable)**:
+
+- Conversation style, reasoning length, tool selection — those are GPT-5.x vs Claude 4.x model behaviour. README has the full list.
+- Codex thread-bound system prompt — once a codex thread starts, changing `agent.model` or SOUL.md / IDENTITY.md / SKILL files **only affects new threads**. Existing threads keep their original prompt. catclaw surfaces this via a `note` field in `agents.set_model` responses.
+- Codex native tools (`shell`, `apply_patch`) — those run under codex's OS sandbox (Seatbelt / Landlock), not catclaw's approval gate. catclaw approval only covers `mcp__catclaw__*` tools (IG/Threads/Contacts/Memory). Setting them in `tools.toml` produces a warning — no enforcement.
+- Codex doesn't emit token-level deltas, so streaming surfaces (e.g. Slack streaming response) degrade to one-shot send on codex agents.
+
+### Posting / replying — always use catclaw MCP tools (runtime-agnostic)
+
+This applies to **both runtimes** — the underlying mechanism differs but the rule is identical:
+
+- **Post to IG / Threads** → `mcp__catclaw__instagram_create_post`, `mcp__catclaw__threads_create_post`, etc. Don't `curl graph.facebook.com` from `Bash` / `shell`. Direct API calls bypass the approval gate (admin doesn't see what you're posting) and skip `social_drafts` history.
+- **Reply to a bound contact** → `mcp__catclaw__contacts_reply`. Don't use `mcp__catclaw__discord_send_message` / `line_send_message` / `telegram_send_message` for a contact — those are for non-contact targets only.
+- **Write memory** → `mcp__catclaw__memory_write`. Don't manually edit memory MD files or call SQLite directly.
+
+The "use the MCP tool" path gives you: automatic approval flow, draft history, forward mirroring, and unified audit trail across runtimes.
 
 All `catclaw agent` commands hot-reload through the running gateway via WS — changes apply immediately, no restart needed. If the gateway is offline, the change is saved to `catclaw.toml` and loads on next start. The default agent cannot be deleted; promote a different agent first with `set-default`.
 

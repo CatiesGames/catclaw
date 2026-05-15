@@ -135,7 +135,9 @@ catclaw tui                       # Launch TUI only
 ### Agent Management
 
 ```bash
-catclaw agent new <name>                          # Create a new agent
+catclaw agent new <name>                          # Create a new agent (claude runtime, default)
+catclaw agent new <name> --runtime codex          # Create a codex-runtime agent
+catclaw agent new <name> --runtime codex --codex-auth-path /path/to/auth.json
 catclaw agent list                                # List all agents
 catclaw agent edit <name> <file>                  # Open file in $EDITOR
 catclaw agent tools <name>                        # Show current tool permissions
@@ -147,6 +149,45 @@ catclaw agent delete <name>                       # Delete an agent
 ```
 
 `<file>` values: `soul`, `user`, `identity`, `agents`, `tools`, `boot`, `heartbeat`, `memory`
+
+### Codex Runtime Support
+
+CatClaw can drive two CLI runtimes interchangeably — every channel adapter, approval card, TUI panel, and WS protocol method works identically across both. **User-facing surface is bit-identical**; only the underlying CLI differs.
+
+- **claude** (default) — `claude -p` subprocesses, OAuth via Anthropic Console.
+- **codex** — `codex exec` subprocesses, OAuth via `codex login`.
+
+Switching runtime is per-agent (catclaw.toml `[[agents]] runtime = "codex"`) and doesn't change how an admin clicks Approve/Deny, where IG drafts surface, or how `tools.toml` is structured.
+
+#### What's identical across runtimes
+
+- Discord embed / Telegram inline keyboard / Slack Block Kit / LINE Flex approval cards (visual diff = 0 for Tool kind)
+- `tools.toml` schema (allowed / denied / require_approval)
+- IG / Threads `social_drafts` review flow (draft → admin approves → Meta API)
+- Contact reply pipeline (`contacts_reply` MCP tool)
+- Memory Palace + diary extraction
+- TUI Pending Approvals, Social Drafts, Contacts Drafts panels
+- WS `agents.*` / `approval.*` / `social.*` / `contact.*` methods
+
+#### Known model-level / runtime-level differences (not catclaw-controlled)
+
+These come from the underlying model or CLI itself — catclaw documents them but doesn't try to hide them. If your use case is sensitive to one of these, stay on `claude`:
+
+| Difference | Effect |
+|---|---|
+| GPT-5.x vs Claude 4.x reasoning style | Different "personality" feel even with the same SOUL.md |
+| Codex thread-bound system prompt | After thread starts, changing `agent.model` / SOUL.md / SKILL files only affects **new threads**. Existing threads keep their original prompt. catclaw surfaces this in `agents.set_model` response notes. |
+| Codex `shell` / `apply_patch` (native tools) | Run under codex's OS sandbox (Seatbelt / Landlock), **not** catclaw's approval gate. Setting `Bash` / `shell` / `apply_patch` in tools.toml produces a warning — no enforcement effect for codex. catclaw approval gate only covers `mcp__catclaw__*` tools. |
+| Codex has no token-delta events | Slack streaming response degrades to one-shot send on codex agents (full reply arrives at once, not progressively) |
+| Codex multi-host limitation | Codex subprocess must run on the same host as the catclaw gateway (`127.0.0.1` MCP endpoint). Cross-host / container-isolated deployments not supported in this release. |
+
+#### Setup
+
+1. Run `codex login` once on the host (creates `~/.codex/auth.json`).
+2. `catclaw agent new my-codex-agent --runtime codex` — catclaw verifies `~/.codex/auth.json` exists at agent-creation time so missing-auth fails loudly.
+3. Bind a channel (`catclaw bind ...`) like any other agent. Send a message — codex spawns automatically.
+
+For per-account isolation (e.g. work + personal codex accounts), pass `--codex-auth-path` to point at a different `auth.json`.
 
 ### Channels
 
