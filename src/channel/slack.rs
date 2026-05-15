@@ -891,6 +891,44 @@ impl ChannelAdapter for SlackAdapter {
         Ok(())
     }
 
+    /// Codex MCP intercept entry-point — Tool kind reuses the Block Kit
+    /// renderer; other kinds fall through to plain text via default.
+    async fn send_approval_card(
+        &self,
+        channel_id: &str,
+        card: &crate::approval::ApprovalCard,
+    ) -> Result<Option<String>> {
+        if let crate::approval::ApprovalCard::Tool {
+            approval_id,
+            tool_name,
+            tool_input,
+            ..
+        } = card
+        {
+            self.send_approval(
+                channel_id,
+                "",
+                None,
+                approval_id,
+                tool_name,
+                tool_input,
+            )
+            .await?;
+            return Ok(None);
+        }
+        let text = crate::channel::render_approval_card_text(card);
+        self.send(crate::channel::OutboundMessage {
+            channel_type: crate::channel::ChannelType::Slack,
+            channel_id: channel_id.to_string(),
+            peer_id: channel_id.to_string(),
+            text,
+            thread_id: None,
+            reply_to_message_id: None,
+        })
+        .await?;
+        Ok(None)
+    }
+
     async fn start_typing(&self, _channel_id: &str, _peer_id: &str) -> Result<TypingGuard> {
         // Slack's typing indicator (assistant.threads.setStatus) requires thread_ts
         // which the ChannelAdapter trait doesn't provide. Thinking status is set in

@@ -40,10 +40,19 @@ pub struct LineAdapter {
     /// Bot user id (set after first webhook event delivers it).
     bot_user_id: Mutex<Option<String>>,
     http: reqwest::Client,
+    /// Postback approval channel — webhook handler sends `(request_id, approved)`
+    /// here when the admin clicks an Approve/Deny button on a Flex Message
+    /// approval card. Gateway picks the rx side via `take_approval_rx` on
+    /// startup and wires it into the shared `pending_approvals` map (same
+    /// wiring as Discord / Telegram / Slack).
+    approval_tx: mpsc::UnboundedSender<(String, bool)>,
+    approval_rx:
+        tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(String, bool)>>>,
 }
 
 impl LineAdapter {
     pub fn new(token: String, secret: String, filter: Arc<std::sync::RwLock<AdapterFilter>>) -> Self {
+        let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         LineAdapter {
             token,
             secret,
@@ -52,7 +61,18 @@ impl LineAdapter {
             reply_tokens: RwLock::new(std::collections::HashMap::new()),
             bot_user_id: Mutex::new(None),
             http: reqwest::Client::new(),
+            approval_tx,
+            approval_rx: tokio::sync::Mutex::new(Some(approval_rx)),
         }
+    }
+
+    /// Take ownership of the approval-postback receiver. Called once at
+    /// gateway startup so the shared `pending_approvals` task can read
+    /// admin Approve/Deny clicks landing in our LINE webhook.
+    pub async fn take_approval_rx(
+        &self,
+    ) -> Option<mpsc::UnboundedReceiver<(String, bool)>> {
+        self.approval_rx.lock().await.take()
     }
 
     pub fn from_config(
@@ -150,6 +170,27 @@ impl LineAdapter {
                         }
                     }
                 }
+            }
+
+            // Postback events: Flex Message Approve/Deny buttons send their
+            // `data` payload here. Format: `approve:{request_id}` or
+            // `deny:{request_id}` — same callback scheme as Discord/Telegram/
+            // Slack so the gateway's `pending_approvals` wiring is uniform.
+            if event_type == "postback" {
+                if let Some(data) = event
+                    .get("postback")
+                    .and_then(|p| p.get("data"))
+                    .and_then(|d| d.as_str())
+                {
+                    if let Some(rid) = data.strip_prefix("approve:") {
+                        let _ = self.approval_tx.send((rid.to_string(), true));
+                    } else if let Some(rid) = data.strip_prefix("deny:") {
+                        let _ = self.approval_tx.send((rid.to_string(), false));
+                    } else {
+                        debug!(?data, "line postback: unknown payload, ignoring");
+                    }
+                }
+                continue;
             }
 
             if let Some(ctx) = self.parse_event(event).await {
@@ -666,6 +707,198 @@ impl ChannelAdapter for LineAdapter {
 
     fn platform_name(&self) -> &str {
         "line"
+    }
+
+    /// Render an approval card as a LINE Flex Message. Tool kind gets
+    /// Approve / Deny postback action buttons; the postback `data` payload
+    /// (`approve:{request_id}` / `deny:{request_id}`) is parsed back by
+    /// `handle_webhook_payload` and forwarded over `approval_tx`.
+    ///
+    /// SocialPost / ContactReply currently render as bubbles without buttons
+    /// (those flow through DB drafts and have their own work-card surface);
+    /// the bubble shape gives admins something to read in the LINE channel
+    /// even though the resolve action lives in the TUI / Discord card path.
+    async fn send_approval_card(
+        &self,
+        channel_id: &str,
+        card: &crate::approval::ApprovalCard,
+    ) -> Result<Option<String>> {
+        use crate::approval::ApprovalCard;
+
+        let (alt_text, flex_contents) = match card {
+            ApprovalCard::Tool {
+                approval_id,
+                agent_id,
+                tool_name,
+                tool_input,
+                ..
+            } => {
+                let input_preview = serde_json::to_string_pretty(tool_input)
+                    .unwrap_or_else(|_| tool_input.to_string());
+                let input_short = if input_preview.chars().count() > 400 {
+                    format!(
+                        "{}…",
+                        input_preview
+                            .chars()
+                            .take(400)
+                            .collect::<String>()
+                    )
+                } else {
+                    input_preview
+                };
+                let bubble = serde_json::json!({
+                    "type": "bubble",
+                    "size": "kilo",
+                    "header": {
+                        "type": "box", "layout": "vertical",
+                        "contents": [
+                            {"type": "text", "text": "🔒 Tool Approval",
+                             "weight": "bold", "color": "#FFFFFF", "size": "md"}
+                        ],
+                        "backgroundColor": "#FFA500", "paddingAll": "12px"
+                    },
+                    "body": {
+                        "type": "box", "layout": "vertical", "spacing": "sm",
+                        "contents": [
+                            {"type": "text", "text": format!("Agent: {}", agent_id),
+                             "size": "sm", "color": "#888888"},
+                            {"type": "text", "text": format!("Tool: {}", tool_name),
+                             "weight": "bold", "size": "md", "wrap": true},
+                            {"type": "separator", "margin": "md"},
+                            {"type": "text", "text": input_short, "size": "xs",
+                             "wrap": true, "color": "#555555"}
+                        ]
+                    },
+                    "footer": {
+                        "type": "box", "layout": "horizontal", "spacing": "sm",
+                        "contents": [
+                            {"type": "button", "style": "primary", "color": "#28A745",
+                             "action": {"type": "postback",
+                                        "label": "✅ Approve",
+                                        "data": format!("approve:{}", approval_id),
+                                        "displayText": "Approved"}},
+                            {"type": "button", "style": "primary", "color": "#DC3545",
+                             "action": {"type": "postback",
+                                        "label": "❌ Deny",
+                                        "data": format!("deny:{}", approval_id),
+                                        "displayText": "Denied"}}
+                        ]
+                    }
+                });
+                (
+                    format!("Tool approval: {}", tool_name),
+                    bubble,
+                )
+            }
+            ApprovalCard::SocialPost {
+                draft_id,
+                agent_id,
+                platform,
+                caption_preview,
+                media_count,
+                ..
+            } => {
+                let media_note = match media_count {
+                    0 => String::from("(no media)"),
+                    1 => String::from("(1 image)"),
+                    n => format!("({} images)", n),
+                };
+                let bubble = serde_json::json!({
+                    "type": "bubble", "size": "kilo",
+                    "header": {
+                        "type": "box", "layout": "vertical",
+                        "contents": [{"type": "text",
+                                      "text": format!("📝 {} Post Review", platform),
+                                      "weight": "bold", "color": "#FFFFFF"}],
+                        "backgroundColor": "#3F51B5", "paddingAll": "12px"
+                    },
+                    "body": {
+                        "type": "box", "layout": "vertical", "spacing": "sm",
+                        "contents": [
+                            {"type": "text",
+                             "text": format!("Agent: {} · draft {}", agent_id, draft_id),
+                             "size": "sm", "color": "#888888", "wrap": true},
+                            {"type": "text", "text": media_note,
+                             "size": "xs", "color": "#888888"},
+                            {"type": "separator", "margin": "md"},
+                            {"type": "text", "text": caption_preview.clone(),
+                             "size": "sm", "wrap": true}
+                        ]
+                    }
+                });
+                (
+                    format!("Post review: {} draft {}", platform, draft_id),
+                    bubble,
+                )
+            }
+            ApprovalCard::ContactReply {
+                draft_id,
+                agent_id,
+                contact_display_name,
+                platform,
+                body_preview,
+                ..
+            } => {
+                let bubble = serde_json::json!({
+                    "type": "bubble", "size": "kilo",
+                    "header": {
+                        "type": "box", "layout": "vertical",
+                        "contents": [{"type": "text", "text": "💬 Reply Review",
+                                      "weight": "bold", "color": "#FFFFFF"}],
+                        "backgroundColor": "#009688", "paddingAll": "12px"
+                    },
+                    "body": {
+                        "type": "box", "layout": "vertical", "spacing": "sm",
+                        "contents": [
+                            {"type": "text",
+                             "text": format!("Agent: {} · draft {}", agent_id, draft_id),
+                             "size": "sm", "color": "#888888", "wrap": true},
+                            {"type": "text",
+                             "text": format!("To: {} ({})", contact_display_name, platform),
+                             "size": "sm", "wrap": true},
+                            {"type": "separator", "margin": "md"},
+                            {"type": "text", "text": body_preview.clone(),
+                             "size": "sm", "wrap": true}
+                        ]
+                    }
+                });
+                (
+                    format!("Reply review: draft {}", draft_id),
+                    bubble,
+                )
+            }
+        };
+
+        let payload = serde_json::json!({
+            "to": channel_id,
+            "messages": [{
+                "type": "flex",
+                "altText": alt_text,
+                "contents": flex_contents,
+            }],
+        });
+
+        let resp = self
+            .http
+            .post(format!("{}/message/push", LINE_API))
+            .bearer_auth(&self.token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| CatClawError::Channel(format!("line approval flex push: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CatClawError::Channel(format!(
+                "line approval flex push failed: {} {}",
+                status, body
+            )));
+        }
+        // LINE's push API doesn't return a message id we can edit later,
+        // so return None — the gateway-side approval card lifecycle for
+        // LINE is "send once, resolve via postback".
+        Ok(None)
     }
 }
 

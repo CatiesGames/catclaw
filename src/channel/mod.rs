@@ -203,6 +203,40 @@ pub trait ChannelAdapter: Send + Sync {
         .await
     }
 
+    /// Send an [`ApprovalCard`] to a channel — the unified rendering surface
+    /// across all three approval kinds (Tool / SocialPost / ContactReply).
+    ///
+    /// Adapters that implement rich UI (Discord embed+buttons, Telegram
+    /// inline keyboard, Slack Block Kit, LINE Flex) override this to render
+    /// the appropriate widget. The default impl falls back to a plain-text
+    /// message — enough for the TUI / debugging surface but not the
+    /// production experience for Discord etc.
+    ///
+    /// codex-runtime-plan.md §3.7 — returns the platform message id (Discord
+    /// message id, Telegram message id, Slack ts, LINE messageId) so the
+    /// gateway can later edit / delete the card when the draft resolves.
+    async fn send_approval_card(
+        &self,
+        channel_id: &str,
+        card: &crate::approval::ApprovalCard,
+    ) -> Result<Option<String>> {
+        // Default implementation: render as plain text. Each kind has its own
+        // format, but no buttons — admin uses the TUI Pending Approvals panel
+        // or a slash command to resolve. Adapters that override this method
+        // get rich buttons.
+        let text = render_approval_card_text(card);
+        self.send(OutboundMessage {
+            channel_type: ChannelType::Tui, // placeholder; adapter ignores
+            channel_id: channel_id.to_string(),
+            peer_id: channel_id.to_string(),
+            text,
+            thread_id: None,
+            reply_to_message_id: None,
+        })
+        .await?;
+        Ok(None) // default impl can't easily return the platform message id
+    }
+
     /// Start a native streaming message (for adapters that support it).
     /// Returns the message timestamp/ID that subsequent append/stop calls reference.
     #[allow(dead_code)]
@@ -370,6 +404,59 @@ impl AdapterFilter {
 }
 
 /// Split text at natural boundaries to fit within max length
+/// Render an [`ApprovalCard`] as plain text — the fallback shape used when
+/// an adapter hasn't overridden `send_approval_card` with a richer widget.
+/// Each kind has its own labels so admins can tell them apart at a glance.
+#[allow(dead_code)] // used by trait default impl which isn't seen by dead-code analysis
+pub fn render_approval_card_text(card: &crate::approval::ApprovalCard) -> String {
+    use crate::approval::ApprovalCard;
+    match card {
+        ApprovalCard::Tool {
+            approval_id,
+            agent_id,
+            tool_name,
+            tool_input,
+            ..
+        } => {
+            let input_preview = serde_json::to_string_pretty(tool_input)
+                .unwrap_or_else(|_| tool_input.to_string());
+            format!(
+                "🔒 Tool Approval — agent `{}`\nTool: `{}`\n```json\n{}\n```\nReply `approve {}` or `deny {}`",
+                agent_id, tool_name, input_preview, approval_id, approval_id
+            )
+        }
+        ApprovalCard::SocialPost {
+            draft_id,
+            agent_id,
+            platform,
+            caption_preview,
+            media_count,
+            ..
+        } => {
+            let media_note = match media_count {
+                0 => String::from("(no media)"),
+                1 => String::from("(1 image)"),
+                n => format!("({} images)", n),
+            };
+            format!(
+                "📝 {} Post Review — agent `{}`\n{}\nCaption:\n```\n{}\n```\nReply `approve draft {}` / `discard draft {}` / `revise draft {} <reason>`",
+                platform, agent_id, media_note, caption_preview, draft_id, draft_id, draft_id
+            )
+        }
+        ApprovalCard::ContactReply {
+            draft_id,
+            agent_id,
+            contact_display_name,
+            platform,
+            body_preview,
+            ..
+        } => format!(
+            "💬 Reply Review — agent `{}`\nTo: {} ({})\n```\n{}\n```\nReply `approve draft {}` / `discard draft {}` / `revise draft {} <reason>`",
+            agent_id, contact_display_name, platform, body_preview, draft_id, draft_id, draft_id,
+        ),
+    }
+}
+
 pub fn split_at_boundaries(text: &str, max_len: usize) -> Vec<&str> {
     if text.len() <= max_len {
         return vec![text];

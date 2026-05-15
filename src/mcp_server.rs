@@ -415,11 +415,43 @@ async fn handle_codex_tool_call(
                 .event_bus
                 .send(serde_json::to_string(&event).unwrap_or_default());
 
-            // Wait for the admin decision (or timeout). The channel-adapter
-            // approval card forwarding lives elsewhere — Phase B.5 will plug
-            // codex agents into `send_approval_card` so cards land on the
-            // right surface. For now the TUI's broadcast-driven panel is
-            // the working surface.
+            // Forward the card to the origin channel adapter so a Discord /
+            // Telegram / LINE admin sees the approval request, not just the
+            // TUI panel. Resolved via the codex session_id → SessionRow →
+            // origin lookup (same way the Claude hook path does it).
+            if let Ok(Some(row)) =
+                gw.state_db.get_session_by_session_id(session_id)
+            {
+                let origin = row.origin.clone();
+                if origin != "tui" && origin != "system" {
+                    if let Some(adapter) = gw.adapters.get(&origin).cloned() {
+                        if let Some(channel_id) = row.platform_channel_id() {
+                            let card = crate::approval::ApprovalCard::Tool {
+                                approval_id: request_id.clone(),
+                                agent_id: agent.id.clone(),
+                                session_id: Some(session_id.to_string()),
+                                tool_name: prefixed_name.clone(),
+                                tool_input: arguments.clone(),
+                            };
+                            // Best-effort — failure logs but doesn't abort
+                            // the approval wait; admin can still resolve via
+                            // TUI or another connected surface.
+                            if let Err(e) =
+                                adapter.send_approval_card(&channel_id, &card).await
+                            {
+                                tracing::warn!(
+                                    origin = %origin,
+                                    request_id = %request_id,
+                                    error = %e,
+                                    "codex approval forward: failed to send card",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Wait for the admin decision (or timeout).
             let decision = match tokio::time::timeout(
                 tokio::time::Duration::from_secs(timeout_secs),
                 rx,

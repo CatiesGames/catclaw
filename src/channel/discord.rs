@@ -925,6 +925,57 @@ impl ChannelAdapter for DiscordAdapter {
         Ok(())
     }
 
+    /// Codex-runtime entry-point — routes the `Tool` kind to the existing
+    /// embed-with-buttons renderer (bit-identical to the Claude hook path).
+    /// `SocialPost` / `ContactReply` are handled by `social::forward` /
+    /// `contacts::pipeline` separately, so the default plain-text fallback
+    /// for those kinds is fine here.
+    async fn send_approval_card(
+        &self,
+        channel_id: &str,
+        card: &crate::approval::ApprovalCard,
+    ) -> Result<Option<String>> {
+        if let crate::approval::ApprovalCard::Tool {
+            approval_id,
+            tool_name,
+            tool_input,
+            ..
+        } = card
+        {
+            // Reuse the existing send_approval shape so Tool kind is visually
+            // identical across hook-path (Claude) and MCP-path (Codex).
+            // peer_id isn't used by the Discord impl (`_peer_id`); thread_id
+            // = None means "post in the channel itself", which is what the
+            // codex MCP intercept wants.
+            self.send_approval(
+                channel_id,
+                "",
+                None,
+                approval_id,
+                tool_name,
+                tool_input,
+            )
+            .await?;
+            return Ok(None);
+        }
+        // Fall through to default impl (plain text) for SocialPost /
+        // ContactReply — those don't currently flow through this path; their
+        // drafts are rendered by the dedicated social/contacts work-card
+        // surfaces. Keeping the fallback so future routing changes still
+        // produce something visible.
+        let text = crate::channel::render_approval_card_text(card);
+        self.send(crate::channel::OutboundMessage {
+            channel_type: crate::channel::ChannelType::Discord,
+            channel_id: channel_id.to_string(),
+            peer_id: channel_id.to_string(),
+            text,
+            thread_id: None,
+            reply_to_message_id: None,
+        })
+        .await?;
+        Ok(None)
+    }
+
     async fn start_typing(&self, channel_id: &str, _peer_id: &str) -> Result<TypingGuard> {
         let http = self.http.read().await;
         let http = match http.as_ref() {

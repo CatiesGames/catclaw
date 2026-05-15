@@ -261,9 +261,16 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 adapters.push(adapter.clone());
                 line_adapter = Some(adapter.clone());
 
+                // Drain the postback approval receiver into the shared
+                // approval channel pool (mirrors Discord/Telegram/Slack).
+                if let Some(rx) = adapter.take_approval_rx().await {
+                    approval_receivers.push(rx);
+                }
+
                 let tx = msg_tx.clone();
+                let adapter_for_start = adapter.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = adapter.start(tx).await {
+                    if let Err(e) = adapter_for_start.start(tx).await {
                         error!(error = %e, "line adapter error");
                     }
                 });
