@@ -244,7 +244,13 @@ async fn request_approval(
         return true; // Fail open
     }
 
-    // Wait for approval.result event with matching request_id
+    // Wait for approval.result event with matching request_id.
+    //
+    // B.3.1: prefer the new `decision` discriminator ("approved"|"denied"|
+    // "timeout") with the optional `reason`; fall back to legacy `approved`
+    // bool if the gateway is older than this hook binary. Returns the same
+    // `bool` upstream — the hook itself only cares about allow/block —
+    // but logs distinguish the three states for diagnosis.
     let result = tokio::time::timeout(
         tokio::time::Duration::from_secs(timeout_secs),
         async {
@@ -252,9 +258,38 @@ async fn request_approval(
                 if event.event == "approval.result" {
                     let rid = event.data.get("request_id").and_then(|v| v.as_str());
                     if rid == Some(request_id.as_str()) {
-                        return event.data.get("approved")
+                        let decision = event
+                            .data
+                            .get("decision")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let approved = event
+                            .data
+                            .get("approved")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
+                        let reason = event
+                            .data
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        match decision.as_deref() {
+                            Some("approved") => {}
+                            Some("denied") if !reason.is_empty() => {
+                                eprintln!(
+                                    "catclaw hook: tool denied by admin: {}",
+                                    reason
+                                );
+                            }
+                            Some("denied") => {}
+                            Some("timeout") => {
+                                eprintln!(
+                                    "catclaw hook: approval timed out (gateway-side)"
+                                );
+                            }
+                            _ => {} // legacy gateway, fall through on approved bool
+                        }
+                        return approved;
                     }
                 }
             }

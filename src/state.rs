@@ -715,6 +715,41 @@ impl StateDb {
         Ok(row)
     }
 
+    /// Look up a session by its runtime-issued session_id (Claude UUID v4 or
+    /// Codex thread_id UUID v7). Used by the MCP server to resolve which
+    /// agent is making a `tools/call` based on `_meta.x-codex-turn-metadata.
+    /// session_id` (codex-runtime-plan.md §5.2).
+    ///
+    /// Returns the most recently-updated row when multiple share the same
+    /// session_id — that can happen if a thread is forked, though the fork
+    /// flow uses a new session_key+session_id so practically there is one row.
+    pub fn get_session_by_session_id(&self, session_id: &str) -> Result<Option<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT session_key, session_id, agent_id, origin, context_id, parent_session_id, state, last_activity_at, created_at, metadata
+                 FROM sessions WHERE session_id = ?1
+                 ORDER BY last_activity_at DESC LIMIT 1",
+                params![session_id],
+                |row| {
+                    Ok(SessionRow {
+                        session_key: row.get(0)?,
+                        session_id: row.get(1)?,
+                        agent_id: row.get(2)?,
+                        origin: row.get(3)?,
+                        context_id: row.get(4)?,
+                        parent_session_id: row.get(5)?,
+                        state: row.get(6)?,
+                        last_activity_at: row.get(7)?,
+                        created_at: row.get(8)?,
+                        metadata: row.get(9)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

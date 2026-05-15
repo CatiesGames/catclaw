@@ -8,6 +8,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::Value;
 
+use crate::agent::Agent;
 use crate::channel::ChannelAdapter;
 use crate::gateway::GatewayHandle;
 
@@ -78,7 +79,41 @@ async fn handle_mcp(
                 .cloned()
                 .unwrap_or(Value::Object(serde_json::Map::new()));
 
-            dispatch_existing_tool(&gw, &tool_name, arguments, id).await
+            // B.4.2 — Branch on `_meta.x-codex-turn-metadata` (codex marker).
+            // See codex-runtime-plan.md §5.2.1 for why we don't rely on the
+            // presence of `_meta` itself — Claude sends `_meta.claudecode/...`
+            // too, just with different keys.
+            match extract_codex_meta(&params) {
+                Some((session_id, turn_id)) => {
+                    // Codex client. Resolve which agent owns this session
+                    // and route through the approval gate. Resolve-failure
+                    // is a hard error — DO NOT fall through to the Claude
+                    // legacy dispatch (would silently bypass the gate).
+                    let Some(agent) = resolve_agent_from_session(&gw, &session_id) else {
+                        return jsonrpc_error(
+                            id,
+                            -32000,
+                            &format!("unknown codex session: {}", session_id),
+                        );
+                    };
+                    handle_codex_tool_call(
+                        id,
+                        &gw,
+                        &tool_name,
+                        arguments,
+                        &agent,
+                        &session_id,
+                        turn_id,
+                    )
+                    .await
+                }
+                None => {
+                    // No codex marker → Claude (or any other MCP client that
+                    // doesn't carry the codex extension). Existing dispatch,
+                    // byte-by-byte unchanged.
+                    dispatch_existing_tool(&gw, &tool_name, arguments, id).await
+                }
+            }
         }
         "ping" => jsonrpc_ok(id, serde_json::json!({})),
         _ => jsonrpc_error(id, -32601, &format!("method not found: {}", method)),
@@ -211,6 +246,259 @@ async fn dispatch_existing_tool(
             });
             jsonrpc_ok(id, response)
         }
+    }
+}
+
+/// Extract Codex-specific session/turn ids from MCP `tools/call` params.
+///
+/// Codex's MCP client sends `_meta.x-codex-turn-metadata.{session_id,turn_id,
+/// model,sandbox,...}` on every `tools/call`. Claude sends `_meta` too but
+/// with completely different keys (`claudecode/toolUseId`, `progressToken`),
+/// so finding the codex-specific marker key is what distinguishes the two —
+/// **not** the presence of `_meta` itself (codex-runtime-plan.md §5.2.1).
+///
+/// Returns `Some((session_id, turn_id))` only when the codex marker is
+/// present. Returns `None` for Claude requests (falls through to the
+/// legacy Claude dispatch path).
+#[allow(dead_code)] // wired in B.4.2 (handle_tool_call branching)
+fn extract_codex_meta(params: &Value) -> Option<(String, Option<String>)> {
+    let meta = params.get("_meta")?;
+    // Codex-specific marker: presence of x-codex-turn-metadata = codex client.
+    let turn_meta = meta.get("x-codex-turn-metadata")?;
+    let session = turn_meta.get("session_id").and_then(|v| v.as_str())?.to_string();
+    let turn = turn_meta
+        .get("turn_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    Some((session, turn))
+}
+
+/// Look up the [`Agent`] that owns a given codex `session_id`.
+///
+/// Returns `None` when the session_id doesn't match any persisted row — that's
+/// a hard error for codex callers (handled at `handle_tool_call` so we don't
+/// silently fall through to the Claude legacy path, which would bypass the
+/// codex approval gate). Claude callers never reach this function because
+/// `extract_codex_meta` returns `None` for them.
+#[allow(dead_code)] // wired in B.4.2
+fn resolve_agent_from_session(gw: &GatewayHandle, session_id: &str) -> Option<Agent> {
+    let row = gw
+        .state_db
+        .get_session_by_session_id(session_id)
+        .ok()
+        .flatten()?;
+    // Clone the agent out of the registry — never hold the read guard across
+    // an await point (CLAUDE.md lesson 3). The Agent struct is cheap-ish
+    // (Vec/PathBuf etc.) so per-tool-call cloning is acceptable here.
+    let registry = gw.agent_registry.read().ok()?;
+    registry.get(&row.agent_id).cloned()
+}
+
+/// Tools that auto-stage a social draft when called. For Codex these route
+/// through `submit_for_approval` and return "queued" immediately rather than
+/// hitting the Meta API synchronously. Order matches the existing
+/// `cmd_hook.rs::SOCIAL_PUBLISH_TOOLS` constant so the Claude (hook) path
+/// and Codex (MCP intercept) path cover the same surface.
+const CODEX_SOCIAL_PUBLISH_TOOLS: &[&str] = &[
+    "instagram_create_post",
+    "instagram_send_dm",
+    "instagram_reply_comment",
+    "threads_create_post",
+    "threads_reply",
+];
+
+/// Handle a Codex-origin `tools/call`.
+///
+/// Three branches:
+///   1. Social publish tool + agent has `review_required` configured → write
+///      a draft via `handle_social_draft_submit` (same path the hook takes)
+///      and return "queued" immediately. No synchronous wait.
+///   2. (Future) `contacts_reply` with approval_required → analogous draft
+///      path. Stubbed for B.4.2; B.5+ will surface the ContactReply card.
+///   3. Everything else: consult `agent.tool_permission()`. Allowed runs
+///      through `dispatch_existing_tool`. Denied returns a policy error.
+///      RequireApproval inserts a `PendingApproval` into the gateway's
+///      `pending_approvals` DashMap, sends the approval card, and waits on
+///      the oneshot — same wait semantics as the hook subprocess (it's
+///      the same `oneshot::Receiver<ApprovalDecision>` plumbing).
+#[allow(clippy::too_many_arguments)]
+async fn handle_codex_tool_call(
+    id: Value,
+    gw: &Arc<GatewayHandle>,
+    tool_name: &str,
+    arguments: Value,
+    agent: &Agent,
+    session_id: &str,
+    turn_id: Option<String>,
+) -> Response {
+    // The MCP `tools/call` wire name is bare (e.g. "instagram_create_post").
+    // Pre-build the prefixed full name used by tools.toml so we can hand it
+    // to `Agent::tool_permission` (codex-runtime-plan.md §★ naming table).
+    let prefixed_name = format!("mcp__catclaw__{}", tool_name);
+
+    // ── Branch 1: social-publish tools route to the draft pipeline. ──
+    //
+    // Trigger condition mirrors the Claude hook (`cmd_hook.rs:86`): the tool
+    // is in the social publish set AND the agent has it listed in
+    // `tools.toml::require_approval`. When false, codex calls the underlying
+    // Meta API directly through dispatch_existing_tool (same as Claude with
+    // an empty require_approval list).
+    if CODEX_SOCIAL_PUBLISH_TOOLS.contains(&tool_name)
+        && matches!(
+            agent.tool_permission(&prefixed_name),
+            crate::agent::Permission::RequireApproval
+        )
+    {
+        return submit_social_draft_in_process(id, gw, tool_name, &arguments).await;
+    }
+
+    // ── Branch 2: contacts_reply with approval-required (placeholder). ──
+    // The contacts pipeline already runs through `submit_reply` which has its
+    // own DB-backed approval gate (see contacts/pipeline.rs). For codex we
+    // route the call through the same dispatch — the contacts module will
+    // handle the approval card itself. Phase B.5+ unifies the ContactReply
+    // ApprovalCard rendering across the channel adapters.
+    //
+    // No special branch needed here yet — contacts_reply flows into the
+    // dispatch path below and `contacts::pipeline::submit_reply` handles
+    // approval internally.
+
+    // ── Branch 3: general tool permission gate. ──
+    match agent.tool_permission(&prefixed_name) {
+        crate::agent::Permission::Denied => jsonrpc_error(
+            id,
+            -32001,
+            &format!("tool denied by agent policy: {}", prefixed_name),
+        ),
+        crate::agent::Permission::Allowed => {
+            dispatch_existing_tool(gw, tool_name, arguments, id).await
+        }
+        crate::agent::Permission::RequireApproval => {
+            // Synchronous-blocking approval — same channel + same UI as the
+            // hook path. Build a PendingApproval, send the card, wait for
+            // the admin's decision over the same oneshot wiring.
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let (tx, rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
+
+            let timeout_secs = agent.approval.timeout_secs;
+            let session_key = format!("catclaw:{}:codex:{}", agent.id, session_id);
+
+            gw.pending_approvals.insert(
+                request_id.clone(),
+                crate::approval::PendingApproval {
+                    request_id: request_id.clone(),
+                    session_key: session_key.clone(),
+                    agent_id: Some(agent.id.clone()),
+                    turn_id: turn_id.clone(),
+                    tool_name: prefixed_name.clone(),
+                    tool_input: arguments.clone(),
+                    created_at: std::time::Instant::now(),
+                    response_tx: tx,
+                },
+            );
+
+            // Broadcast approval.pending so TUI clients see the request.
+            let event = crate::ws_protocol::WsEvent {
+                event: "approval.pending".to_string(),
+                data: serde_json::to_value(crate::approval::ApprovalPendingEvent {
+                    request_id: request_id.clone(),
+                    session_key: session_key.clone(),
+                    tool_name: prefixed_name.clone(),
+                    tool_input: arguments.clone(),
+                    expires_secs: timeout_secs,
+                    agent_id: Some(agent.id.clone()),
+                    turn_id: turn_id.clone(),
+                })
+                .unwrap_or(serde_json::json!({})),
+            };
+            let _ = gw
+                .event_bus
+                .send(serde_json::to_string(&event).unwrap_or_default());
+
+            // Wait for the admin decision (or timeout). The channel-adapter
+            // approval card forwarding lives elsewhere — Phase B.5 will plug
+            // codex agents into `send_approval_card` so cards land on the
+            // right surface. For now the TUI's broadcast-driven panel is
+            // the working surface.
+            let decision = match tokio::time::timeout(
+                tokio::time::Duration::from_secs(timeout_secs),
+                rx,
+            )
+            .await
+            {
+                Ok(Ok(d)) => d,
+                Ok(Err(_)) | Err(_) => crate::approval::ApprovalDecision::Timeout,
+            };
+
+            // Mirror the wait to the wire so other connected clients see the
+            // resolution. The respond handler already broadcasts this when an
+            // admin clicks Approve/Deny via WS, but timeout originates here.
+            let result_event = crate::ws_protocol::WsEvent {
+                event: "approval.result".to_string(),
+                data: serde_json::to_value(
+                    crate::approval::ApprovalResultEvent::from_decision(
+                        request_id.clone(),
+                        &decision,
+                    ),
+                )
+                .unwrap_or(serde_json::json!({})),
+            };
+            let _ = gw
+                .event_bus
+                .send(serde_json::to_string(&result_event).unwrap_or_default());
+
+            match decision {
+                crate::approval::ApprovalDecision::Approved => {
+                    dispatch_existing_tool(gw, tool_name, arguments, id).await
+                }
+                crate::approval::ApprovalDecision::Denied { reason } => jsonrpc_error(
+                    id,
+                    -32002,
+                    &format!(
+                        "admin denied: {}",
+                        reason.unwrap_or_else(|| "(no reason given)".to_string())
+                    ),
+                ),
+                crate::approval::ApprovalDecision::Timeout => {
+                    jsonrpc_error(id, -32003, "approval timed out")
+                }
+            }
+        }
+    }
+}
+
+/// In-process shim that hands off to `ws_server::handle_social_draft_submit`
+/// without round-tripping through the WS layer. Returns the MCP response
+/// shape codex expects ("queued for review" with the draft id).
+async fn submit_social_draft_in_process(
+    id: Value,
+    gw: &Arc<GatewayHandle>,
+    tool_name: &str,
+    arguments: &Value,
+) -> Response {
+    let fake_req = crate::ws_protocol::WsRequest {
+        // The id is internal-only — handler echoes it back into a WsResponse
+        // we then unpack. 0 is fine as a sentinel.
+        id: 0,
+        method: "social.draft.submit_for_approval".to_string(),
+        params: serde_json::json!({
+            "tool_name": tool_name,
+            "tool_input": arguments,
+        }),
+    };
+    let ws_resp = crate::ws_server::handle_social_draft_submit(&fake_req, gw).await;
+    match (ws_resp.result, ws_resp.error) {
+        (Some(result), None) => {
+            // Surface the draft id + status as MCP text content so the agent
+            // sees "draft queued for review" in its tool result.
+            let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+            let response = serde_json::json!({
+                "content": [{ "type": "text", "text": text }],
+            });
+            jsonrpc_ok(id, response)
+        }
+        (_, Some(err)) => jsonrpc_error(id, -32004, &err.message),
+        _ => jsonrpc_error(id, -32004, "submit_for_approval returned no result"),
     }
 }
 

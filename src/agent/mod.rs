@@ -19,6 +19,22 @@ pub struct ToolPermissions {
     pub require_approval: Vec<String>,
 }
 
+/// Resolution of an agent's permission for a given tool.
+///
+/// Returned by [`Agent::tool_permission`]. Used by `mcp_server.rs` (Codex
+/// path) to gate tool calls; the Claude path doesn't read this — Claude's
+/// PreToolUse hook applies the same lists upstream via `--settings`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // wired in B.4.2 (handle_codex_tool_call)
+pub enum Permission {
+    /// Tool runs without prompting the admin.
+    Allowed,
+    /// Tool is unconditionally blocked.
+    Denied,
+    /// Tool runs only after admin approves via the approval channel.
+    RequireApproval,
+}
+
 /// Which CLI runtime backs this agent.
 ///
 /// `Claude` (default, existing behaviour) launches `claude -p` subprocesses
@@ -188,6 +204,36 @@ Your memories are stored in a structured database (MemPalace). Use the memory_* 
 "#;
 
 impl Agent {
+    /// Resolve this agent's policy for a tool name.
+    ///
+    /// Input format: the **prefixed full name** as it appears in `tools.toml`
+    /// — e.g. `mcp__catclaw__instagram_create_post` or `Bash`. Callers using
+    /// codex's bare MCP names (`instagram_create_post`) must prefix to
+    /// `mcp__{server}__{tool}` before calling this method.
+    ///
+    /// Default fall-through is `Allowed` to match the existing Claude
+    /// behaviour (where a tool not listed in `--disallowedTools` and not
+    /// matched by approval rules runs without prompting).
+    #[allow(dead_code)] // wired in B.4.2
+    pub fn tool_permission(&self, name: &str) -> Permission {
+        // Denied wins over everything else.
+        if self.tools.denied.iter().any(|d| d == name) {
+            return Permission::Denied;
+        }
+        if self.tools.require_approval.iter().any(|d| d == name) {
+            return Permission::RequireApproval;
+        }
+        // `allowed` is the whitelist semantic — if non-empty and the name
+        // isn't in it, the tool is effectively denied. Mirrors the
+        // `--tools` flag's whitelist behaviour for Claude.
+        if !self.tools.allowed.is_empty()
+            && !self.tools.allowed.iter().any(|d| d == name)
+        {
+            return Permission::Denied;
+        }
+        Permission::Allowed
+    }
+
     /// Check if memory is disabled for this agent.
     /// Disabled only when ALL memory/kg tools are denied.
     /// Used by build_system_prompt() and scheduler diary extraction.

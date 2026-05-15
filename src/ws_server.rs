@@ -10,7 +10,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use crate::approval::{ApprovalPendingEvent, ApprovalResultEvent, PendingApproval};
+use crate::approval::{
+    ApprovalDecision, ApprovalPendingEvent, ApprovalResultEvent, PendingApproval,
+};
 use crate::gateway::GatewayHandle;
 use crate::mcp_server;
 use crate::session::manager::SenderInfo;
@@ -344,11 +346,18 @@ async fn handle_approval_request(req: &WsRequest, gw: &Arc<GatewayHandle>) -> Ws
         if t == 0 { 120 } else { t }
     };
 
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel::<bool>();
+    let (response_tx, response_rx) =
+        tokio::sync::oneshot::channel::<ApprovalDecision>();
 
     gw.pending_approvals.insert(request_id.clone(), PendingApproval {
         request_id: request_id.clone(),
         session_key: session_key.clone(),
+        // Hook-driven approvals carry no explicit agent_id on the wire today;
+        // Phase B.4.2 will populate this when the codex MCP intercept builds
+        // its own PendingApproval. Leaving None preserves byte-identical
+        // behaviour for the existing Claude path.
+        agent_id: None,
+        turn_id: None,
         tool_name: tool_name.clone(),
         tool_input: tool_input.clone(),
         created_at: std::time::Instant::now(),
@@ -364,6 +373,8 @@ async fn handle_approval_request(req: &WsRequest, gw: &Arc<GatewayHandle>) -> Ws
             tool_name: tool_name.clone(),
             tool_input: tool_input.clone(),
             expires_secs: timeout_secs,
+            agent_id: None,
+            turn_id: None,
         }).unwrap_or(json!({})),
     };
     let _ = gw.event_bus.send(serde_json::to_string(&event).unwrap_or_default());
@@ -438,24 +449,36 @@ async fn handle_approval_request(req: &WsRequest, gw: &Arc<GatewayHandle>) -> Ws
         });
     }
 
-    // Wait for response in background, then broadcast result
+    // Wait for response in background, then broadcast result.
+    //
+    // Three terminal states map to ApprovalDecision (B.3.1):
+    //   - admin acted → respond handler sends the decision over response_tx
+    //   - timeout expired → we synthesise ApprovalDecision::Timeout
+    //   - channel closed (sender dropped) → also Timeout (defensive)
     let gw2 = gw.clone();
     let rid = request_id.clone();
     tokio::spawn(async move {
-        let approved = tokio::time::timeout(
+        let decision = match tokio::time::timeout(
             tokio::time::Duration::from_secs(timeout_secs),
             response_rx,
-        ).await.unwrap_or(Ok(false)).unwrap_or(false);
+        )
+        .await
+        {
+            Ok(Ok(d)) => d,
+            Ok(Err(_)) | Err(_) => ApprovalDecision::Timeout,
+        };
 
         let result_event = crate::ws_protocol::WsEvent {
             event: "approval.result".to_string(),
-            data: serde_json::to_value(ApprovalResultEvent {
-                request_id: rid.clone(),
-                approved,
-                reason: if approved { None } else { Some("denied by user".to_string()) },
-            }).unwrap_or(json!({})),
+            data: serde_json::to_value(ApprovalResultEvent::from_decision(
+                rid.clone(),
+                &decision,
+            ))
+            .unwrap_or(json!({})),
         };
-        let _ = gw2.event_bus.send(serde_json::to_string(&result_event).unwrap_or_default());
+        let _ = gw2
+            .event_bus
+            .send(serde_json::to_string(&result_event).unwrap_or_default());
     });
 
     WsResponse::ok(req.id, json!({"request_id": request_id}))
@@ -466,15 +489,44 @@ async fn handle_approval_respond(req: &WsRequest, gw: &Arc<GatewayHandle>) -> Ws
         Some(s) => s,
         None => return WsResponse::err(req.id, -32602, "missing param: request_id"),
     };
-    let approved = req.params.get("approved")
-        .and_then(|v| v.as_bool()).unwrap_or(false);
+    let approved = req
+        .params
+        .get("approved")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    // Optional denial reason (B.3.1) — TUI / channel "deny with reason"
+    // surfaces send this through; null/missing means an unreasoned deny.
+    let reason = req
+        .params
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let decision = if approved {
+        ApprovalDecision::Approved
+    } else {
+        ApprovalDecision::Denied { reason }
+    };
 
     match gw.pending_approvals.remove(request_id) {
         Some((_, pa)) => {
-            let _ = pa.response_tx.send(approved);
-            WsResponse::ok(req.id, json!({"approved": approved}))
+            let _ = pa.response_tx.send(decision.clone());
+            WsResponse::ok(
+                req.id,
+                json!({
+                    "approved": decision.is_approved(),
+                    "decision": decision.as_wire_str(),
+                }),
+            )
         }
-        None => WsResponse::err(req.id, -1, format!("approval request '{}' not found or already resolved", request_id)),
+        None => WsResponse::err(
+            req.id,
+            -1,
+            format!(
+                "approval request '{}' not found or already resolved",
+                request_id
+            ),
+        ),
     }
 }
 
@@ -2297,7 +2349,13 @@ fn stage_draft_from_tool(
 /// Called by the cmd_hook when a social publish tool hits require_approval.
 /// Creates the draft from tool_input (since the MCP handler hasn't run yet),
 /// sends approval card, stores forward_ref.
-async fn handle_social_draft_submit(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+/// Stage a social draft and send the approval card to the admin channel.
+///
+/// Exposed `pub(crate)` so the codex MCP intercept path (mcp_server.rs) can
+/// invoke the same logic in-process without round-tripping through WS.
+/// The hook subprocess still goes through `social.draft.submit_for_approval`
+/// over WS — that path is unchanged.
+pub(crate) async fn handle_social_draft_submit(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
     let tool_name = match req.params.get("tool_name").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => return WsResponse::err(req.id, -32602, "missing param: tool_name"),

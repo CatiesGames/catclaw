@@ -306,14 +306,24 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         info!("no channel adapters configured — gateway running in headless mode");
     }
 
-    // Wire adapter approval receivers: forward (request_id, approved) → pending_approvals
+    // Wire adapter approval receivers: forward (request_id, approved) → pending_approvals.
+    //
+    // Channel button clicks today carry only a bool (button channels predate
+    // the B.3.1 3-way decision). Map approved=true → Approved, false → Denied
+    // with no reason. Phase B.5.2 / B.5.3 may surface "deny with reason" UIs
+    // on Discord/LINE; those will produce an ApprovalDecision directly.
     for mut rx in approval_receivers {
         let approvals = pending_approvals.clone();
         tokio::spawn(async move {
             while let Some((request_id, approved)) = rx.recv().await {
                 if let Some((_, pa)) = approvals.remove(&request_id) {
                     info!(request_id = %request_id, approved = approved, "channel approval received");
-                    let _ = pa.response_tx.send(approved);
+                    let decision = if approved {
+                        crate::approval::ApprovalDecision::Approved
+                    } else {
+                        crate::approval::ApprovalDecision::Denied { reason: None }
+                    };
+                    let _ = pa.response_tx.send(decision);
                 } else {
                     warn!(request_id = %request_id, "approval response for unknown/expired request");
                 }
@@ -452,7 +462,12 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 for key in expired {
                     if let Some((_, pa)) = approvals.remove(&key) {
                         warn!(request_id = %pa.request_id, "approval request expired");
-                        let _ = pa.response_tx.send(false);
+                        // B.3.1: surface "timeout" as a distinct decision so
+                        // hook subprocess / codex MCP intercept can give the
+                        // model a clearer error than a plain deny.
+                        let _ = pa
+                            .response_tx
+                            .send(crate::approval::ApprovalDecision::Timeout);
                     }
                 }
             }
