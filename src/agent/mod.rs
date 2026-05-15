@@ -18,6 +18,34 @@ pub struct ToolPermissions {
     pub require_approval: Vec<String>,
 }
 
+/// Which CLI runtime backs this agent.
+///
+/// `Claude` (default, existing behaviour) launches `claude -p` subprocesses
+/// via [`ClaudeHandle`]. `Codex` launches `codex exec` subprocesses via
+/// [`CodexHandle`] (Phase B).
+///
+/// Stored per-agent in catclaw.toml. Default omitted to keep existing
+/// configs unchanged (`#[serde(default)]` + skip-if-default on the config side).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Runtime {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl Runtime {
+    #[allow(dead_code)] // used in Phase B (codex_args / TUI display / WS handlers)
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Runtime::Claude => "claude",
+            Runtime::Codex => "codex",
+        }
+    }
+}
+
 /// A loaded agent with its workspace content
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -33,6 +61,11 @@ pub struct Agent {
     pub approval: ApprovalConfig,
     /// IANA timezone from config (e.g. "Asia/Taipei"), used for daily notes and date display.
     pub timezone: Option<String>,
+    /// Which CLI runtime backs this agent. Defaults to `Claude` (existing behaviour).
+    pub runtime: Runtime,
+    /// Optional override for the codex auth file. None = use the user's default
+    /// `~/.codex/auth.json`. Per-agent override supports multi-account deploys.
+    pub codex_auth_path: Option<PathBuf>,
 }
 
 /// System-level directives that are hardcoded and cannot be overridden by user MD files.
@@ -472,6 +505,57 @@ impl Agent {
         }
 
         args
+    }
+
+    /// Spawn a session subprocess for this agent, returning a [`RuntimeHandle`].
+    ///
+    /// Dispatches to the appropriate CLI (`claude -p` or `codex exec`) based on
+    /// `self.runtime`. Phase A only implements the Claude path; the Codex path
+    /// will be added in Phase B.
+    pub async fn spawn_session(
+        &self,
+        params: &crate::session::runtime::SpawnParams<'_>,
+        prompt: &str,
+        env: &HashMap<String, String>,
+    ) -> Result<crate::session::runtime::RuntimeHandle> {
+        match self.runtime {
+            Runtime::Claude => {
+                let args = if params.is_resume {
+                    self.claude_resume_args_with_mcp(
+                        params.session_id,
+                        params.model_override,
+                        params.mcp_port,
+                        params.hook_session_key,
+                        params.config_path,
+                        params.mcp_env,
+                        params.state_db,
+                    )
+                } else {
+                    self.claude_args_with_mcp(
+                        params.session_id,
+                        params.model_override,
+                        params.mcp_port,
+                        params.hook_session_key,
+                        params.config_path,
+                        params.mcp_env,
+                        params.state_db,
+                    )
+                };
+                let handle =
+                    crate::session::claude::ClaudeHandle::spawn_with_prompt(args, prompt, env)
+                        .await?;
+                Ok(crate::session::runtime::RuntimeHandle::Claude(handle))
+            }
+            Runtime::Codex => {
+                // Phase B implements `codex exec` spawn (CodexHandle + codex_args).
+                // Until then, Codex agents cannot be spawned; loader / WS handler
+                // should reject codex runtime to avoid hitting this path.
+                Err(crate::error::CatClawError::Claude(format!(
+                    "codex runtime not yet implemented (agent={})",
+                    self.id
+                )))
+            }
+        }
     }
 
     /// Build resume args (uses --resume instead of --session-id).

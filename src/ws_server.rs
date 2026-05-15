@@ -935,6 +935,8 @@ async fn handle_agents_new(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRespon
         model: None,
         fallback_model: None,
         approval: crate::config::ApprovalConfig::default(),
+        runtime: crate::agent::Runtime::default(),
+        codex_auth_path: None,
     });
     let serialized = match toml::to_string_pretty(&full) {
         Ok(s) => s,

@@ -132,6 +132,8 @@ impl AgentLoader {
             fallback_model,
             approval,
             timezone: timezone.map(String::from),
+            runtime: config.runtime,
+            codex_auth_path: config.codex_auth_path.clone(),
         })
     }
 

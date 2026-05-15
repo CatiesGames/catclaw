@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod manager;
 pub mod queue;
+pub mod runtime;
 pub mod transcript;
 
 use std::fmt;

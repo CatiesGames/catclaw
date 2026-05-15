@@ -379,6 +379,21 @@ pub struct AgentConfig {
     /// Tool approval rules for this agent.
     #[serde(default)]
     pub approval: ApprovalConfig,
+
+    /// CLI runtime for this agent. Omitted from TOML for default (claude),
+    /// so existing configs serialize identically.
+    #[serde(default, skip_serializing_if = "is_default_runtime")]
+    pub runtime: crate::agent::Runtime,
+
+    /// Optional per-agent override for the codex auth.json path.
+    /// None = use the user's default `~/.codex/auth.json`.
+    /// Only meaningful when runtime = codex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_auth_path: Option<PathBuf>,
+}
+
+fn is_default_runtime(r: &crate::agent::Runtime) -> bool {
+    *r == crate::agent::Runtime::Claude
 }
 
 /// Tool approval rules for an agent.
@@ -1267,6 +1282,8 @@ impl Config {
                 model: None,
                 fallback_model: None,
                 approval: ApprovalConfig::default(),
+                runtime: crate::agent::Runtime::default(),
+                codex_auth_path: None,
             }],
             bindings: vec![],
             collaboration: CollaborationConfig::default(),

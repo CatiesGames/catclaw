@@ -10,8 +10,9 @@ use crate::config::Config;
 use crate::error::{CatClawError, Result};
 use crate::state::{SessionRow, StateDb};
 
-use super::claude::{ClaudeEvent, ClaudeHandle};
+use super::claude::ClaudeHandle;
 use super::queue::SessionQueue;
+use super::runtime::RuntimeEvent;
 use super::transcript::TranscriptLog;
 use super::{Priority, SessionEvent, SessionKey};
 
@@ -127,7 +128,7 @@ impl SessionManager {
         priority: Priority,
         sender: &SenderInfo,
         initial_model: Option<&str>,
-        event_observer: Option<tokio::sync::mpsc::UnboundedSender<super::claude::ClaudeEvent>>,
+        event_observer: Option<tokio::sync::mpsc::UnboundedSender<super::runtime::RuntimeEvent>>,
     ) -> Result<String> {
         let session_key = key.to_key_string();
         let mcp_env = self.mcp_env();
@@ -148,6 +149,20 @@ impl SessionManager {
         let session_model = existing.as_ref().and_then(|r| r.model())
             .or_else(|| initial_model.map(String::from));
 
+        // codex-runtime-plan.md §2.4: cross-runtime resume guard.
+        // If the stored session was created with a different runtime than the
+        // agent currently has, fail loudly rather than spawning the wrong CLI
+        // with a session_id it cannot resume.
+        if let Some(row) = existing.as_ref() {
+            let stored_runtime = row.runtime_from_metadata().unwrap_or(crate::agent::Runtime::Claude);
+            if stored_runtime != agent.runtime {
+                return Err(CatClawError::Session(format!(
+                    "session was created with runtime={:?} but agent is now {:?} — start a new session",
+                    stored_runtime, agent.runtime
+                )));
+            }
+        }
+
         let (session_id, is_resume) = match existing {
             Some(row) if row.state != "archived" => {
                 info!(session_key = %session_key, session_id = %row.session_id, "resuming session");
@@ -157,7 +172,7 @@ impl SessionManager {
                 let new_id = Uuid::new_v4().to_string();
                 info!(session_key = %session_key, session_id = %new_id, "creating new session");
 
-                // Build initial metadata with model and platform IDs
+                // Build initial metadata with model, platform IDs, and runtime
                 let initial_metadata = {
                     let mut meta = serde_json::Map::new();
                     if let Some(m) = initial_model {
@@ -172,7 +187,13 @@ impl SessionManager {
                     if let Some(ref tid) = sender.thread_id {
                         meta.insert("thread_id".to_string(), serde_json::Value::String(tid.clone()));
                     }
-                    if meta.is_empty() { None } else { Some(serde_json::Value::Object(meta).to_string()) }
+                    // codex-runtime-plan.md §2.4: store runtime so cross-runtime
+                    // resume can detect mismatch. Always written for new sessions.
+                    meta.insert(
+                        "runtime".to_string(),
+                        serde_json::Value::String(agent.runtime.as_str().to_string()),
+                    );
+                    Some(serde_json::Value::Object(meta).to_string())
                 };
 
                 // Save to DB
@@ -200,15 +221,24 @@ impl SessionManager {
                             boot.trim(),
                             message
                         );
-                        let args =
-                            agent.claude_args_with_mcp(&new_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env, Some(&self.state_db));
+                        let spawn_params = crate::session::runtime::SpawnParams {
+                            session_id: &new_id,
+                            model_override: session_model.as_deref(),
+                            mcp_port: self.mcp_port,
+                            hook_session_key: Some(&session_key),
+                            config_path: self.config_path.as_deref(),
+                            mcp_env: &mcp_env,
+                            state_db: Some(&self.state_db),
+                            is_resume: false,
+                            resume_thread_id: None,
+                        };
 
                         // Register kill channel so /stop works during BOOT.md execution
                         let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
                         self.active_handles.insert(session_key.clone(), kill_tx);
 
                         let mut handle =
-                            ClaudeHandle::spawn_with_prompt(args, &combined, &subprocess_env).await?;
+                            agent.spawn_session(&spawn_params, &combined, &subprocess_env).await?;
 
                         let response = tokio::select! {
                             result = handle.wait_for_result(event_observer.clone()) => result?,
@@ -224,10 +254,8 @@ impl SessionManager {
                         self.active_handles.remove(&session_key);
 
                         // Determine final session ID
-                        let final_id = handle
-                            .session_id
-                            .as_deref()
-                            .unwrap_or(&new_id);
+                        let returned_session_id = handle.session_id().map(String::from);
+                        let final_id = returned_session_id.as_deref().unwrap_or(&new_id);
 
                         // Log transcript (skip for system sessions)
                         if !session_key.contains(":system:") {
@@ -247,7 +275,7 @@ impl SessionManager {
                         }
 
                         // Update session_id if claude returned one
-                        if let Some(real_id) = &handle.session_id {
+                        if let Some(real_id) = &returned_session_id {
                             let mut row = self.state_db.get_session(&session_key)?.unwrap();
                             row.session_id = real_id.clone();
                             row.state = "idle".to_string();
@@ -267,20 +295,25 @@ impl SessionManager {
         };
 
         // Build args
-        let args = if is_resume {
-            agent.claude_resume_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env, Some(&self.state_db))
-        } else {
-            agent.claude_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env, Some(&self.state_db))
-        };
-
         // Update state to active + register kill channel
         self.state_db
             .update_session_state(&session_key, "active")?;
         let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
         self.active_handles.insert(session_key.clone(), kill_tx);
 
-        // Spawn claude with the prompt as CLI argument
-        let mut handle = ClaudeHandle::spawn_with_prompt(args, message, &subprocess_env).await?;
+        // Spawn the agent's runtime (claude or codex) with the prompt
+        let spawn_params = crate::session::runtime::SpawnParams {
+            session_id: &session_id,
+            model_override: session_model.as_deref(),
+            mcp_port: self.mcp_port,
+            hook_session_key: Some(&session_key),
+            config_path: self.config_path.as_deref(),
+            mcp_env: &mcp_env,
+            state_db: Some(&self.state_db),
+            is_resume,
+            resume_thread_id: None,
+        };
+        let mut handle = agent.spawn_session(&spawn_params, message, &subprocess_env).await?;
 
         // Wait for result, but also listen for kill signal
         let response = tokio::select! {
@@ -315,10 +348,8 @@ impl SessionManager {
         }?;
 
         // Determine final session ID for transcript
-        let final_id = handle
-            .session_id
-            .as_deref()
-            .unwrap_or(&session_id);
+        let returned_session_id = handle.session_id().map(String::from);
+        let final_id = returned_session_id.as_deref().unwrap_or(&session_id);
 
         // Log transcript (skip for system-originated sessions: heartbeat, cron tasks)
         let is_system = session_key.contains(":system:");
@@ -347,8 +378,8 @@ impl SessionManager {
             transcript.log_assistant(&response, None).await;
         }
 
-        // Update session_id if claude returned one (may differ from what we set)
-        if let Some(real_id) = &handle.session_id {
+        // Update session_id if the runtime returned one (may differ from what we set)
+        if let Some(real_id) = &returned_session_id {
             if *real_id != session_id {
                 let mut row = self.state_db.get_session(&session_key)?.unwrap();
                 row.session_id = real_id.clone();
@@ -439,6 +470,17 @@ impl SessionManager {
         let session_model = existing.as_ref().and_then(|r| r.model())
             .or_else(|| initial_model.map(String::from));
 
+        // codex-runtime-plan.md §2.4: cross-runtime resume guard.
+        if let Some(row) = existing.as_ref() {
+            let stored_runtime = row.runtime_from_metadata().unwrap_or(crate::agent::Runtime::Claude);
+            if stored_runtime != agent.runtime {
+                return Err(CatClawError::Session(format!(
+                    "session was created with runtime={:?} but agent is now {:?} — start a new session",
+                    stored_runtime, agent.runtime
+                )));
+            }
+        }
+
         let (session_id, is_resume) = match existing {
             Some(row) if row.state != "archived" => {
                 info!(session_key = %session_key, session_id = %row.session_id, "resuming session (streaming)");
@@ -448,7 +490,7 @@ impl SessionManager {
                 let new_id = Uuid::new_v4().to_string();
                 info!(session_key = %session_key, session_id = %new_id, "creating new session (streaming)");
 
-                // Build initial metadata with model and platform IDs
+                // Build initial metadata with model, platform IDs, and runtime
                 let initial_metadata = {
                     let mut meta = serde_json::Map::new();
                     if let Some(m) = initial_model {
@@ -463,7 +505,13 @@ impl SessionManager {
                     if let Some(ref tid) = sender.thread_id {
                         meta.insert("thread_id".to_string(), serde_json::Value::String(tid.clone()));
                     }
-                    if meta.is_empty() { None } else { Some(serde_json::Value::Object(meta).to_string()) }
+                    // codex-runtime-plan.md §2.4: store runtime so cross-runtime
+                    // resume can detect mismatch. Always written for new sessions.
+                    meta.insert(
+                        "runtime".to_string(),
+                        serde_json::Value::String(agent.runtime.as_str().to_string()),
+                    );
+                    Some(serde_json::Value::Object(meta).to_string())
                 };
 
                 let now = Utc::now().to_rfc3339();
@@ -500,21 +548,25 @@ impl SessionManager {
             message.to_string()
         };
 
-        // Build args
-        let args = if is_resume {
-            agent.claude_resume_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env, Some(&self.state_db))
-        } else {
-            agent.claude_args_with_mcp(&session_id, session_model.as_deref(), self.mcp_port, Some(&session_key), self.config_path.as_deref(), &mcp_env, Some(&self.state_db))
-        };
-
         // Update state to active + register kill channel
         self.state_db
             .update_session_state(&session_key, "active")?;
         let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
         self.active_handles.insert(session_key.clone(), kill_tx);
 
-        // Spawn claude
-        let mut handle = ClaudeHandle::spawn_with_prompt(args, &actual_message, &subprocess_env).await?;
+        // Spawn the agent's runtime with the prompt
+        let spawn_params = crate::session::runtime::SpawnParams {
+            session_id: &session_id,
+            model_override: session_model.as_deref(),
+            mcp_port: self.mcp_port,
+            hook_session_key: Some(&session_key),
+            config_path: self.config_path.as_deref(),
+            mcp_env: &mcp_env,
+            state_db: Some(&self.state_db),
+            is_resume,
+            resume_thread_id: None,
+        };
+        let mut handle = agent.spawn_session(&spawn_params, &actual_message, &subprocess_env).await?;
 
         // Create channel for streaming events
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
@@ -584,46 +636,49 @@ impl SessionManager {
                             info!(session_key = %session_key_owned, "streaming: first event received");
                         }
                         match &event {
-                            ClaudeEvent::SystemInit { session_id } => {
+                            RuntimeEvent::SystemInit { session_id } => {
                                 info!(session_id = %session_id, "streaming: got session init");
                                 if !session_id.is_empty() {
                                     final_session_id = session_id.clone();
                                 }
-                                handle.session_id = Some(session_id.clone());
                             }
-                            ClaudeEvent::TextDelta { text } => {
+                            RuntimeEvent::TextDelta { text } => {
                                 let _ = event_tx.send(SessionEvent::TextDelta { text: text.clone() });
                             }
-                            ClaudeEvent::ToolUseStart { name, input } => {
+                            RuntimeEvent::ToolUseStart { name, input } => {
                                 let _ = event_tx.send(SessionEvent::ToolUse { name: name.clone(), input: input.clone() });
                                 tool_uses.push(super::transcript::ToolUseEntry {
                                     name: name.clone(),
                                     input: input.clone(),
                                 });
                             }
-                            ClaudeEvent::Result { result, session_id } => {
+                            RuntimeEvent::ToolResult { .. } => {
+                                // Codex-only: ClaudeHandle never emits this. Phase A no-op;
+                                // Phase B may surface tool results in transcript / streaming.
+                            }
+                            RuntimeEvent::Result { result, session_id } => {
                                 if !session_id.is_empty() {
                                     final_session_id = session_id.clone();
                                 }
                                 got_result_event = true;
                                 // Only overwrite if non-empty; empty result means
-                                // Claude already sent response via tool use / streaming
+                                // the runtime already sent response via tool use / streaming
                                 if !result.is_empty() {
                                     result_text = result.clone();
                                 }
                                 break;
                             }
-                            ClaudeEvent::Assistant { content } => {
+                            RuntimeEvent::Assistant { content } => {
                                 for block in content {
                                     if let super::claude::ContentBlock::Text(text) = block {
                                         result_text.push_str(text);
                                     }
                                 }
                             }
-                            ClaudeEvent::StreamEvent { .. } => {
+                            RuntimeEvent::StreamEvent { .. } => {
                                 // Unrecognized stream events — skip silently
                             }
-                            ClaudeEvent::Unknown(_) => {}
+                            RuntimeEvent::Unknown(_) => {}
                         }
                     }
                     _ = &mut kill_rx => {
@@ -746,7 +801,9 @@ impl SessionManager {
             state: "suspended".to_string(),
             last_activity_at: now.clone(),
             created_at: now,
-            metadata: None,
+            metadata: Some(
+                serde_json::json!({ "runtime": agent.runtime.as_str() }).to_string(),
+            ),
         })?;
 
         info!(

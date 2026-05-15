@@ -2212,6 +2212,8 @@ async fn cmd_onboard(config_path: &PathBuf) -> Result<Config> {
             model: None,
             fallback_model: None,
             approval: crate::config::ApprovalConfig::default(),
+            runtime: crate::agent::Runtime::default(),
+            codex_auth_path: None,
         });
         cli_ui::status_msg("✅", "Agent 'main' created (default)");
         cli_ui::section_hint("  Edit personality: catclaw agent edit main soul");
@@ -3511,6 +3513,8 @@ async fn cmd_agent_new(config: &mut Config, config_path: &Path, name: &str) -> R
         model: None,
         fallback_model: None,
         approval: crate::config::ApprovalConfig::default(),
+        runtime: crate::agent::Runtime::default(),
+        codex_auth_path: None,
     });
     config.save(config_path)?;
 

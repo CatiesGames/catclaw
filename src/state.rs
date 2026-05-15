@@ -142,6 +142,42 @@ impl SessionRow {
 
         self.metadata = Some(serde_json::to_string(&obj).unwrap());
     }
+
+    /// Read the runtime this session was created with from metadata JSON.
+    /// Returns `None` for legacy rows (pre-v3.4) that don't have this field —
+    /// callers should default to `Runtime::Claude` to preserve existing behaviour.
+    pub fn runtime_from_metadata(&self) -> Option<crate::agent::Runtime> {
+        let meta = self.metadata.as_deref()?;
+        let parsed: Value = serde_json::from_str(meta).ok()?;
+        let s = parsed.get("runtime")?.as_str()?;
+        match s {
+            "claude" => Some(crate::agent::Runtime::Claude),
+            "codex" => Some(crate::agent::Runtime::Codex),
+            _ => None,
+        }
+    }
+
+    /// Store the runtime label in metadata JSON. Idempotent — safe to call on
+    /// rows that already have a runtime set.
+    ///
+    /// Used by `manager.rs` when creating new SessionRows so cross-runtime
+    /// resume can detect mismatch (codex-runtime-plan.md §2.4).
+    pub fn set_runtime_in_metadata(&mut self, runtime: crate::agent::Runtime) {
+        let mut obj = self
+            .metadata
+            .as_deref()
+            .and_then(|m| serde_json::from_str::<Value>(m).ok())
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "runtime".to_string(),
+                Value::String(runtime.as_str().to_string()),
+            );
+        }
+
+        self.metadata = Some(serde_json::to_string(&obj).unwrap());
+    }
 }
 
 #[allow(dead_code)]

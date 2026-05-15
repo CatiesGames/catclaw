@@ -486,23 +486,30 @@ impl MessageRouter {
 
         // Create event observer for reaction status updates
         let event_observer = reaction_handle.as_ref().map(|rh| {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::session::claude::ClaudeEvent>();
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::session::runtime::RuntimeEvent>();
             let rh_clone = rh.clone();
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
-                    use crate::session::claude::ClaudeEvent;
-                    use crate::channel::reaction::{ReactionState, resolve_tool_state};
+                    use crate::channel::reaction::{resolve_tool_state, ReactionState};
+                    use crate::session::runtime::RuntimeEvent;
                     match &event {
-                        ClaudeEvent::SystemInit { .. } => {
+                        RuntimeEvent::SystemInit { .. } => {
                             rh_clone.set_state(ReactionState::Thinking);
                         }
-                        ClaudeEvent::TextDelta { .. } => {
+                        RuntimeEvent::TextDelta { .. } => {
                             rh_clone.set_state(ReactionState::Thinking);
                         }
-                        ClaudeEvent::ToolUseStart { name, .. } => {
+                        RuntimeEvent::ToolUseStart { name, .. } => {
                             rh_clone.set_state(resolve_tool_state(name));
                         }
-                        ClaudeEvent::StreamEvent { event } => {
+                        RuntimeEvent::ToolResult { name, .. } => {
+                            // Codex-only: settle reaction back to thinking after a tool completes.
+                            // Use tool-name routing to bias status appropriately (mirrors Claude's
+                            // implicit "ToolUseStart → next Assistant" recovery path).
+                            rh_clone.set_state(resolve_tool_state(name));
+                        }
+                        RuntimeEvent::StreamEvent { event } => {
                             // Check for thinking_delta
                             if let Some(delta) = event.get("delta") {
                                 if delta.get("thinking").is_some() {
@@ -511,7 +518,12 @@ impl MessageRouter {
                             }
                             // Check for context_management compaction
                             if let Some(cm) = event.get("context_management") {
-                                if cm.get("applied_edits").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false) {
+                                if cm
+                                    .get("applied_edits")
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| !a.is_empty())
+                                    .unwrap_or(false)
+                                {
                                     rh_clone.set_state(ReactionState::Compacting);
                                 }
                             }
