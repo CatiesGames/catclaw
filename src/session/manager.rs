@@ -439,6 +439,53 @@ impl SessionManager {
             resume_thread_id: None,
         };
         let mut handle = agent.spawn_session(&params, prompt, &subprocess_env).await?;
+
+        // For codex agents only: write a transient `archived` SessionRow so
+        // the MCP intercept (mcp_server::resolve_agent_from_session) can
+        // resolve `_meta.x-codex-turn-metadata.session_id` back to this agent
+        // when the codex subprocess calls a catclaw MCP tool. Without this
+        // row, codex's first MCP call lands as "unknown codex session" and
+        // the approval gate hard-errors. Wrote as `archived` to keep the
+        // session out of TUI lists / resume picker (ephemeral semantics
+        // preserved — nothing meaningful is shown).
+        //
+        // We can only do this AFTER spawn so codex has actually issued its
+        // thread.started event; recv one event to get the thread_id, then
+        // write the row, then proceed with wait_for_result for the rest.
+        if matches!(agent.runtime, crate::agent::Runtime::Codex) {
+            // Drain events until we see SystemInit (or give up after a few
+            // to avoid hanging on a misbehaving subprocess).
+            for _ in 0..16 {
+                match handle.recv_event().await {
+                    Some(super::runtime::RuntimeEvent::SystemInit { session_id: thread_id }) => {
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let row = SessionRow {
+                            session_key: format!("catclaw:{}:ephemeral:{}", agent.id, thread_id),
+                            session_id: thread_id.clone(),
+                            agent_id: agent.id.clone(),
+                            origin: "ephemeral".to_string(),
+                            context_id: thread_id.clone(),
+                            parent_session_id: None,
+                            state: "archived".to_string(),
+                            last_activity_at: now.clone(),
+                            created_at: now,
+                            metadata: Some(
+                                serde_json::json!({
+                                    "runtime": agent.runtime.as_str(),
+                                    "ephemeral": true,
+                                })
+                                .to_string(),
+                            ),
+                        };
+                        let _ = self.state_db.upsert_session(&row);
+                        break;
+                    }
+                    Some(_) => continue, // any other event before SystemInit — keep looking
+                    None => break,       // subprocess died early
+                }
+            }
+        }
+
         handle.wait_for_result(None).await
     }
 

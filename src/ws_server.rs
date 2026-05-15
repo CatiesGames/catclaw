@@ -861,6 +861,9 @@ fn handle_agents_list(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
                 "id": a.id,
                 "workspace": a.workspace.display().to_string(),
                 "is_default": a.is_default,
+                // Expose runtime so TUI / CLI surfaces can distinguish
+                // claude vs codex agents without re-reading catclaw.toml.
+                "runtime": a.runtime.as_str(),
             })
         })
         .collect();
@@ -880,6 +883,7 @@ fn handle_agents_get(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
                 "id": a.id,
                 "workspace": a.workspace.display().to_string(),
                 "is_default": a.is_default,
+                "runtime": a.runtime.as_str(),
             }),
         ),
         None => WsResponse::err(req.id, -1, format!("agent not found: {}", id)),

@@ -55,6 +55,9 @@ struct AgentInfo {
     fallback_model: Option<String>,
     /// Tools that require approval before execution
     approval_tools: Vec<String>,
+    /// "claude" | "codex" — surfaced in the agent list so users can tell at
+    /// a glance which CLI an agent will spawn.
+    runtime: String,
 }
 
 fn load_skill_entries(agent_workspace: &std::path::Path, workspace_root: &std::path::Path) -> Vec<SkillEntry> {
@@ -294,6 +297,7 @@ impl AgentsPanel {
                             }))
                             .unwrap_or_default()
                     },
+                    runtime: a.runtime.as_str().to_string(),
                 }
             })
             .collect()
@@ -1400,6 +1404,11 @@ impl AgentsPanel {
             .enumerate()
             .map(|(i, a)| {
                 let default_marker = if a.is_default { " ⭐" } else { "" };
+                let runtime_marker = if a.runtime == "codex" {
+                    " [codex]"
+                } else {
+                    ""
+                };
                 let style = if i == self.selected {
                     Style::default()
                         .fg(Theme::TEXT)
@@ -1408,7 +1417,7 @@ impl AgentsPanel {
                     Style::default().fg(Theme::SUBTEXT0)
                 };
                 ListItem::new(Line::from(vec![Span::styled(
-                    format!("  {}{}", a.id, default_marker),
+                    format!("  {}{}{}", a.id, default_marker, runtime_marker),
                     style,
                 )]))
             })

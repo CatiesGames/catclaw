@@ -3585,10 +3585,20 @@ fn cmd_agent_list(config: &Config) {
     }
     for agent in &config.agents {
         let default_marker = if agent.default { " (default)" } else { "" };
+        // Surface non-default runtimes (codex) in the listing so users at a
+        // glance can tell which agents will spawn which CLI. Claude is the
+        // default so we omit it to keep the existing visual unchanged.
+        let runtime_marker =
+            if matches!(agent.runtime, crate::agent::Runtime::Codex) {
+                " [codex]"
+            } else {
+                ""
+            };
         println!(
-            "  {}{} — {}",
+            "  {}{}{} — {}",
             agent.id,
             default_marker,
+            runtime_marker,
             agent.workspace.display()
         );
     }

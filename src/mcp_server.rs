@@ -508,13 +508,22 @@ async fn submit_social_draft_in_process(
     tool_name: &str,
     arguments: &Value,
 ) -> Response {
+    // `stage_draft_from_tool` matches on the prefixed tool name format
+    // (`mcp__catclaw__instagram_create_post`) because that's what the Claude
+    // hook subprocess sees. Codex calls land here with the bare wire name
+    // (`instagram_create_post`), so normalize before handing off.
+    let prefixed_tool = if tool_name.starts_with("mcp__catclaw__") {
+        tool_name.to_string()
+    } else {
+        format!("mcp__catclaw__{}", tool_name)
+    };
     let fake_req = crate::ws_protocol::WsRequest {
         // The id is internal-only — handler echoes it back into a WsResponse
         // we then unpack. 0 is fine as a sentinel.
         id: 0,
         method: "social.draft.submit_for_approval".to_string(),
         params: serde_json::json!({
-            "tool_name": tool_name,
+            "tool_name": prefixed_tool,
             "tool_input": arguments,
         }),
     };
