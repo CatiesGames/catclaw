@@ -381,7 +381,20 @@ async fn handle_codex_tool_call(
             let (tx, rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
 
             let timeout_secs = agent.approval.timeout_secs;
-            let session_key = format!("catclaw:{}:codex:{}", agent.id, session_id);
+            // Resolve the actual SessionRow's session_key so cards forwarded to
+            // the origin adapter (Discord/Telegram/Slack/LINE) use the same key
+            // the gateway already has indexed. Ephemeral codex runs land here
+            // with origin="ephemeral" (written by SessionManager::ephemeral_run);
+            // router-driven codex runs land with origin="discord"/"telegram"/etc.
+            // Falling back to a synthetic "codex" origin keeps the request
+            // resolvable even if the row is missing for some reason.
+            let session_key = gw
+                .state_db
+                .get_session_by_session_id(session_id)
+                .ok()
+                .flatten()
+                .map(|row| row.session_key)
+                .unwrap_or_else(|| format!("catclaw:{}:codex:{}", agent.id, session_id));
 
             gw.pending_approvals.insert(
                 request_id.clone(),
@@ -423,7 +436,12 @@ async fn handle_codex_tool_call(
                 gw.state_db.get_session_by_session_id(session_id)
             {
                 let origin = row.origin.clone();
-                if origin != "tui" && origin != "system" {
+                // tui/system/ephemeral don't have a real channel adapter to
+                // forward to — the broadcast event above covers TUI clients,
+                // and ephemeral runs (social auto_reply, scheduler tasks) are
+                // not interactive in the first place. Skip the forward to
+                // avoid noisy "no adapter" warnings.
+                if origin != "tui" && origin != "system" && origin != "ephemeral" {
                     if let Some(adapter) = gw.adapters.get(&origin).cloned() {
                         if let Some(channel_id) = row.platform_channel_id() {
                             let card = crate::approval::ApprovalCard::Tool {
