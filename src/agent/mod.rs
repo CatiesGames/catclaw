@@ -165,6 +165,27 @@ When a user sends files from Discord/Telegram, CatClaw downloads them to the wor
 - To schedule tasks, invoke the catclaw skill for usage details on `catclaw task add`.
 "#;
 
+/// Codex-runtime overrides to the SYSTEM_DIRECTIVES block. The directives
+/// above were written for Claude Code's built-in tool set (`Read`, `Bash`,
+/// `Edit`, `Skill`, `ToolSearch`, `Task`); codex only has `shell` +
+/// `apply_patch`. Rather than fork the entire block, append a short
+/// clarification so codex agents read the directives with the right mental
+/// model. This sits right after SYSTEM_DIRECTIVES in build_system_prompt.
+const CODEX_RUNTIME_OVERRIDES: &str = r#"
+## Runtime-specific notes (Codex)
+You are running under codex CLI, not Claude Code. The `Read`, `Bash`, `Edit`, `Skill`, `ToolSearch`, and `Task` tool names mentioned above are Claude-specific — codex doesn't have them.
+
+Equivalents for codex:
+- `Read` (file contents) → `shell` with `cat`/`head`/`tail`/`jq`
+- `Bash` (general shell) → `shell` (codex's native tool)
+- `Edit`/`Write` (file edits) → `apply_patch` (codex native) or `shell` with `tee`/`sed`
+- `Skill` (load a skill manual) → `shell` with `cat <workspace_root>/skills/<name>/SKILL.md` — see the "Available Skills" section below for paths
+- `ToolSearch` (lookup a deferred tool schema) → not applicable; all your MCP tools are listed at session startup
+- `Task` (Claude Code built-in subagent) → not applicable; for scheduled work use the catclaw task system via `mcp__catclaw__*` tools
+
+When the directives above say "use Read/Bash/Edit", substitute the codex equivalent.
+"#;
+
 /// Memory Palace directives — injected only when memory tools are not denied.
 const MEMORY_DIRECTIVES: &str = r#"
 ## Memory Palace
@@ -263,6 +284,15 @@ impl Agent {
         // 1. System directives (hardcoded)
         prompt.push_str(SYSTEM_DIRECTIVES);
 
+        // 1a. Runtime-specific override — codex doesn't have the Claude
+        // built-in tools the directives reference (`Read`, `Bash`, `Edit`,
+        // `Skill`, `ToolSearch`, `Task`). Tell codex to use its native
+        // `shell` tool for those primitives so the directives above make
+        // sense in context.
+        if matches!(self.runtime, Runtime::Codex) {
+            prompt.push_str(CODEX_RUNTIME_OVERRIDES);
+        }
+
         // 1b. Memory directives (only if memory tools are not denied)
         if memory_enabled {
             prompt.push_str(MEMORY_DIRECTIVES);
@@ -335,7 +365,11 @@ impl Agent {
 
         // 5. Skill index — list enabled skills with their descriptions.
         // Skills are NOT loaded here (too large); use /skill-name to invoke one.
-        let skill_index = build_skill_index(&self.workspace, &self.workspace_root);
+        let skill_index = build_skill_index_for_runtime(
+            &self.workspace,
+            &self.workspace_root,
+            self.runtime,
+        );
         if !skill_index.is_empty() {
             prompt.push_str(&skill_index);
         }
@@ -670,7 +704,22 @@ pub fn resolve_now_in_timezone(tz_name: Option<&str>) -> chrono::NaiveDateTime {
     utc_now.naive_utc()
 }
 
-fn build_skill_index(agent_workspace: &std::path::Path, workspace_root: &std::path::Path) -> String {
+/// Build the skill-index section of the system prompt, parameterised on
+/// runtime so the instructions match the available primitives:
+///
+/// - Claude has a built-in `Skill` tool — invoke as `Skill("catclaw")`.
+/// - Codex has no `Skill` tool. The skill markdown files live in
+///   `<workspace_root>/skills/<name>/SKILL.md` and codex reads them via its
+///   native `shell` / file-read access. We point codex at the directory and
+///   leave it to read on demand.
+///
+/// Both versions list the same skills with the same descriptions — only the
+/// "how to load" instruction differs.
+fn build_skill_index_for_runtime(
+    agent_workspace: &std::path::Path,
+    workspace_root: &std::path::Path,
+    runtime: Runtime,
+) -> String {
     let skills = AgentLoader::list_skills(agent_workspace, workspace_root);
     let mut lines: Vec<String> = skills.iter()
         .filter(|s| s.is_enabled)
@@ -687,11 +736,28 @@ fn build_skill_index(agent_workspace: &std::path::Path, workspace_root: &std::pa
         return String::new();
     }
     lines.sort();
+    let how_to_use = match runtime {
+        Runtime::Claude => {
+            "You have these skills loaded. Use the Skill tool to invoke them (e.g. `Skill(\"catclaw\")`).\n\
+             Do NOT use Bash/Read to manually read skill files — always use the Skill tool instead."
+                .to_string()
+        }
+        Runtime::Codex => {
+            let skills_dir = workspace_root.join("skills");
+            format!(
+                "You have these skills available. To load one, read its SKILL.md file:\n\
+                 `cat \"{}/<skill-name>/SKILL.md\"` (e.g. `cat \"{}/catclaw/SKILL.md\"`).\n\
+                 Skills are operational manuals — read them on demand when the user's request matches the description.",
+                skills_dir.display(),
+                skills_dir.display(),
+            )
+        }
+    };
     format!(
         "\n# Available Skills\n\
-         You have these skills loaded. Use the Skill tool to invoke them (e.g. `Skill(\"catclaw\")`).\n\
-         Do NOT use Bash/Read to manually read skill files — always use the Skill tool instead.\n\n\
+         {}\n\n\
          {}\n",
+        how_to_use,
         lines.join("\n")
     )
 }

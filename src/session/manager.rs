@@ -10,7 +10,6 @@ use crate::config::Config;
 use crate::error::{CatClawError, Result};
 use crate::state::{SessionRow, StateDb};
 
-use super::claude::ClaudeHandle;
 use super::queue::SessionQueue;
 use super::runtime::RuntimeEvent;
 use super::transcript::TranscriptLog;
@@ -423,17 +422,23 @@ impl SessionManager {
         let _permit = self.queue.acquire(priority).await;
 
         let session_id = Uuid::new_v4().to_string();
-        let args = agent.claude_args_with_mcp(
-            &session_id,
-            None,
-            self.mcp_port,
-            Some(hook_session_key),
-            self.config_path.as_deref(),
-            &mcp_env,
-            Some(&self.state_db),
-        );
-
-        let mut handle = ClaudeHandle::spawn_with_prompt(args, prompt, &subprocess_env).await?;
+        // Route through spawn_session so codex-runtime agents pick the right
+        // CLI. Previously this called ClaudeHandle::spawn_with_prompt directly,
+        // which silently fell back to `claude -p` for a codex agent and broke
+        // the whole social auto-reply pipeline when an agent was switched to
+        // codex. is_resume=false because ephemeral runs never resume.
+        let params = super::runtime::SpawnParams {
+            session_id: &session_id,
+            model_override: None,
+            mcp_port: self.mcp_port,
+            hook_session_key: Some(hook_session_key),
+            config_path: self.config_path.as_deref(),
+            mcp_env: &mcp_env,
+            state_db: Some(&self.state_db),
+            is_resume: false,
+            resume_thread_id: None,
+        };
+        let mut handle = agent.spawn_session(&params, prompt, &subprocess_env).await?;
         handle.wait_for_result(None).await
     }
 

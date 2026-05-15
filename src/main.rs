@@ -3682,7 +3682,8 @@ async fn cmd_agent_tools(
     // This is a documented limitation — codex agent skill should keep agents
     // off of shell-curl-Meta-API workarounds via SKILL guidance instead.
     if matches!(agent.runtime, crate::agent::Runtime::Codex) {
-        const CODEX_NATIVE_TOOLS: &[&str] = &["shell", "apply_patch", "Bash", "Read", "Write", "Edit"];
+        const CODEX_NATIVE_TOOLS: &[&str] =
+            &["shell", "apply_patch", "Bash", "Read", "Write", "Edit"];
         for list in [&final_denied, &final_approval, &final_allowed] {
             for entry in list.iter() {
                 if CODEX_NATIVE_TOOLS.iter().any(|t| t.eq_ignore_ascii_case(entry)) {
@@ -3690,6 +3691,23 @@ async fn cmd_agent_tools(
                         "⚠️",
                         &format!(
                             "'{}' is a codex native tool — controlled by sandbox_mode, not tools.toml. Setting it here has no effect.",
+                            entry
+                        ),
+                    );
+                }
+                // Third-party MCP tool warning: codex routes mcp__<server>__<tool>
+                // calls directly to that server's stdio/HTTP transport — they
+                // don't pass through catclaw's MCP intercept, so deny/approve
+                // here only enforces against catclaw's own MCP tools (the
+                // `mcp__catclaw__*` family). Setting `mcp__pencil__delete` in
+                // denied won't block codex from calling it.
+                if entry.starts_with("mcp__")
+                    && !entry.starts_with("mcp__catclaw__")
+                {
+                    cli_ui::status_msg(
+                        "⚠️",
+                        &format!(
+                            "'{}' is a third-party MCP tool — codex calls it directly, bypassing catclaw approval. Setting it here has no enforcement effect for codex agents (Claude agents still honour it via --disallowedTools).",
                             entry
                         ),
                     );

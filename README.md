@@ -178,6 +178,7 @@ These come from the underlying model or CLI itself — catclaw documents them bu
 | GPT-5.x vs Claude 4.x reasoning style | Different "personality" feel even with the same SOUL.md |
 | Codex thread-bound system prompt | After thread starts, changing `agent.model` / SOUL.md / SKILL files only affects **new threads**. Existing threads keep their original prompt. catclaw surfaces this in `agents.set_model` response notes. |
 | Codex `shell` / `apply_patch` (native tools) | Run under codex's OS sandbox (Seatbelt / Landlock), **not** catclaw's approval gate. Setting `Bash` / `shell` / `apply_patch` in tools.toml produces a warning — no enforcement effect for codex. catclaw approval gate only covers `mcp__catclaw__*` tools. |
+| Codex third-party MCP tools | Codex calls third-party `mcp__<server>__*` tools (e.g. pencil, figma) directly to that server's transport — they don't pass through catclaw's MCP intercept. tools.toml deny/approve only enforces against catclaw's own MCP tools (`mcp__catclaw__*`) for codex agents. Claude agents still honour the full set via `--disallowedTools`. |
 | Codex has no token-delta events | Slack streaming response degrades to one-shot send on codex agents (full reply arrives at once, not progressively) |
 | Codex multi-host limitation | Codex subprocess must run on the same host as the catclaw gateway (`127.0.0.1` MCP endpoint). Cross-host / container-isolated deployments not supported in this release. |
 

@@ -124,6 +124,15 @@ pub fn codex_args_from(agent: &super::Agent, params: &SpawnParams<'_>) -> Vec<St
     // Third-party MCP servers from workspace .mcp.json (gap A).
     inject_user_mcp_servers(&mut args, &agent.workspace_root, params.mcp_env);
 
+    // Resume invocations end with `-` so codex reads the new prompt from stdin.
+    // CodexHandle::spawn_resume_with_prompt pipes the prompt into stdin and
+    // closes it; codex sees EOF and finalises the turn. First-turn spawns
+    // pass the prompt as a positional argument (appended by spawn_with_prompt
+    // itself), so no `-` is needed there.
+    if params.is_resume {
+        args.push("-".to_string());
+    }
+
     args
 }
 

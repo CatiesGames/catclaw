@@ -752,7 +752,28 @@ fn handle_sessions_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResp
     let model = req.params.get("model").and_then(|v| v.as_str());
 
     match gw.session_manager.set_session_model(key, model) {
-        Ok(()) => WsResponse::ok(req.id, json!({ "model": model })),
+        Ok(()) => {
+            // Codex thread-binds `model` at thread start (PoC verified — see
+            // codex-runtime-plan.md). Mid-thread changes only take effect on
+            // the next NEW thread. Surface a note when the session is codex
+            // so the caller can decide whether to archive + restart.
+            let is_codex = gw
+                .state_db
+                .get_session(key)
+                .ok()
+                .flatten()
+                .and_then(|row| row.runtime_from_metadata())
+                .map(|r| matches!(r, crate::agent::Runtime::Codex))
+                .unwrap_or(false);
+            let mut result = json!({ "model": model });
+            if is_codex {
+                result["note"] = json!(
+                    "codex session: model change applies to NEW threads only. \
+                     The current thread will keep its original model until restarted."
+                );
+            }
+            WsResponse::ok(req.id, result)
+        }
         Err(e) => WsResponse::err(req.id, -1, format!("{}", e)),
     }
 }
