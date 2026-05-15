@@ -776,6 +776,43 @@ impl SessionManager {
         }
     }
 
+    /// Stop all in-flight sessions owned by a given agent.
+    ///
+    /// Used by `agents.delete` so a delete that races with an in-progress
+    /// codex subprocess doesn't leave a zombie holding the `.codex-home/`
+    /// auth.json symlink while we try to remove it. Returns the count of
+    /// sessions that were actually signalled.
+    ///
+    /// Note: this only sends the kill signal — the spawned task may still be
+    /// shutting down the subprocess when this returns. For `agents.delete`
+    /// the caller can proceed immediately because the symlink removal in
+    /// `cleanup_codex_home` is tolerant of in-use file handles (the kernel
+    /// retains the inode until all FDs close).
+    pub fn stop_all_for_agent(&self, agent_id: &str) -> usize {
+        // Snapshot the keys first to avoid mutating the map while iterating.
+        let prefix = format!("catclaw:{}:", agent_id);
+        let to_stop: Vec<String> = self
+            .active_handles
+            .iter()
+            .filter_map(|entry| {
+                let k = entry.key();
+                if k.starts_with(&prefix) {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let n = to_stop.len();
+        for key in to_stop {
+            self.stop_session(&key);
+        }
+        if n > 0 {
+            info!(agent = %agent_id, stopped = n, "stop_all_for_agent");
+        }
+        n
+    }
+
     /// Fork a session into a new session key
     pub async fn fork(
         &self,

@@ -1,3 +1,4 @@
+pub mod codex_args;
 mod loader;
 pub mod models;
 
@@ -547,13 +548,41 @@ impl Agent {
                 Ok(crate::session::runtime::RuntimeHandle::Claude(handle))
             }
             Runtime::Codex => {
-                // Phase B implements `codex exec` spawn (CodexHandle + codex_args).
-                // Until then, Codex agents cannot be spawned; loader / WS handler
-                // should reject codex runtime to avoid hitting this path.
-                Err(crate::error::CatClawError::Claude(format!(
-                    "codex runtime not yet implemented (agent={})",
-                    self.id
-                )))
+                // Ensure isolated CODEX_HOME exists with a valid auth symlink.
+                // setup_codex_home is idempotent — safe to call on every spawn,
+                // covers both first-time agent creation and post-`codex login`
+                // refresh cases.
+                crate::agent::AgentLoader::setup_codex_home(
+                    &self.workspace,
+                    self.codex_auth_path.as_deref(),
+                )?;
+
+                // Build args + apply CODEX_HOME env override.
+                let args = crate::agent::codex_args::codex_args_from(self, params);
+                let codex_home =
+                    crate::agent::codex_args::codex_home_for(&self.workspace);
+
+                let mut spawn_env = env.clone();
+                spawn_env.insert(
+                    "CODEX_HOME".to_string(),
+                    codex_home.display().to_string(),
+                );
+                // Defence in depth — don't let a stray CODEX_API_KEY in the
+                // gateway environment override the per-agent auth.json.
+                spawn_env.remove("CODEX_API_KEY");
+
+                let handle = if params.is_resume {
+                    crate::session::codex::CodexHandle::spawn_resume_with_prompt(
+                        args, prompt, &spawn_env,
+                    )
+                    .await?
+                } else {
+                    crate::session::codex::CodexHandle::spawn_with_prompt(
+                        args, prompt, &spawn_env,
+                    )
+                    .await?
+                };
+                Ok(crate::session::runtime::RuntimeHandle::Codex(handle))
             }
         }
     }

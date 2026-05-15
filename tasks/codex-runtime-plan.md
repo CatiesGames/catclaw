@@ -104,7 +104,7 @@ impl Agent {
 
 **Preflight 驗證**：`agents.new` / `agents.set_*` 必須驗證 target 存在。
 
-**Symlink 寫穿透 PoC**：Phase B 第一週驗證 codex token refresh 是否破壞 symlink。
+**Symlink 寫穿透 PoC**（Phase B.1.2 已驗）：跑 codex exec 一輪（token 未過期場景），`.codex-home/auth.json` symlink 與 `~/.codex/auth.json` 的 inode/mtime 都保持不變。**短期 OK 用 symlink**。Token refresh 場景（OAuth 過期重發）未來觀察用戶實際使用是否破壞 symlink；若破壞改成 copy + sync 策略。
 
 ### 1.2 Spawn 旗標（thread 首次）
 

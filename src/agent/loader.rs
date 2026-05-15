@@ -189,6 +189,89 @@ denied = []
         Ok(())
     }
 
+    /// Set up the per-agent `.codex-home/` directory for a codex-runtime agent.
+    ///
+    /// Creates `<workspace>/.codex-home/` with:
+    /// - `auth.json` → symlink pointing at `codex_auth_path` (default
+    ///   `~/.codex/auth.json`)
+    /// - `config.toml` → empty file (paired with `--ignore-user-config` to
+    ///   fully isolate this agent from the user's global codex setup)
+    ///
+    /// Performs a preflight check: the symlink target must exist, otherwise
+    /// returns a friendly error so the user runs `codex login` (or fixes the
+    /// `codex_auth_path` override) before the first spawn fails opaquely
+    /// during a real send.
+    ///
+    /// Idempotent — safe to call on an existing `.codex-home/` (recreates
+    /// the symlink to pick up any `codex_auth_path` change).
+    pub fn setup_codex_home(workspace: &Path, codex_auth_path: Option<&Path>) -> Result<()> {
+        let codex_home = workspace.join(".codex-home");
+        fs::create_dir_all(&codex_home)?;
+
+        // Resolve auth target: explicit override > user default
+        let target = match codex_auth_path {
+            Some(p) => p.to_path_buf(),
+            None => {
+                let home = std::env::var("HOME").map_err(|_| {
+                    crate::error::CatClawError::Session(
+                        "HOME env var not set; cannot resolve default codex auth path".to_string(),
+                    )
+                })?;
+                std::path::PathBuf::from(home).join(".codex").join("auth.json")
+            }
+        };
+
+        // Preflight — fail loudly now, not at first message.
+        if !target.exists() {
+            return Err(crate::error::CatClawError::Session(format!(
+                "codex auth.json not found at {} — run `codex login` first or set codex_auth_path",
+                target.display()
+            )));
+        }
+
+        // Recreate symlink (remove any prior one so override changes pick up)
+        let link = codex_home.join("auth.json");
+        if link.exists() || link.is_symlink() {
+            fs::remove_file(&link)?;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).map_err(|e| {
+            crate::error::CatClawError::Session(format!(
+                "failed to create codex auth symlink {} → {}: {}",
+                link.display(),
+                target.display(),
+                e
+            ))
+        })?;
+        #[cfg(not(unix))]
+        return Err(crate::error::CatClawError::Session(
+            "codex runtime currently requires a unix-like OS for auth symlink".to_string(),
+        ));
+
+        // Empty config.toml — defence in depth alongside --ignore-user-config.
+        let cfg = codex_home.join("config.toml");
+        if !cfg.exists() {
+            fs::write(&cfg, b"")?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove the codex auth symlink (and the `.codex-home/` directory if it
+    /// becomes empty after removal). Called from `agents.delete` so a
+    /// recycled workspace can't accidentally inherit stale auth.
+    ///
+    /// Tolerant of missing files — safe to call on Claude-runtime agents
+    /// that never had a `.codex-home/`.
+    pub fn cleanup_codex_home(workspace: &Path) -> Result<()> {
+        let codex_home = workspace.join(".codex-home");
+        let link = codex_home.join("auth.json");
+        if link.is_symlink() || link.exists() {
+            let _ = fs::remove_file(&link);
+        }
+        Ok(())
+    }
+
     /// Install embedded built-in skills to the shared pool at `{workspace_root}/skills/`.
     /// Always overwrites with the latest version compiled into the binary.
     pub fn install_builtin_skills(workspace_root: &Path) -> Result<()> {

@@ -13,6 +13,7 @@ use std::path::Path;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::claude::{ClaudeEvent, ClaudeHandle, ContentBlock};
+use super::codex::CodexHandle;
 use crate::error::Result;
 use crate::state::StateDb;
 
@@ -22,15 +23,10 @@ use crate::state::StateDb;
 /// free of trait-object overhead and lets the compiler verify exhaustiveness
 /// when adding variants.
 #[allow(dead_code)]
-#[allow(clippy::large_enum_variant)] // Codex variant is a placeholder until Phase B;
-// once CodexHandle lands it will be similarly sized to ClaudeHandle.
+#[allow(clippy::large_enum_variant)]
 pub enum RuntimeHandle {
     Claude(ClaudeHandle),
-    // Codex variant added in Phase B (src/session/codex.rs::CodexHandle).
-    // Holding the slot here so call-sites can match exhaustively from Phase A
-    // without changing shape later.
-    #[allow(dead_code)]
-    Codex(/* CodexHandle */ ()),
+    Codex(CodexHandle),
 }
 
 #[allow(dead_code)]
@@ -38,7 +34,8 @@ impl RuntimeHandle {
     pub async fn recv_event(&mut self) -> Option<RuntimeEvent> {
         match self {
             RuntimeHandle::Claude(h) => h.recv_event().await.map(RuntimeEvent::from),
-            RuntimeHandle::Codex(_) => unimplemented!("CodexHandle::recv_event in Phase B"),
+            // CodexHandle already produces RuntimeEvent natively.
+            RuntimeHandle::Codex(h) => h.recv_event().await,
         }
     }
 
@@ -65,28 +62,28 @@ impl RuntimeHandle {
                 });
                 h.wait_for_result(claude_observer).await
             }
-            RuntimeHandle::Codex(_) => unimplemented!("CodexHandle::wait_for_result in Phase B"),
+            RuntimeHandle::Codex(h) => h.wait_for_result(observer).await,
         }
     }
 
     pub async fn kill(&mut self) -> Result<()> {
         match self {
             RuntimeHandle::Claude(h) => h.kill().await,
-            RuntimeHandle::Codex(_) => unimplemented!("CodexHandle::kill in Phase B"),
+            RuntimeHandle::Codex(h) => h.kill().await,
         }
     }
 
     pub fn is_running(&mut self) -> bool {
         match self {
             RuntimeHandle::Claude(h) => h.is_running(),
-            RuntimeHandle::Codex(_) => unimplemented!("CodexHandle::is_running in Phase B"),
+            RuntimeHandle::Codex(h) => h.is_running(),
         }
     }
 
     pub fn session_id(&self) -> Option<&str> {
         match self {
             RuntimeHandle::Claude(h) => h.session_id.as_deref(),
-            RuntimeHandle::Codex(_) => unimplemented!("CodexHandle::session_id in Phase B"),
+            RuntimeHandle::Codex(h) => h.session_id.as_deref(),
         }
     }
 }

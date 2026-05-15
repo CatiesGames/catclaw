@@ -1011,6 +1011,26 @@ fn handle_agents_delete(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse 
             ),
         );
     }
+    // Stop any in-flight sessions for this agent first. Without this, deleting
+    // a codex agent while a subprocess is running leaves a zombie holding the
+    // .codex-home/auth.json symlink we're about to remove. Best-effort — the
+    // kill signal returns immediately; subprocess shutdown happens in the
+    // background.
+    let stopped = gw.session_manager.stop_all_for_agent(&name);
+    if stopped > 0 {
+        info!(agent = %name, stopped, "stopped in-flight sessions before agent delete");
+    }
+
+    // Clean up codex-specific workspace state (auth symlink). Tolerant of
+    // Claude-runtime agents — cleanup_codex_home is a no-op when there's no
+    // .codex-home/. Workspace files themselves are left in place (existing
+    // contract — see "note" in the response below).
+    if let Err(e) = crate::agent::AgentLoader::cleanup_codex_home(&target.workspace) {
+        // Non-fatal: log and continue with the config delete so the user
+        // isn't stuck unable to remove the agent from catclaw.toml.
+        tracing::warn!(agent = %name, error = %e, "failed to clean .codex-home/auth.json");
+    }
+
     full.agents.retain(|a| a.id != name);
 
     let serialized = match toml::to_string_pretty(&full) {

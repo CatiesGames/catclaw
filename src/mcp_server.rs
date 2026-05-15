@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::Value;
@@ -17,17 +18,29 @@ pub fn router() -> Router<Arc<GatewayHandle>> {
     Router::new().route("/mcp", post(handle_mcp))
 }
 
-/// Handle MCP JSON-RPC requests
+/// Handle MCP JSON-RPC requests.
+///
+/// Returns `Response` so notification methods can correctly return 204 No
+/// Content (per MCP Streamable HTTP spec). Codex's MCP client (rmcp) rejects
+/// any body on notifications — returning `200 + {}` deserialises as a malformed
+/// JsonRpcMessage and kills the transport (Phase B.1.1 PoC verified).
 async fn handle_mcp(
     State(gw): State<Arc<GatewayHandle>>,
     Json(body): Json<Value>,
-) -> (StatusCode, Json<Value>) {
+) -> Response {
     let adapters = &gw.adapters;
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let method = body
         .get("method")
         .and_then(|m| m.as_str())
         .unwrap_or("");
+
+    // Notifications are fire-and-forget — MUST return 204 No Content with no
+    // body, otherwise spec-compliant clients (codex's rmcp, future Claude
+    // versions) fail to deserialise.
+    if method.starts_with("notifications/") {
+        return StatusCode::NO_CONTENT.into_response();
+    }
 
     match method {
         "initialize" => {
@@ -41,12 +54,7 @@ async fn handle_mcp(
                     "version": env!("CARGO_PKG_VERSION")
                 }
             });
-            jsonrpc_ok(id, result)
-        }
-        "notifications/initialized" => {
-            // Client acknowledgement — no response needed for notifications,
-            // but since this is HTTP we return empty success
-            (StatusCode::OK, Json(serde_json::json!({})))
+            jsonrpc_ok(id, result).into_response()
         }
         "tools/list" => {
             let mut tools = build_tool_list(adapters);
@@ -63,127 +71,146 @@ async fn handle_mcp(
             let tool_name = params
                 .get("name")
                 .and_then(|n| n.as_str())
-                .unwrap_or("");
+                .unwrap_or("")
+                .to_string();
             let arguments = params
                 .get("arguments")
                 .cloned()
                 .unwrap_or(Value::Object(serde_json::Map::new()));
 
-            // Route memory/kg tools first.
-            if tool_name.starts_with("memory_") || tool_name.starts_with("kg_") {
-                match crate::memory::tools::execute_memory_tool(
-                    &gw.state_db,
-                    &gw.embedder,
-                    tool_name,
-                    arguments,
-                )
-                .await
-                {
-                    Ok(result) => {
-                        let response = serde_json::json!({
-                            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
-                        });
-                        return jsonrpc_ok(id, response);
-                    }
-                    Err(e) => {
-                        let response = serde_json::json!({
-                            "content": [{ "type": "text", "text": format!("Error: {}", e) }],
-                            "isError": true
-                        });
-                        return jsonrpc_ok(id, response);
-                    }
-                }
-            }
-
-            // Route contacts tools.
-            if tool_name.starts_with("contacts_") {
-                let (enabled, default_agent, unknown_inbox) = {
-                    let cfg = gw.config.read().unwrap();
-                    (
-                        cfg.contacts.enabled,
-                        cfg.default_agent_id().unwrap_or("main").to_string(),
-                        cfg.contacts.unknown_inbox_channel.clone(),
-                    )
-                };
-                if !enabled {
-                    let response = serde_json::json!({
-                        "content": [{"type":"text","text":"Error: contacts subsystem disabled. Enable with `catclaw config set contacts.enabled true`."}],
-                        "isError": true
-                    });
-                    return jsonrpc_ok(id, response);
-                }
-                match crate::contacts::tools::execute_contacts_tool(
-                    &gw.state_db,
-                    &gw.state_db,
-                    &gw.adapters,
-                    &gw.session_manager,
-                    &gw.agent_registry,
-                    &default_agent,
-                    unknown_inbox.as_deref(),
-                    tool_name,
-                    arguments,
-                )
-                .await
-                {
-                    Ok(result) => {
-                        let response = serde_json::json!({
-                            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
-                        });
-                        return jsonrpc_ok(id, response);
-                    }
-                    Err(e) => {
-                        let response = serde_json::json!({
-                            "content": [{ "type": "text", "text": format!("Error: {}", e) }],
-                            "isError": true
-                        });
-                        return jsonrpc_ok(id, response);
-                    }
-                }
-            }
-
-            // Route social tools, then fall back to adapter tools.
-            if tool_name.starts_with("instagram_") || tool_name.starts_with("threads_") {
-                match execute_social_tool(&gw, tool_name, arguments).await {
-                    Ok(result) => {
-                        let response = serde_json::json!({
-                            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
-                        });
-                        return jsonrpc_ok(id, response);
-                    }
-                    Err(e) => {
-                        let response = serde_json::json!({
-                            "content": [{ "type": "text", "text": format!("Error: {}", e) }],
-                            "isError": true
-                        });
-                        return jsonrpc_ok(id, response);
-                    }
-                }
-            }
-
-            match execute_tool(adapters, tool_name, arguments).await {
-                Ok(result) => {
-                    let response = serde_json::json!({
-                        "content": [{
-                            "type": "text",
-                            "text": serde_json::to_string_pretty(&result).unwrap_or_default()
-                        }]
-                    });
-                    jsonrpc_ok(id, response)
-                }
-                Err(e) => {
-                    let response = serde_json::json!({
-                        "content": [{
-                            "type": "text",
-                            "text": format!("Error: {}", e)
-                        }],
-                        "isError": true
-                    });
-                    jsonrpc_ok(id, response)
-                }
-            }
+            dispatch_existing_tool(&gw, &tool_name, arguments, id).await
         }
         "ping" => jsonrpc_ok(id, serde_json::json!({})),
         _ => jsonrpc_error(id, -32601, &format!("method not found: {}", method)),
+    }
+}
+
+/// Route an MCP `tools/call` to the appropriate catclaw subsystem by tool-name
+/// prefix. This is the pre-codex (Phase A) dispatch path — Claude requests
+/// land here directly; Codex requests will route here from `handle_codex_tool_call`
+/// for `Permission::Allowed` tools after the approval gate (Phase B.4).
+///
+/// Behaviour is byte-by-byte equivalent to the inline implementation that used
+/// to live in `handle_mcp`'s `"tools/call"` arm — this is a pure refactor.
+async fn dispatch_existing_tool(
+    gw: &Arc<GatewayHandle>,
+    tool_name: &str,
+    arguments: Value,
+    id: Value,
+) -> Response {
+    let adapters = &gw.adapters;
+
+    // Route memory/kg tools first.
+    if tool_name.starts_with("memory_") || tool_name.starts_with("kg_") {
+        match crate::memory::tools::execute_memory_tool(
+            &gw.state_db,
+            &gw.embedder,
+            tool_name,
+            arguments,
+        )
+        .await
+        {
+            Ok(result) => {
+                let response = serde_json::json!({
+                    "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+                });
+                return jsonrpc_ok(id, response);
+            }
+            Err(e) => {
+                let response = serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                    "isError": true
+                });
+                return jsonrpc_ok(id, response);
+            }
+        }
+    }
+
+    // Route contacts tools.
+    if tool_name.starts_with("contacts_") {
+        let (enabled, default_agent, unknown_inbox) = {
+            let cfg = gw.config.read().unwrap();
+            (
+                cfg.contacts.enabled,
+                cfg.default_agent_id().unwrap_or("main").to_string(),
+                cfg.contacts.unknown_inbox_channel.clone(),
+            )
+        };
+        if !enabled {
+            let response = serde_json::json!({
+                "content": [{"type":"text","text":"Error: contacts subsystem disabled. Enable with `catclaw config set contacts.enabled true`."}],
+                "isError": true
+            });
+            return jsonrpc_ok(id, response);
+        }
+        match crate::contacts::tools::execute_contacts_tool(
+            &gw.state_db,
+            &gw.state_db,
+            &gw.adapters,
+            &gw.session_manager,
+            &gw.agent_registry,
+            &default_agent,
+            unknown_inbox.as_deref(),
+            tool_name,
+            arguments,
+        )
+        .await
+        {
+            Ok(result) => {
+                let response = serde_json::json!({
+                    "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+                });
+                return jsonrpc_ok(id, response);
+            }
+            Err(e) => {
+                let response = serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                    "isError": true
+                });
+                return jsonrpc_ok(id, response);
+            }
+        }
+    }
+
+    // Route social tools, then fall back to adapter tools.
+    if tool_name.starts_with("instagram_") || tool_name.starts_with("threads_") {
+        match execute_social_tool(gw, tool_name, arguments).await {
+            Ok(result) => {
+                let response = serde_json::json!({
+                    "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]
+                });
+                return jsonrpc_ok(id, response);
+            }
+            Err(e) => {
+                let response = serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                    "isError": true
+                });
+                return jsonrpc_ok(id, response);
+            }
+        }
+    }
+
+    match execute_tool(adapters, tool_name, arguments).await {
+        Ok(result) => {
+            let response = serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                }]
+            });
+            jsonrpc_ok(id, response)
+        }
+        Err(e) => {
+            let response = serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("Error: {}", e)
+                }],
+                "isError": true
+            });
+            jsonrpc_ok(id, response)
+        }
     }
 }
 
@@ -695,8 +722,10 @@ fn opt_arr_arg(args: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Build a JSON-RPC success response
-fn jsonrpc_ok(id: Value, result: Value) -> (StatusCode, Json<Value>) {
+/// Build a JSON-RPC success response.
+/// Returns `Response` (via `.into_response()`) so the `handle_mcp` `Response`
+/// return type composes uniformly with the 204 notification branch.
+fn jsonrpc_ok(id: Value, result: Value) -> Response {
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -705,10 +734,11 @@ fn jsonrpc_ok(id: Value, result: Value) -> (StatusCode, Json<Value>) {
             "result": result
         })),
     )
+        .into_response()
 }
 
 /// Build a JSON-RPC error response
-fn jsonrpc_error(id: Value, code: i32, message: &str) -> (StatusCode, Json<Value>) {
+fn jsonrpc_error(id: Value, code: i32, message: &str) -> Response {
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -720,4 +750,5 @@ fn jsonrpc_error(id: Value, code: i32, message: &str) -> (StatusCode, Json<Value
             }
         })),
     )
+        .into_response()
 }
