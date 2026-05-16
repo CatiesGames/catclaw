@@ -464,9 +464,12 @@ pub struct CollaborationConfig {
     pub enabled: bool,
 }
 
-// (Removed `EmbeddingConfig` — embedding has always been in-process fastembed
-// BGE-M3, never configurable. The old `[embedding] provider = "ollama"` was a
-// dead config read by nobody at runtime; see CLAUDE.md.)
+// Embedding is in-process fastembed BGE-M3 — see `src/memory/embed.rs::Embedder::new`.
+// There is intentionally no `EmbeddingConfig` here. Legacy catclaw.toml files
+// from early dev previews may carry an `[embedding]` section with `provider`
+// / `ollama_url` / `model` keys — those have never had a runtime effect, and
+// `Config::load` strips the section on first save after upgrade. See
+// CLAUDE.md lesson 30 for the full history.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
@@ -624,9 +627,40 @@ impl Config {
         }
 
         // Auto-generate ws_token if missing (upgrade existing configs)
+        let mut needs_save = false;
         if config.general.ws_token.is_empty() {
             config.general.ws_token = generate_token();
-            // Persist immediately so all clients share the same token
+            needs_save = true;
+        }
+
+        // Migration: strip the legacy `[embedding]` section if a pre-v0.50 file
+        // still has it. The keys (`provider = "ollama"`, `ollama_url`, `model`)
+        // were dead config — read by nobody at runtime — but kept tripping up
+        // future agents trying to diagnose memory_write failures: they'd see
+        // ollama config + a `curl localhost:11434` rejection and incorrectly
+        // conclude catclaw was trying to reach ollama. Embedding is
+        // permanently in-process fastembed BGE-M3 (see Embedder::new); these
+        // keys never had a runtime effect.
+        //
+        // Detect the raw section via TOML re-parsing (we already deserialised
+        // into Config which dropped it via serde, so we can't tell from the
+        // struct). Rewrite the file without the section to make subsequent
+        // diagnosis cleaner.
+        if let Ok(raw) = toml::from_str::<toml::Value>(&content) {
+            if raw.get("embedding").is_some() {
+                tracing::warn!(
+                    config = %path.display(),
+                    "found legacy [embedding] section in catclaw.toml — \
+                     embedding has always been in-process BGE-M3 and these \
+                     keys had no runtime effect. Stripping the section."
+                );
+                needs_save = true;
+            }
+        }
+
+        if needs_save {
+            // Persist immediately so all clients share the same token,
+            // and so the stripped [embedding] section doesn't reappear.
             let _ = config.save(path);
         }
         Ok(config)

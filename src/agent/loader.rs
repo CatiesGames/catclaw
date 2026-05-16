@@ -1432,6 +1432,40 @@ Use `catclaw config get channels[0].dm_allow` first when appending to a list.
 
 ---
 
+## Embedding (memory_write / memory_search)
+
+**Embedding is NOT configurable. It is always in-process fastembed BGE-M3.**
+
+- No `[embedding]` section in `catclaw.toml` does anything. If you see one
+  (legacy from an early dev preview), **it is dead code** — `Config::load`
+  ignores it on parse and rewrites the file to strip it on next save.
+- catclaw does NOT call ollama, openai, or any HTTP embedding service. Ever.
+- Model file: `~/.catclaw/models/models--BAAI--bge-m3/snapshots/<hash>/`
+  (~570 MB total). First gateway startup downloads it; subsequent starts
+  reuse the cache.
+
+### Diagnosing memory failures — what NOT to do
+
+Don't:
+- `curl localhost:11434` then conclude catclaw is broken because ollama is
+  down. catclaw never talks to ollama.
+- Look at `catclaw.toml` for embedding provider config. There isn't any.
+- Suggest the user "install ollama" or "switch to local model". The local
+  model is the only mode.
+
+Do, in order:
+1. `ls -la ~/.catclaw/models/models--BAAI--bge-m3/snapshots/*/` — verify
+   the model directory has files totaling ~570 MB. Partial downloads cause
+   `failed to init embedding model` errors.
+2. Check catclaw logs for `embed`, `BGEM3`, `fastembed`, or `embedding`
+   keywords. The real error message is there.
+3. Check RAM: `ps aux | grep catclaw` — RSS over ~2 GB means BGE-M3 loaded
+   OK. Under ~500 MB means it hasn't loaded yet (likely first-run download
+   in progress or failed).
+4. Check swap: if the host is swap-thrashing, embed calls block on
+   `spawn_blocking` and look like timeouts. Memory pressure is the most
+   common cause of "embedding hangs" in production.
+
 ## Access Control
 
 Per-channel via `dm_policy` / `group_policy` = `open` | `allowlist` | `disabled`

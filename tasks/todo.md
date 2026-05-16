@@ -72,7 +72,7 @@
 
 ## Phase 2: Memory (TODO)
 - [ ] 28. Memory tables in state.sqlite
-- [ ] 29. Embedding engine (Ollama)
+- [x] 29. Embedding engine (fastembed BGE-M3, in-process; superseded Ollama plan)
 - [ ] 30. MD → chunk → FTS + vectors
 - [ ] 31. Hybrid search
 - [ ] 32. File watcher
