@@ -147,6 +147,18 @@ impl ConfigPanel {
                 editable: true,
             },
             ConfigEntry {
+                key: "diary_turn_threshold".to_string(),
+                value: config.general.diary_turn_threshold.to_string(),
+                section: "General".to_string(),
+                editable: true,
+            },
+            ConfigEntry {
+                key: "diary_max_concurrent".to_string(),
+                value: config.general.diary_max_concurrent.to_string(),
+                section: "General".to_string(),
+                editable: true,
+            },
+            ConfigEntry {
                 key: "timezone".to_string(),
                 value: config.general.timezone.clone().unwrap_or_default(),
                 section: "General".to_string(),

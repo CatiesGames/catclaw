@@ -140,11 +140,28 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
 
     // 4. Create session manager (MCP shares the same port as WS)
     let gw_config = Arc::new(std::sync::RwLock::new(config.clone()));
+
+    // Shared diary-extraction state: in-flight de-dup set + global I/O
+    // throttle. Both the scheduler-tick path and the per-turn rolling trigger
+    // share them so concurrent extractions never exceed the cap (default 1).
+    let diary_in_flight = scheduler::new_diary_in_flight();
+    let diary_throttle = scheduler::new_diary_semaphore(config.general.diary_max_concurrent);
+    let rolling_trigger: Arc<dyn crate::session::manager::DiaryTrigger> = Arc::new(
+        scheduler::RollingDiaryTrigger::new(
+            state_db.clone(),
+            diary_in_flight.clone(),
+            Some(diary_throttle.clone()),
+            Some(embedder.clone()),
+            gw_config.clone(),
+        ),
+    );
+
     let session_manager = Arc::new(
         SessionManager::new(state_db.clone(), config.general.max_concurrent_sessions)
             .with_mcp_port(config.general.port)
             .with_config_path(config_path.clone())
-            .with_config(gw_config.clone()),
+            .with_config(gw_config.clone())
+            .with_diary_trigger(rolling_trigger),
     );
 
     // 5. Defer router creation until adapters are built (router needs adapter map
@@ -361,6 +378,8 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
             social_config: Some(gw_config.clone()),
             log_dir: config.logging.resolve_log_dir(&config.general.workspace),
             embedder: Some(embedder.clone()),
+            diary_throttle: Some(diary_throttle.clone()),
+            diary_in_flight: Some(diary_in_flight.clone()),
         };
         let sched_db = state_db.clone();
         let sched_agents = agent_registry.clone();
@@ -389,6 +408,7 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         config.general.workspace.clone(),
     );
     router_inner.set_adapters(adapter_map.clone());
+    router_inner.set_diary_throttle(diary_throttle.clone());
     let router = Arc::new(router_inner);
 
     let (event_bus_tx, _) = tokio::sync::broadcast::channel::<String>(256);

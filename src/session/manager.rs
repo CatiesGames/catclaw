@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -26,6 +27,23 @@ pub struct SenderInfo {
     pub thread_id: Option<String>,
 }
 
+/// Hook the manager calls after writing each transcript turn so the diary
+/// subsystem can decide whether to fire a rolling extraction. Kept abstract
+/// to avoid a circular dependency between `session::manager` and `scheduler`.
+///
+/// `user_turns_since_marker` is the count returned by `log_user` — the diary
+/// subsystem compares it against its threshold and triggers when met.
+#[async_trait]
+pub trait DiaryTrigger: Send + Sync {
+    async fn on_turn_complete(
+        &self,
+        agent: &Agent,
+        session_key: &str,
+        session_id: &str,
+        user_turns_since_marker: u32,
+    );
+}
+
 /// Manages session lifecycle: create, resume, fork, archive
 pub struct SessionManager {
     state_db: Arc<StateDb>,
@@ -41,6 +59,9 @@ pub struct SessionManager {
     config_path: Option<std::path::PathBuf>,
     /// Shared config for reading mcp_env at session spawn time.
     config: Option<Arc<std::sync::RwLock<Config>>>,
+    /// Optional hook invoked after each completed turn — drives the rolling
+    /// "every N user turns" diary trigger. None disables rolling diary.
+    diary_trigger: Option<Arc<dyn DiaryTrigger>>,
 }
 
 #[allow(dead_code)]
@@ -57,6 +78,32 @@ impl SessionManager {
             mcp_port: None,
             config_path: None,
             config: None,
+            diary_trigger: None,
+        }
+    }
+
+    pub fn with_diary_trigger(mut self, trigger: Arc<dyn DiaryTrigger>) -> Self {
+        self.diary_trigger = Some(trigger);
+        self
+    }
+
+    pub fn diary_trigger(&self) -> Option<Arc<dyn DiaryTrigger>> {
+        self.diary_trigger.clone()
+    }
+
+    /// Call the rolling-diary hook after a turn was written to the transcript.
+    /// No-op when no trigger is configured.
+    async fn notify_diary_trigger(
+        &self,
+        agent: &Agent,
+        session_key: &str,
+        session_id: &str,
+        user_turns_since_marker: u32,
+    ) {
+        if let Some(trigger) = self.diary_trigger.as_ref() {
+            trigger
+                .on_turn_complete(agent, session_key, session_id, user_turns_since_marker)
+                .await;
         }
     }
 
@@ -263,7 +310,7 @@ impl SessionManager {
                                 TranscriptLog::open_with_label(&agent.workspace, final_id, Some(&label)).await?;
                             let (ch_type, ch_name) = parse_session_key_channel(&session_key);
                             transcript.log_session_start(&session_key, ch_type, None, ch_name).await;
-                            transcript
+                            let turns = transcript
                                 .log_user(
                                     message,
                                     sender.sender_id.as_deref(),
@@ -271,6 +318,7 @@ impl SessionManager {
                                 )
                                 .await;
                             transcript.log_assistant(&response, None).await;
+                            self.notify_diary_trigger(agent, &session_key, final_id, turns).await;
                         }
 
                         // Update session_id if claude returned one
@@ -367,7 +415,7 @@ impl SessionManager {
                 let (ch_type, ch_name) = parse_session_key_channel(&session_key);
                 transcript.log_session_start(&session_key, ch_type, None, ch_name).await;
             }
-            transcript
+            let turns = transcript
                 .log_user(
                     message,
                     sender.sender_id.as_deref(),
@@ -375,6 +423,7 @@ impl SessionManager {
                 )
                 .await;
             transcript.log_assistant(&response, None).await;
+            self.notify_diary_trigger(agent, &session_key, final_id, turns).await;
         }
 
         // Update session_id if the runtime returned one (may differ from what we set)
@@ -626,12 +675,14 @@ impl SessionManager {
         // Spawn background task to read events and forward them
         let state_db = self.state_db.clone();
         let active_handles = self.active_handles.clone();
+        let agent_clone = agent.clone();
         let agent_workspace = agent.workspace.clone();
         let sender_id = sender.sender_id.clone();
         let sender_name = sender.sender_name.clone();
         let message_owned = message.to_string();
         let session_key_owned = session_key.clone();
         let session_id_owned = session_id.clone();
+        let diary_trigger = self.diary_trigger.clone();
 
 
         // Move permit into the spawned task so concurrency is held until completion
@@ -649,6 +700,7 @@ impl SessionManager {
 
             // Open transcript log and write user message (skip for system sessions)
             let is_system = session_key_owned.contains(":system:");
+            let mut user_turns_since_marker: u32 = 0;
             let transcript = if is_system {
                 None
             } else {
@@ -663,7 +715,8 @@ impl SessionManager {
                         let (ch_type, ch_name) = parse_session_key_channel(&session_key_owned);
                         t.log_session_start(&session_key_owned, ch_type, None, ch_name).await;
                     }
-                    t.log_user(&message_owned, sender_id.as_deref(), sender_name.as_deref()).await;
+                    user_turns_since_marker =
+                        t.log_user(&message_owned, sender_id.as_deref(), sender_name.as_deref()).await;
                 }
                 t
             };
@@ -767,6 +820,22 @@ impl SessionManager {
             if let Some(ref t) = transcript {
                 let tools = if tool_uses.is_empty() { None } else { Some(tool_uses) };
                 t.log_assistant(&result_text, tools).await;
+            }
+
+            // Rolling-diary hook: notify trigger so it can decide whether to
+            // fire an extraction based on `user_turns_since_marker`. Skipped
+            // for system sessions (no transcript).
+            if transcript.is_some() {
+                if let Some(trigger) = diary_trigger.as_ref() {
+                    trigger
+                        .on_turn_complete(
+                            &agent_clone,
+                            &session_key_owned,
+                            &final_session_id,
+                            user_turns_since_marker,
+                        )
+                        .await;
+                }
             }
 
             // Update DB

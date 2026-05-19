@@ -474,6 +474,8 @@ port = 21130                        # WS + MCP on single port
 streaming = true
 default_model = "claude/opus-4-7"   # canonical provider/model form; codex/* and aliases like claude/opus also work
 # diary_model = "claude/haiku-4-5" # catclaw-internal analysis model (defaults to claude/haiku-4-5)
+diary_turn_threshold = 10           # rolling diary: write every N user turns (0 = disabled; only idle/30-min triggers fire)
+diary_max_concurrent = 1            # max parallel diary extractions — keep at 1 unless host has headroom
 
 [[channels]]
 type = "discord"

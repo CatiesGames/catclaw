@@ -33,6 +33,9 @@ pub struct MessageRouter {
     http_client: reqwest::Client,
     /// Adapter map for contact forward mirroring + manual reply (set by gateway).
     adapters: Arc<HashMap<String, Arc<dyn ChannelAdapter>>>,
+    /// Global throttle for diary extractions (shared with scheduler + rolling
+    /// trigger). Set by gateway; None means unthrottled.
+    diary_throttle: Option<crate::scheduler::DiarySemaphore>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,12 +61,18 @@ impl MessageRouter {
             workspace,
             http_client: reqwest::Client::new(),
             adapters: Arc::new(HashMap::new()),
+            diary_throttle: None,
         }
     }
 
     /// Inject the adapter map (after gateway constructs it). Call once at startup.
     pub fn set_adapters(&mut self, adapters: Arc<HashMap<String, Arc<dyn ChannelAdapter>>>) {
         self.adapters = adapters;
+    }
+
+    /// Inject the shared diary throttle (gateway calls once at startup).
+    pub fn set_diary_throttle(&mut self, throttle: crate::scheduler::DiarySemaphore) {
+        self.diary_throttle = Some(throttle);
     }
 
     /// Replace the binding table at runtime. Called from the WS handler when
@@ -391,8 +400,15 @@ impl MessageRouter {
                 let row = session_row.unwrap(); // safe: is_active implies Some
                 let db = self.session_manager.state_db_arc();
                 let no_embedder: Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>> = None;
+                let throttle = self.diary_throttle.clone();
                 tokio::spawn(async move {
-                    crate::scheduler::extract_diary_for_session(&agent_clone, &row, &db, &no_embedder).await;
+                    crate::scheduler::extract_diary_for_session(
+                        &agent_clone,
+                        &row,
+                        &db,
+                        &no_embedder,
+                        throttle.as_ref(),
+                    ).await;
                 });
 
                 "Session archived. Next message starts a new session.".to_string()

@@ -1392,6 +1392,8 @@ daemon mode won't inherit interactive shell env.
 | `default_model` | — | Canonical `provider/model` (e.g. `claude/sonnet-4-6`, `codex/gpt-5.5`). Empty string clears. Legacy un-prefixed values auto-migrate to `claude/<old>`. |
 | `default_fallback_model` | — | Same format. Used when primary returns overload/rate-limit errors. |
 | `diary_model` | `claude/haiku-4-5` | Model for catclaw-internal diary generation + memory fact extraction. Independent from any agent's model. Hot-reloads. |
+| `diary_turn_threshold` | 10 | Rolling diary trigger: write a diary every N user turns inside a session (in addition to 30-min idle / `/new` / scheduled-task triggers). 0 disables rolling. Hot-reloads. |
+| `diary_max_concurrent` | 1 | Max concurrent diary extractions (transcript read + `claude -p` call). Default 1 prevents idle-bursts from saturating disk/CPU and locking out SSH. Raise only on beefy hosts — requires restart |
 | `timezone` | — | IANA timezone (e.g. "Asia/Taipei") for `--at` time parsing. Empty = system local |
 | `logging.level` | debug | error/warn/info/debug/trace — hot-reloads |
 

@@ -14,7 +14,22 @@ use crate::state::{SessionRow, StateDb};
 /// Tracks session IDs currently undergoing diary extraction to prevent duplicates.
 /// Shared between scheduler ticks — if a `claude -p` call takes longer than 60s,
 /// the next tick won't start a second extraction for the same session.
-type DiaryInFlight = Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
+pub type DiaryInFlight = Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
+
+pub fn new_diary_in_flight() -> DiaryInFlight {
+    Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Global I/O throttle for diary work. A small semaphore (default capacity 1)
+/// caps concurrent extractions across **all** trigger paths (idle scan, rolling
+/// per-turn, /new). Without this, an idle-burst can fan out N parallel
+/// transcript reads + `claude -p` calls and saturate the VM (incident
+/// 2026-05-19: CPU/disk fully pinned, ssh wouldn't come up).
+pub type DiarySemaphore = Arc<tokio::sync::Semaphore>;
+
+pub fn new_diary_semaphore(max_concurrent: u32) -> DiarySemaphore {
+    Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1) as usize))
+}
 
 /// Scheduler configuration passed from gateway
 pub struct SchedulerConfig {
@@ -38,6 +53,12 @@ pub struct SchedulerConfig {
     pub log_dir: std::path::PathBuf,
     /// Embedding model for memory palace (lazy-loaded on first use).
     pub embedder: Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
+    /// Global throttle for diary extractions (idle-scan, rolling, /new).
+    /// None disables throttling — only sensible in tests.
+    pub diary_throttle: Option<DiarySemaphore>,
+    /// Set-of-session-ids currently being processed. Shared with the rolling
+    /// trigger so both paths see the same de-dup state.
+    pub diary_in_flight: Option<DiaryInFlight>,
 }
 
 impl Default for SchedulerConfig {
@@ -53,6 +74,8 @@ impl Default for SchedulerConfig {
             social_config: None,
             log_dir: std::path::PathBuf::from("./workspace/logs"),
             embedder: None,
+            diary_throttle: None,
+            diary_in_flight: None,
         }
     }
 }
@@ -84,7 +107,11 @@ pub async fn run(
         DateTime::<Utc>::MAX_UTC
     };
     let mut next_archive = now + chrono::Duration::minutes(config.archive_check_interval_mins as i64);
-    let diary_in_flight: DiaryInFlight = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let diary_in_flight: DiaryInFlight = config
+        .diary_in_flight
+        .clone()
+        .unwrap_or_else(new_diary_in_flight);
+    let diary_throttle: Option<DiarySemaphore> = config.diary_throttle.clone();
 
     // Social polling next-run timestamps (DateTime::MAX = never / not configured).
     // Polling schedule is fixed at gateway startup — mode/interval changes require restart.
@@ -192,10 +219,23 @@ pub async fn run(
         }
 
         // ── System: Diary extraction ──
-        check_diary_extraction(&state_db, &agent_registry, &diary_in_flight, &config.embedder).await;
+        check_diary_extraction(
+            &state_db,
+            &agent_registry,
+            &diary_in_flight,
+            &config.embedder,
+            &diary_throttle,
+        ).await;
 
         // ── User tasks from DB ──
-        if let Err(e) = tick_user_tasks(&state_db, &agent_registry, &session_manager, &now, &config.embedder).await {
+        if let Err(e) = tick_user_tasks(
+            &state_db,
+            &agent_registry,
+            &session_manager,
+            &now,
+            &config.embedder,
+            &diary_throttle,
+        ).await {
             error!(error = %e, "scheduler: user task tick failed");
         }
     }
@@ -432,6 +472,7 @@ async fn tick_user_tasks(
     session_manager: &SessionManager,
     now: &DateTime<Utc>,
     embedder: &Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
+    throttle: &Option<DiarySemaphore>,
 ) -> crate::error::Result<()> {
     let now_str = now.to_rfc3339();
     let due_tasks = state_db.list_due_tasks(&now_str)?;
@@ -453,7 +494,7 @@ async fn tick_user_tasks(
         );
 
         let prompt = task.payload.as_deref().unwrap_or("(no prompt specified)");
-        execute_prompt(&agent, session_manager, state_db, prompt, task.id, task.keep_context, task.remember, task.model.as_deref(), embedder).await;
+        execute_prompt(&agent, session_manager, state_db, prompt, task.id, task.keep_context, task.remember, task.model.as_deref(), embedder, throttle).await;
 
         // Update schedule: calculate next run or disable if one-shot
         let last_run = now.to_rfc3339();
@@ -558,6 +599,7 @@ async fn execute_prompt(
     remember: bool,
     initial_model: Option<&str>,
     embedder: &Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
+    throttle: &Option<DiarySemaphore>,
 ) {
     let context_id = format!("task-{}", task_id);
     let key = SessionKey::new(&agent.id, "system", &context_id);
@@ -598,7 +640,7 @@ async fn execute_prompt(
                     info!(agent = %agent.id, task_id, "task: running diary extraction (remember=true)");
                     // Convert &StateDb to Arc for extract_diary_for_session
                     let db_arc = session_manager.state_db_arc();
-                    extract_diary_for_session(agent, &session_row, &db_arc, embedder).await;
+                    extract_diary_for_session(agent, &session_row, &db_arc, embedder, throttle.as_ref()).await;
                 }
             }
         }
@@ -659,7 +701,10 @@ fn prune_old_sessions(
         return;
     }
     // Remove transcript jsonl files: {agent_workspace}/transcripts/*{session_id}.jsonl
-    // (filename is either "{session_id}.jsonl" or "{label}_{session_id}.jsonl").
+    // (filename is either "{session_id}.jsonl" or "{label}_{session_id}.jsonl"),
+    // plus the matching `.marker` sidecar (see src/session/transcript.rs::MarkerState).
+    // Without the sidecar pass, `.marker` files would accumulate forever as a
+    // small but unbounded leak.
     let mut removed_files = 0usize;
     {
         let reg = agent_registry.read().unwrap();
@@ -667,12 +712,18 @@ fn prune_old_sessions(
             let Some(agent) = reg.get(agent_id) else { continue };
             let dir = agent.workspace.join("transcripts");
             let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            let suffix = format!("{}.jsonl", session_id);
+            let jsonl_suffix = format!("{}.jsonl", session_id);
+            let marker_suffix = format!("{}.jsonl.marker", session_id);
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                let matches = name == suffix || name.ends_with(&format!("_{}", suffix));
-                if matches && std::fs::remove_file(entry.path()).is_ok() {
+                let matches_jsonl =
+                    name == jsonl_suffix || name.ends_with(&format!("_{}", jsonl_suffix));
+                let matches_marker =
+                    name == marker_suffix || name.ends_with(&format!("_{}", marker_suffix));
+                if (matches_jsonl || matches_marker)
+                    && std::fs::remove_file(entry.path()).is_ok()
+                {
                     removed_files += 1;
                 }
             }
@@ -703,6 +754,25 @@ const DIARY_IDLE_MINS: i64 = 30;
 
 /// Minimum number of user turns required for diary extraction
 const DIARY_MIN_USER_TURNS: usize = 2;
+
+/// Exponential back-off (in seconds) keyed by consecutive failure count.
+/// Index N is the wait time after the N-th failure. Capped at the last slot.
+///
+/// Why: without back-off, a session whose `claude -p` call keeps failing
+/// (auth lapse, API quota, network flap) gets re-attempted every 60s by the
+/// scheduler tick, and each attempt full-scans the transcript file —
+/// historic cause of multi-GiB disk-read spikes (see lesson #35).
+const DIARY_FAILURE_BACKOFF_SECS: &[i64] = &[
+    5 * 60,   // 1st failure → wait 5 min
+    15 * 60,  // 2nd → 15 min
+    60 * 60,  // 3rd → 1 hr
+    6 * 3600, // 4th and beyond → 6 hr
+];
+
+fn diary_backoff_secs(attempt: u32) -> i64 {
+    let idx = (attempt.saturating_sub(1) as usize).min(DIARY_FAILURE_BACKOFF_SECS.len() - 1);
+    DIARY_FAILURE_BACKOFF_SECS[idx]
+}
 
 const DIARY_PROMPT: &str = r#"You are writing a diary entry for an AI agent. Read the following context
 to understand who you are, who you talk to, and your existing memories:
@@ -756,6 +826,7 @@ async fn check_diary_extraction(
     agent_registry: &std::sync::RwLock<AgentRegistry>,
     in_flight: &DiaryInFlight,
     embedder: &Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
+    throttle: &Option<DiarySemaphore>,
 ) {
     let sessions = match state_db.list_sessions() {
         Ok(s) => s,
@@ -814,8 +885,15 @@ async fn check_diary_extraction(
         let emb_clone = embedder.clone();
         let in_flight_clone = Arc::clone(in_flight);
         let session_id_clone = session.session_id.clone();
+        let throttle_clone = throttle.clone();
         tokio::spawn(async move {
-            extract_diary_for_session(&agent_clone, &session_clone, &db_clone, &emb_clone).await;
+            extract_diary_for_session(
+                &agent_clone,
+                &session_clone,
+                &db_clone,
+                &emb_clone,
+                throttle_clone.as_ref(),
+            ).await;
             // Remove from in-flight set (allows retry on error, or re-check on next tick)
             in_flight_clone.lock().unwrap().remove(&session_id_clone);
         });
@@ -836,7 +914,23 @@ pub async fn extract_diary_for_session(
     session: &SessionRow,
     state_db: &Arc<StateDb>,
     embedder: &Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
+    throttle: Option<&DiarySemaphore>,
 ) {
+    // I/O throttle: acquire a permit so the global cap (default 1) limits
+    // how many extractions can run concurrently. Without this, idle-burst
+    // bursts saturate disk + CPU and starve other tokio tasks (including
+    // SSH-handling sshd when nice levels aren't separated at the OS level).
+    let _permit = match throttle {
+        Some(sem) => match sem.clone().acquire_owned().await {
+            Ok(p) => Some(p),
+            Err(_) => {
+                // Semaphore closed — gateway is shutting down. Bail.
+                return;
+            }
+        },
+        None => None,
+    };
+
     let transcript = match TranscriptLog::open_existing(&agent.workspace, &session.session_id).await {
         Some(t) => t,
         None => {
@@ -844,6 +938,29 @@ pub async fn extract_diary_for_session(
             return;
         }
     };
+
+    // Back-off gate: if the last marker is a `diary_failed` and we're still
+    // inside the back-off window, skip silently. Avoids re-reading the whole
+    // transcript every scheduler tick when the LLM call is broken (auth gone,
+    // API quota, network).
+    let state = transcript.read_marker_state().await;
+    if matches!(
+        state.last_marker_kind,
+        Some(crate::session::transcript::MarkerKind::Failed)
+    ) {
+        let wait = diary_backoff_secs(state.fail_attempt);
+        let earliest = state.last_marker_unix + wait;
+        let now_unix = Utc::now().timestamp();
+        if now_unix < earliest {
+            debug!(
+                session = %session.session_key,
+                attempt = state.fail_attempt,
+                wait_secs = wait,
+                "diary: in failure back-off, skipping"
+            );
+            return;
+        }
+    }
 
     let (entries, marker_found) = transcript.read_since_last_marker().await;
 
@@ -964,7 +1081,29 @@ pub async fn extract_diary_for_session(
         }
         DiaryResult::Error(e) => {
             error!(session = %session.session_key, error = %e, "diary: generation failed");
-            // Don't write a marker on error — will retry next tick
+            // Write a `diary_failed:{attempt}:{rfc3339}` marker so the
+            // back-off gate above skips future ticks until the wait window
+            // elapses. The attempt count is embedded in the marker content
+            // (not just in the sidecar) so that if the sidecar is lost
+            // (gateway crash mid-write, disk full during rename) a rebuild
+            // can recover the back-off state by re-scanning the JSONL.
+            // Without that, a gateway restart on a permanently-failing
+            // session would collapse a 6-hour back-off back to 5 minutes
+            // and amplify the very disk thrash this PR is fixing.
+            //
+            // Critically: the marker does NOT advance the sidecar's
+            // `byte_offset` (see `log_system` Failed branch). Those turns
+            // stay visible to the next retry after back-off elapses;
+            // otherwise we'd silently drop them via the
+            // `marker_found && entries.is_empty()` skip in this function.
+            let next_attempt = state.fail_attempt.saturating_add(1);
+            transcript
+                .log_system(&format!(
+                    "diary_failed:{}:{}",
+                    next_attempt,
+                    Utc::now().to_rfc3339()
+                ))
+                .await;
         }
     }
 }
@@ -1177,4 +1316,108 @@ async fn open_issues_summary(issues_path: &Path) -> Option<String> {
     lines.push("To resolve: delete the entry from memory/issues.json.".to_string());
     lines.push("To ignore forever: set status to 'ignored' in memory/issues.json.".to_string());
     Some(lines.join("\n"))
+}
+
+// ─── Rolling diary trigger ──────────────────────────────────────────────────
+
+/// Per-turn diary trigger: fires `extract_diary_for_session` every
+/// `general.diary_turn_threshold` user turns (per session, counter resets when
+/// a `diary_extracted` marker is written).
+///
+/// Goal: keep diary writes bounded in size so they stay cheap to extract and
+/// the transcript file never accumulates into a multi-MiB blob that takes
+/// many seconds + tens of MiB of disk reads to re-process when the idle/30min
+/// trigger eventually fires.
+///
+/// Lives alongside (not instead of) the idle / `/new` / scheduled-task
+/// triggers — those still catch sessions that go silent before the next
+/// threshold is met.
+pub struct RollingDiaryTrigger {
+    state_db: Arc<StateDb>,
+    in_flight: DiaryInFlight,
+    throttle: Option<DiarySemaphore>,
+    embedder: Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
+    config: Arc<std::sync::RwLock<crate::config::Config>>,
+}
+
+impl RollingDiaryTrigger {
+    pub fn new(
+        state_db: Arc<StateDb>,
+        in_flight: DiaryInFlight,
+        throttle: Option<DiarySemaphore>,
+        embedder: Option<Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>>>,
+        config: Arc<std::sync::RwLock<crate::config::Config>>,
+    ) -> Self {
+        Self {
+            state_db,
+            in_flight,
+            throttle,
+            embedder,
+            config,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::session::manager::DiaryTrigger for RollingDiaryTrigger {
+    async fn on_turn_complete(
+        &self,
+        agent: &Agent,
+        session_key: &str,
+        session_id: &str,
+        user_turns_since_marker: u32,
+    ) {
+        // Threshold check (live-read from config so `config.set` takes effect
+        // immediately, no restart needed).
+        let threshold = self
+            .config
+            .read()
+            .map(|c| c.general.diary_turn_threshold)
+            .unwrap_or(0);
+        if threshold == 0 || user_turns_since_marker < threshold {
+            return;
+        }
+
+        // Memory must be enabled for this agent.
+        if agent.memory_disabled() {
+            return;
+        }
+
+        // De-dup with the scheduler-tick path.
+        {
+            let mut guard = self.in_flight.lock().unwrap();
+            if guard.contains(session_id) {
+                return;
+            }
+            guard.insert(session_id.to_string());
+        }
+
+        let session_row = match self.state_db.get_session(session_key) {
+            Ok(Some(row)) => row,
+            _ => {
+                self.in_flight.lock().unwrap().remove(session_id);
+                return;
+            }
+        };
+
+        // Spawn so we don't keep the caller's send_and_wait blocked waiting
+        // on the diary throttle / claude -p call.
+        let agent_clone = agent.clone();
+        let db = self.state_db.clone();
+        let emb = self.embedder.clone();
+        let throttle = self.throttle.clone();
+        let in_flight = self.in_flight.clone();
+        let session_id_owned = session_id.to_string();
+        tokio::spawn(async move {
+            extract_diary_for_session(
+                &agent_clone,
+                &session_row,
+                &db,
+                &emb,
+                throttle.as_ref(),
+            )
+            .await;
+            in_flight.lock().unwrap().remove(&session_id_owned);
+        });
+    }
 }

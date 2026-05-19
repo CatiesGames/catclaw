@@ -294,6 +294,22 @@ pub struct GeneralConfig {
     #[serde(default)]
     pub diary_model: Option<String>,
 
+    /// Rolling diary trigger: write a diary entry every N user turns inside
+    /// a session, in addition to the 30-min idle / `/new` / scheduled-task
+    /// triggers. 0 disables rolling. Default 10. Keeping this low (≤10)
+    /// keeps each diary read cheap (recent turns since last marker) and
+    /// prevents transcripts from accumulating into multi-MiB files that
+    /// stall the scheduler when finally extracted.
+    #[serde(default = "default_diary_turn_threshold")]
+    pub diary_turn_threshold: u32,
+
+    /// Maximum concurrent diary extractions. Each extraction reads a
+    /// transcript chunk and runs `claude -p` (CPU + I/O heavy). Defaults to
+    /// 1 so an idle-burst (many sessions becoming eligible at once) cannot
+    /// saturate the VM and block sshd. Raise only on beefy hosts.
+    #[serde(default = "default_diary_max_concurrent")]
+    pub diary_max_concurrent: u32,
+
     /// Token for authenticating internal WS connections (TUI/CLI → gateway).
     /// Auto-generated on first run; stored in config so all internal clients share it.
     /// External processes do not have access to this file, providing local auth.
@@ -531,6 +547,12 @@ fn default_archive_timeout() -> u64 {
 }
 fn default_session_retention_days() -> u64 {
     30
+}
+fn default_diary_turn_threshold() -> u32 {
+    10
+}
+fn default_diary_max_concurrent() -> u32 {
+    1
 }
 fn default_ws_port() -> u16 {
     21130
@@ -774,6 +796,8 @@ impl Config {
             "default_model" => Ok(self.general.default_model.clone().unwrap_or_default()),
             "default_fallback_model" => Ok(self.general.default_fallback_model.clone().unwrap_or_default()),
             "diary_model" => Ok(self.general.diary_model.clone().unwrap_or_default()),
+            "diary_turn_threshold" => Ok(self.general.diary_turn_threshold.to_string()),
+            "diary_max_concurrent" => Ok(self.general.diary_max_concurrent.to_string()),
             "timezone" => Ok(self.general.timezone.clone().unwrap_or_default()),
             "logging.level" => Ok(self.logging.level.clone()),
             "heartbeat.enabled" => Ok(self.heartbeat.as_ref().is_some_and(|h| h.enabled).to_string()),
@@ -920,6 +944,27 @@ impl Config {
             "session_retention_days" => {
                 self.general.session_retention_days = value.parse().map_err(|_| CatClawError::Config("invalid number".into()))?;
                 Ok(true) // scheduler reads this on startup; restart to apply
+            }
+            "diary_turn_threshold" => {
+                self.general.diary_turn_threshold = value
+                    .parse()
+                    .map_err(|_| CatClawError::Config("invalid number".into()))?;
+                // Trigger reads the threshold live from Config, so changes
+                // apply on the next turn.
+                Ok(false)
+            }
+            "diary_max_concurrent" => {
+                let n: u32 = value
+                    .parse()
+                    .map_err(|_| CatClawError::Config("invalid number".into()))?;
+                if n == 0 {
+                    return Err(CatClawError::Config(
+                        "diary_max_concurrent must be >= 1".into(),
+                    ));
+                }
+                self.general.diary_max_concurrent = n;
+                // Semaphore is built at gateway start — restart to resize.
+                Ok(true)
             }
             "port" | "ws_port" => {
                 self.general.port = value.parse().map_err(|_| CatClawError::Config("invalid port".into()))?;
@@ -1394,6 +1439,8 @@ impl Config {
                 default_model: None,
                 default_fallback_model: None,
                 diary_model: None,
+                diary_turn_threshold: default_diary_turn_threshold(),
+                diary_max_concurrent: default_diary_max_concurrent(),
                 ws_token: generate_token(),
                 timezone: None,
                 webhook_base_url: None,
