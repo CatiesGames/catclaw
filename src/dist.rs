@@ -323,6 +323,59 @@ fn unit_path() -> PathBuf {
         .join(".config/systemd/user/catclaw.service")
 }
 
+/// Result of comparing the installed service unit against what
+/// `service_install` would produce. Used by both the install path (to skip
+/// no-op reinstalls) and the gateway start path (to warn on drift).
+///
+/// `NotInstalled` and `Drifted` are only ever produced on Linux — the
+/// macOS / Windows path of `unit_sync_state` returns `InSync` unconditionally
+/// because we don't do plist drift detection (XML whitespace would make it
+/// fragile). The variants are still part of the cross-platform API so call
+/// sites in `gateway::start` don't need `#[cfg]` arms of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // macOS/Windows builds never construct the non-InSync variants
+pub enum UnitSyncState {
+    /// No unit file on disk — service was never installed.
+    NotInstalled,
+    /// Installed unit matches byte-for-byte what we'd write now.
+    InSync,
+    /// Installed unit differs (out-of-date binary path, stale memory limits,
+    /// missing watchdog, etc). Run `catclaw gateway install` to refresh.
+    Drifted,
+}
+
+/// Compare the installed unit (if any) against what `service_install` would
+/// write right now. Best-effort: returns `NotInstalled` when no unit on disk,
+/// `InSync` when contents match exactly, `Drifted` otherwise. Errors reading
+/// either side surface as `Drifted` (conservative — reinstall is safe).
+///
+/// Linux only. macOS plist comparison would need XML-aware diff (whitespace
+/// noise) which isn't worth the complexity for the launchd path.
+#[cfg(target_os = "linux")]
+pub fn unit_sync_state(config_path: &Path) -> UnitSyncState {
+    let unit = unit_path();
+    if !unit.exists() {
+        return UnitSyncState::NotInstalled;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(p) => std::fs::canonicalize(&p).unwrap_or(p),
+        Err(_) => return UnitSyncState::Drifted,
+    };
+    let config_abs = std::fs::canonicalize(config_path)
+        .unwrap_or_else(|_| config_path.to_path_buf());
+    let expected = build_systemd_unit(&exe, &config_abs);
+    match std::fs::read_to_string(&unit) {
+        Ok(actual) if actual == expected => UnitSyncState::InSync,
+        _ => UnitSyncState::Drifted,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn unit_sync_state(_config_path: &Path) -> UnitSyncState {
+    // macOS / Windows: not implemented (see comment on Linux variant).
+    UnitSyncState::InSync
+}
+
 /// Check if the service is installed.
 pub fn is_service_installed() -> bool {
     #[cfg(target_os = "macos")]
@@ -343,6 +396,21 @@ pub fn is_service_installed() -> bool {
 /// If a gateway is already running (manually started), it will be stopped first
 /// to avoid port conflicts with the service-managed instance.
 pub fn service_install(config_path: &Path) -> Result<(), CatClawError> {
+    // Drift check (Linux): if the installed unit byte-matches what we'd
+    // write, this is a no-op. Skip the stop-gateway + uninstall + reinstall
+    // + restart dance entirely. Lets deploy scripts call `catclaw gateway
+    // install` unconditionally on every release without disrupting a
+    // running service when nothing changed.
+    //
+    // The check is byte-for-byte against `build_systemd_unit`. Anything
+    // that varies between deploys (binary path, memory limits, watchdog
+    // timer) lives there — so a real drift always trips a reinstall.
+    #[cfg(target_os = "linux")]
+    if matches!(unit_sync_state(config_path), UnitSyncState::InSync) {
+        crate::cli_ui::status_msg("✅", "Service unit already in sync (no changes needed)");
+        return Ok(());
+    }
+
     // Stop any manually-started gateway to avoid port conflict
     let config = crate::config::Config::load(config_path).ok();
     let pid_path = crate::pidfile::pid_path(config.as_ref());
@@ -361,7 +429,7 @@ pub fn service_install(config_path: &Path) -> Result<(), CatClawError> {
 
     // If service is already installed, unload first (idempotent reinstall)
     if is_service_installed() {
-        crate::cli_ui::status_msg("🔄", "Reinstalling service...");
+        crate::cli_ui::status_msg("🔄", "Reinstalling service (unit drift detected)...");
         let _ = service_uninstall();
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
@@ -463,14 +531,15 @@ fn service_install_macos(exe: &Path, config_path: &Path) -> Result<(), CatClawEr
     Ok(())
 }
 
+/// Render the systemd user unit file for the given binary + config path.
+/// Pure function — same inputs always produce the same bytes, so callers can
+/// hash-compare the result against the installed unit to detect drift.
+///
+/// Anything that varies between deploys (memory limits, watchdog timer,
+/// timeout, env vars) must live here, not be patched on after the fact —
+/// otherwise drift detection sees false positives every time.
 #[cfg(target_os = "linux")]
-fn service_install_linux(exe: &Path, config_path: &Path) -> Result<(), CatClawError> {
-    let unit = unit_path();
-    if let Some(parent) = unit.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| CatClawError::Service(format!("failed to create systemd user dir: {}", e)))?;
-    }
-
+fn build_systemd_unit(exe: &Path, config_path: &Path) -> String {
     // Type=notify + watchdog: the gateway sends sd_notify(READY=1) once it's up
     // and sd_notify(WATCHDOG=1) every ~45s. If the tokio runtime freezes (e.g.
     // a deadlock or the box gets dragged into swap thrash), the watchdog stops
@@ -506,7 +575,7 @@ fn service_install_linux(exe: &Path, config_path: &Path) -> Result<(), CatClawEr
     //
     // TimeoutStartSec=300: first run downloads the ~560 MB BGE-M3 model
     // synchronously before READY=1; give it room on slow links.
-    let content = format!(
+    format!(
         r#"[Unit]
 Description=CatClaw AI Gateway
 After=network-online.target
@@ -528,7 +597,18 @@ WantedBy=default.target
 "#,
         exe = exe.display(),
         config = config_path.display(),
-    );
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn service_install_linux(exe: &Path, config_path: &Path) -> Result<(), CatClawError> {
+    let unit = unit_path();
+    if let Some(parent) = unit.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CatClawError::Service(format!("failed to create systemd user dir: {}", e)))?;
+    }
+
+    let content = build_systemd_unit(exe, config_path);
 
     std::fs::write(&unit, content)
         .map_err(|e| CatClawError::Service(format!("failed to write unit file: {}", e)))?;

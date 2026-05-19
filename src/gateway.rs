@@ -77,6 +77,35 @@ pub struct GatewayHandle {
 pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandle> {
     info!("starting CatClaw gateway");
 
+    // Drift check: when running under a systemd `Type=notify` unit, compare
+    // the unit file on disk against what `service_install` would write right
+    // now. Any drift means we're a fresh binary running under a stale unit
+    // (memory limits, watchdog, exec path). Don't auto-reinstall — that
+    // would race with the systemd we're already running under. Just log a
+    // loud warning so the operator notices and runs `catclaw gateway
+    // install` (which is now idempotent and a no-op when in sync).
+    if crate::dist::under_systemd_notify() {
+        match crate::dist::unit_sync_state(&config_path) {
+            crate::dist::UnitSyncState::Drifted => {
+                warn!(
+                    "systemd unit drift detected — installed unit differs from this binary's expected unit. \
+                     Memory limits / watchdog / exec path may be stale. Run `catclaw gateway install` to \
+                     refresh (idempotent; no-op when already in sync)."
+                );
+            }
+            crate::dist::UnitSyncState::NotInstalled => {
+                // Running under systemd but no user-unit file on disk? Either a
+                // system-level unit (we don't write those) or someone moved the
+                // file. Surface but don't block — not our managed path.
+                warn!(
+                    "running under systemd but no user-unit file found at the expected path; \
+                     skipping drift check"
+                );
+            }
+            crate::dist::UnitSyncState::InSync => {}
+        }
+    }
+
     // 1. Open state DB
     let state_db = Arc::new(StateDb::open(&config.general.state_db)?);
 
