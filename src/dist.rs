@@ -481,9 +481,25 @@ fn service_install_linux(exe: &Path, config_path: &Path) -> Result<(), CatClawEr
     // (which includes spawned `claude` subprocesses). When a runaway subprocess
     // blows past MemoryMax, the cgroup OOM-killer kills the biggest offender
     // (usually that subprocess; sometimes the gateway, which systemd restarts
-    // in ~10s) — far better than the whole VM thrashing. Values assume a host
-    // with ≥8 GiB RAM: BGE-M3 model RSS ~1.8 GiB + one opus session ~1 GiB +
-    // headroom. Tune via `systemctl --user edit catclaw` if your host differs.
+    // in ~10s) — far better than the whole VM thrashing.
+    //
+    // Budget (assumes host has ≥8 GiB RAM):
+    //   BGE-M3 owned bytes  ~2.3 GiB  (loaded as anon, see src/memory/embed.rs)
+    //   catclaw heap+stack  ~1.5 GiB
+    //   one claude session  ~1-2 GiB
+    //   slack for spikes    ~1 GiB
+    //                      ─────────
+    //                       ~6 GiB → MemoryMax=6G, MemoryHigh=5G
+    //
+    // Before BGE-M3 was loaded as owned bytes the model sat in page cache and
+    // wasn't billed to the cgroup at all — limits used to be 3G/4G. Owned
+    // bytes are anon memory, which IS billed. Lower limits will trip the
+    // cgroup OOM the moment the embedder finishes initialising.
+    //
+    // Tune via `systemctl --user edit catclaw` if your host has less than
+    // 8 GiB (in which case BGE-M3 is not really feasible — consider switching
+    // embedding model).
+    //
     // NOTE: memory accounting in *user* units needs cgroup delegation
     // (systemd ≥ v244 with `DefaultMemoryAccounting=yes`, true on most modern
     // distros). If unavailable systemd silently ignores these directives.
@@ -503,8 +519,8 @@ Restart=always
 RestartSec=5
 TimeoutStartSec=300
 WatchdogSec=120
-MemoryHigh=3G
-MemoryMax=4G
+MemoryHigh=5G
+MemoryMax=6G
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
 
 [Install]
