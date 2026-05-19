@@ -1407,7 +1407,7 @@ daemon mode won't inherit interactive shell env.
 |-----|---------|-------|
 | `heartbeat.enabled` | false | Enable periodic heartbeat — requires restart |
 | `heartbeat.interval_mins` | 30 | Minutes between heartbeats — requires restart |
-| `heartbeat.model` | "" (=agent default) | Model override for heartbeat poll. Recommend `haiku` if agent default is Opus — saves ~95% tokens on routine checks. Hot-reload (every tick archives + restarts the heartbeat session, so the next tick picks up the new model). |
+| `heartbeat.model` | "" (=agent default) | Model override for heartbeat poll. Canonical `provider/model` form (e.g. `claude/haiku-4-5`). Recommend a cheap tier (haiku / gpt-5.5-mini) if agent default is a flagship — saves ~95% tokens on routine checks. Hot-reload (every tick archives + restarts the heartbeat session, so the next tick picks up the new model). |
 
 ### Contacts Keys
 
@@ -1469,17 +1469,12 @@ Do, in order:
 
 ## Models & Providers
 
-All model strings use the canonical `provider/model` form. CatClaw drives
-two CLI runtimes:
+All model strings use the canonical `provider/model` form — see the
+**Agents > Runtime: claude vs codex** section below for the two
+runtimes catclaw drives and the available models in each.
 
-- **claude** — uses Claude Code CLI (`claude -p`). Models like
-  `claude/opus-4-7`, `claude/sonnet-4-6`, `claude/haiku-4-5`.
-- **codex** — uses Codex CLI (`codex exec`). Models like `codex/gpt-5.5`,
-  `codex/gpt-5.5-mini`, `codex/o3`.
-
-Common short aliases work too: `claude/opus` → `claude/opus-4-7`,
-`claude/haiku` → `claude/haiku-4-5`, `codex/mini` → check `catclaw config get default_model`
-options.
+Common short aliases: `claude/opus` → `claude/opus-4-7`,
+`claude/haiku` → `claude/haiku-4-5`.
 
 ### Setting models
 
@@ -1587,10 +1582,18 @@ catclaw agent tools <name> --allow "Read,Edit,Bash" --deny "WebFetch" --approve 
 
 ### Runtime: claude vs codex
 
-CatClaw can drive two CLI runtimes:
+CatClaw can drive two CLI runtimes. Models use the canonical
+`provider/model` form (set with `catclaw agent set-model my-agent --model
+claude/opus-4-7` etc.):
 
-- **claude** (default) — `claude -p` subprocesses with PreToolUse hook + `--mcp-config` for catclaw's MCP server.
-- **codex** — `codex exec` subprocesses with isolated `CODEX_HOME` per agent. Approval gate runs inside catclaw's MCP server (codex's user-level hooks don't fire in exec mode).
+- **claude** (default) — `claude -p` subprocesses with PreToolUse hook +
+  `--mcp-config` for catclaw's MCP server. Models: `claude/opus-4-7`
+  (flagship), `claude/sonnet-4-6` (balanced), `claude/haiku-4-5`
+  (fastest/cheapest).
+- **codex** — `codex exec` subprocesses with isolated `CODEX_HOME` per
+  agent. Approval gate runs inside catclaw's MCP server (codex's
+  user-level hooks don't fire in exec mode). Models: `codex/gpt-5.5`,
+  `codex/gpt-5.5-mini`, `codex/o3`.
 
 **catclaw user surfaces are identical across runtimes** — same approval cards (Discord embed / Telegram inline keyboard / Slack Block Kit / LINE Flex), same `tools.toml` schema, same TUI panels, same WS protocol. Switching `runtime = "codex"` in `catclaw.toml` doesn't change how an admin interacts with the bot.
 
@@ -1630,29 +1633,13 @@ Agent workspaces: `~/.catclaw/workspace/agents/{agent_id}/`
 | `HEARTBEAT.md` | Periodic maintenance tasks |
 
 (Long-term memory is **not** a file anymore — it lives in the Memory Palace
-SQLite store. See the Memory Palace tools below.)
-Use `Read` and `Edit` tools directly to view and modify these MD files (personality, etc.). **Do not manually edit `tools.toml` or `catclaw.toml`** — use `catclaw agent tools` and `catclaw config set` instead.
+SQLite store. The `memory_*` / `kg_*` MCP tools are documented in each
+agent's own runtime context, not here; this skill is for catclaw
+administration only.)
 
-**Memory Palace (MemPalace):**
-Memories are stored in a structured SQLite database (state.db), organized by Wing/Room/Hall. Use MCP tools to read/write:
-
-| Tool | Purpose |
-|------|---------|
-| `memory_status` | Palace overview + usage protocol |
-| `memory_write` | Store a memory (set hall, room, importance) |
-| `memory_search` | Hybrid search (full-text + semantic vector) |
-| `memory_delete` | Delete a memory by ID |
-| `memory_list_wings` | List all wings with counts |
-| `memory_list_rooms` | List rooms in a wing |
-| `kg_add` | Add a fact triple (e.g. "user prefers Rust") |
-| `kg_invalidate` | Mark a fact as expired |
-| `kg_query` | Query facts about an entity |
-| `kg_timeline` | Chronological fact timeline |
-
-**Halls:** facts, events, discoveries, preferences, advice
-**Importance:** 1-10 scale. Memories with importance >= 7 appear in boot context.
-**Diary:** After conversation idle (30 min), system auto-writes diary to palace DB (hall=events, source=diary).
-Transcripts saved to transcripts/{session_id}.jsonl.
+Use `Read` and `Edit` tools directly to view and modify these MD files
+(personality, etc.). **Do not manually edit `tools.toml` or `catclaw.toml`** —
+use `catclaw agent tools` and `catclaw config set` instead.
 
 ---
 
@@ -1760,7 +1747,7 @@ Scheduling options (pick one, mutually exclusive):
 
 Session behavior:
 - `--keep-context` — Reuse the same session across runs (context persists). **Without this flag (default), each run starts a fresh session with no memory of previous runs.** Use `--keep-context` only when the task needs to remember what it did last time.
-- `--model <name>` — Override the agent's default model for this task only (e.g. `--model haiku`). Useful for cheap routine checks (status pings, log scans, simple reminders) when the agent is otherwise on Opus. With `--keep-context`, model changes propagate on the next run (we re-sync session metadata each tick).
+- `--model <provider/name>` — Override the agent's default model for this task only (e.g. `--model claude/haiku-4-5` for cheap routine checks when the agent is otherwise on `claude/opus-4-7`). Use the canonical `provider/model` form; the provider must match the agent's runtime. With `--keep-context`, model changes propagate on the next run (we re-sync session metadata each tick).
 
 ### Cron Timezone Conversion (IMPORTANT)
 
@@ -1842,7 +1829,14 @@ catclaw update --notify slack:C0A9FFY7QAZ                    # Notify a channel 
 catclaw update --notify slack:C0A9FFY7QAZ --notify-message "I'm back!"  # Custom message
 ```
 
-**IMPORTANT: ALWAYS use `--notify` when self-updating OR self-restarting.** Both commands kill your current process — you cannot reply afterwards, and **without `--notify` you also won't know whether the restart succeeded** (no signal comes back to your next invocation). Without a notification you may wrongly conclude "the restart didn't happen" and run it again, double-restarting the gateway. Use the channel from the current `[Context: ...]` header so the user (and you) see the confirmation.
+**Use `--notify` OR `--resume` (or both) when self-updating / self-restarting.** Both commands kill your current process — you cannot reply from the dying session.
+
+Two recovery paths, pick what fits:
+
+- **`--resume`** — gateway records your session and silently re-enters you with a `[System] Gateway just came back online` system message. You continue the task in the SAME conversation. Best for "I need to restart and keep working." (See the **Self-restart awareness** section at the top of this skill.)
+- **`--notify <channel>`** — gateway posts `CatClaw gateway restarted ✅` to the named channel after coming back. Best when the user is watching and you want a visible confirmation, or when no session is yours to resume.
+
+Using both is fine — `--resume` re-enters your session AND `--notify` posts a public confirmation. The two failure mode without either is: you can't tell whether the restart succeeded, you may double-restart the gateway. Use the channel from the current `[Context: ...]` header for `--notify` so the user sees it.
 
 `--notify <type>:<channel_id>` sends a message to the specified channel after the gateway restarts. Format: `slack:<id>`, `discord:<id>`, `telegram:<id>`. The same flag works on `catclaw gateway restart` and `catclaw update`.
 
