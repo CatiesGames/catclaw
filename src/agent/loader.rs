@@ -1308,7 +1308,7 @@ For detailed API behavior, Block Kit, and advanced features:
 
 const SKILL_CATCLAW: &str = r#"---
 name: catclaw
-description: CatClaw system administration AND end-user workflow. Use when the user asks to configure CatClaw or manage agents / bindings / tasks / skills / channels / sessions / gateway, OR when the user is managing people through the bot — clients, customers, students, patients, contacts (e.g. "add 個案", "promote unknown to client", "set forward channel", "把 X 設為個案", "幫我管小明", manual reply with `>>`, or anything contacts_* / contact-related).
+description: CatClaw system administration AND end-user workflow. Use when the user asks to configure CatClaw or manage agents / bindings / tasks / skills / channels / sessions / gateway, switch CLI runtime (claude / codex), change model or check subscription / login status, OR when the user is managing people through the bot — clients, customers, students, patients, contacts (e.g. "add 個案", "promote unknown to client", "set forward channel", "把 X 設為個案", "幫我管小明", manual reply with `>>`, or anything contacts_* / contact-related). Also triggers on memory_write / memory_search failures (the embedding model is in-process BGE-M3, never ollama — see the Embedding section before diagnosing).
 ---
 
 # CatClaw System Administration

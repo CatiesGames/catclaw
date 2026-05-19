@@ -141,6 +141,12 @@ impl ConfigPanel {
                 editable: true,
             },
             ConfigEntry {
+                key: "diary_model".to_string(),
+                value: config.general.diary_model.clone().unwrap_or_default(),
+                section: "General".to_string(),
+                editable: true,
+            },
+            ConfigEntry {
                 key: "timezone".to_string(),
                 value: config.general.timezone.clone().unwrap_or_default(),
                 section: "General".to_string(),
@@ -476,7 +482,27 @@ impl ConfigPanel {
             return vec!["true".into(), "false".into()];
         }
         if key == "default_model" || key == "default_fallback_model" || key == "heartbeat.model" {
-            return vec!["opus".into(), "sonnet".into(), "haiku".into(), "".into()];
+            // Common picks from both providers. The gateway accepts any
+            // parseable `provider/model` so users can type their own value;
+            // these are completion hints. Empty string clears the key.
+            return vec![
+                "claude/opus-4-7".into(),
+                "claude/sonnet-4-6".into(),
+                "claude/haiku-4-5".into(),
+                "codex/gpt-5.5".into(),
+                "codex/gpt-5.5-mini".into(),
+                "codex/o3".into(),
+                "".into(),
+            ];
+        }
+        if key == "diary_model" {
+            // diary_model is catclaw-internal — cheap tier picks make sense.
+            return vec![
+                "claude/haiku-4-5".into(),
+                "codex/gpt-5.5-mini".into(),
+                "claude/sonnet-4-6".into(),
+                "".into(),
+            ];
         }
         if key == "logging.level" {
             return vec!["error".into(), "warn".into(), "info".into(), "debug".into()];

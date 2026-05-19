@@ -19,11 +19,26 @@ use crate::ws_protocol::WsEvent;
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/new", "Start a new session (archives current)"),
-    ("/model", "Switch model (opus, sonnet, haiku, clear)"),
+    ("/model", "Switch model (provider/model — see /model for the list, or `clear`)"),
     ("/help", "Show available commands"),
 ];
 
-const MODEL_COMPLETIONS: &[&str] = &["opus", "sonnet", "haiku", "clear", "default"];
+/// Completion hints for the `/model` command. Includes both providers' common
+/// aliases so the user gets dropdown options regardless of session runtime —
+/// the gateway rejects provider/runtime mismatches with a clear error.
+const MODEL_COMPLETIONS: &[&str] = &[
+    "claude/opus-4-7",
+    "claude/opus",
+    "claude/sonnet-4-6",
+    "claude/sonnet",
+    "claude/haiku-4-5",
+    "claude/haiku",
+    "codex/gpt-5.5",
+    "codex/gpt-5.5-mini",
+    "codex/o3",
+    "clear",
+    "default",
+];
 
 /// Viewing mode
 enum Mode {

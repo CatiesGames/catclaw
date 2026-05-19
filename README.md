@@ -472,7 +472,8 @@ session_archive_timeout_hours = 168
 session_retention_days = 30         # delete archived sessions + transcripts after N days (0 = never)
 port = 21130                        # WS + MCP on single port
 streaming = true
-default_model = "opus"              # optional: opus, sonnet, haiku
+default_model = "claude/opus-4-7"   # canonical provider/model form; codex/* and aliases like claude/opus also work
+# diary_model = "claude/haiku-4-5" # catclaw-internal analysis model (defaults to claude/haiku-4-5)
 
 [[channels]]
 type = "discord"
