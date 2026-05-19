@@ -10,3 +10,5 @@
 *.certSigningRequest
 .DS_Store
 /.claude/
+AGENTS.md
+/.codex-home/
