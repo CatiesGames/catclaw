@@ -80,15 +80,21 @@ enum SkillInputMode {
     ConfirmUninstall,
 }
 
-const KNOWN_MODELS: &[(&str, &str)] = &[
-    ("claude-opus-4-7",        "Opus 4.7 — newest flagship, 1M context"),
-    ("claude-opus-4-6",        "Opus 4.6 — previous flagship"),
-    ("claude-sonnet-4-6",      "Sonnet 4.6 — balanced"),
-    ("claude-haiku-4-5-20251001", "Haiku 4.5 — fastest"),
-    ("opus",                   "alias → claude-opus-4-7"),
-    ("sonnet",                 "alias → claude-sonnet-4-6"),
-    ("haiku",                  "alias → claude-haiku-4-5-20251001"),
-];
+/// Model picker entries displayed in the agent editor. Sourced from
+/// `agent/models.rs::KNOWN_MODELS` so the catalog stays in one place; the
+/// `id` shown / written into tools.toml is always the canonical
+/// `provider/alias` wire form (e.g. `claude/opus-4-7`, `codex/gpt-5.5`).
+fn known_models_for_picker() -> Vec<(String, &'static str)> {
+    crate::agent::models::KNOWN_MODELS
+        .iter()
+        .map(|e| {
+            (
+                format!("{}/{}", e.provider.as_str(), e.alias),
+                e.description,
+            )
+        })
+        .collect()
+}
 
 const AGENT_FILES: &[(&str, &str)] = &[
     ("SOUL.md", "Soul / Personality"),
@@ -201,6 +207,11 @@ pub struct AgentsPanel {
     /// Receiver for async MCP tools discovery results
     mcp_tools_rx: mpsc::UnboundedReceiver<std::collections::HashMap<String, Vec<String>>>,
     mcp_tools_tx: mpsc::UnboundedSender<std::collections::HashMap<String, Vec<String>>>,
+    /// Latest subscription status snapshot for Claude / Codex. Updated on
+    /// panel entry + every refresh (~30 s). The tx half lives in tokio tasks
+    /// fired on panel construction; we keep only the rx side here.
+    auth_status: Option<(crate::subscription::SubscriptionStatus, crate::subscription::SubscriptionStatus)>,
+    auth_rx: mpsc::UnboundedReceiver<(crate::subscription::SubscriptionStatus, crate::subscription::SubscriptionStatus)>,
 }
 
 impl AgentsPanel {
@@ -210,6 +221,26 @@ impl AgentsPanel {
         let (skill_tx, skill_rx) = mpsc::unbounded_channel();
         let (mcp_tools_tx, mcp_tools_rx) = mpsc::unbounded_channel();
         let (op_err_tx, op_err_rx) = mpsc::unbounded_channel();
+        let (auth_tx, auth_rx) = mpsc::unbounded_channel();
+
+        // Pre-fetch subscription status so the header has data on first render.
+        // ~1 s total — both probes are local CLI calls with no API impact.
+        {
+            let client = client.clone();
+            let tx = auth_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(resp) = client.request("auth.status", serde_json::json!({})).await {
+                    if let (Some(claude), Some(codex)) = (resp.get("claude"), resp.get("codex")) {
+                        if let (Ok(c), Ok(x)) = (
+                            serde_json::from_value::<crate::subscription::SubscriptionStatus>(claude.clone()),
+                            serde_json::from_value::<crate::subscription::SubscriptionStatus>(codex.clone()),
+                        ) {
+                            let _ = tx.send((c, x));
+                        }
+                    }
+                }
+            });
+        }
 
         // Pre-fetch MCP discovered tools so first Tools mode entry has data
         {
@@ -266,6 +297,8 @@ impl AgentsPanel {
             mcp_discovered_tools: std::collections::HashMap::new(),
             mcp_tools_rx,
             mcp_tools_tx,
+            auth_status: None,
+            auth_rx,
         }
     }
 
@@ -721,20 +754,20 @@ impl AgentsPanel {
         self.mode = Mode::Normal;
     }
 
-    fn filtered_models(&self) -> Vec<&(&'static str, &'static str)> {
+    fn filtered_models(&self) -> Vec<(String, &'static str)> {
         let q = self.model_edit_buffer.to_lowercase();
-        KNOWN_MODELS
-            .iter()
+        known_models_for_picker()
+            .into_iter()
             .filter(|(id, desc)| {
-                q.is_empty() || id.contains(q.as_str()) || desc.to_lowercase().contains(q.as_str())
+                q.is_empty() || id.contains(&q) || desc.to_lowercase().contains(&q)
             })
             .collect()
     }
 
     fn accept_model_completion(&mut self) {
         let models = self.filtered_models();
-        if let Some(&(id, _)) = models.get(self.model_completion_idx) {
-            self.model_edit_buffer = id.to_string();
+        if let Some((id, _)) = models.get(self.model_completion_idx) {
+            self.model_edit_buffer = id.clone();
             self.model_completion_idx = 0;
         }
     }
@@ -995,6 +1028,93 @@ impl AgentsPanel {
         while let Ok(msg) = self.op_err_rx.try_recv() {
             self.status_msg = Some(msg);
         }
+    }
+
+    /// Drain pending auth.status responses into the cached snapshot.
+    /// Called on every render tick so the header reflects the latest probe.
+    fn poll_auth_status(&mut self) {
+        while let Ok(status) = self.auth_rx.try_recv() {
+            self.auth_status = Some(status);
+        }
+    }
+
+    /// Return an inline warning string if the agent's configured model
+    /// points at a provider that isn't currently usable (not logged in,
+    /// failed, CLI missing). Returns None when subscription is fine or the
+    /// model string is empty/unparseable.
+    fn model_subscription_warning(&self, model_str: &str) -> Option<&'static str> {
+        use crate::subscription::AuthState;
+        if model_str.is_empty() || model_str == "(none)" || model_str == "(default)" {
+            return None;
+        }
+        let pm = crate::agent::models::parse_model_string(model_str).ok()?;
+        let (claude, codex) = self.auth_status.as_ref()?;
+        let status = match pm.provider {
+            crate::agent::Runtime::Claude => claude,
+            crate::agent::Runtime::Codex => codex,
+        };
+        match &status.state {
+            AuthState::Active => None,
+            AuthState::NotLoggedIn => Some("⚠️ provider not logged in"),
+            AuthState::Failed { .. } => Some("⚠️ provider recently failed"),
+            AuthState::CliMissing => Some("⚠️ provider CLI missing"),
+            AuthState::Unknown { .. } => Some("⚠️ provider status unknown"),
+        }
+    }
+
+    /// One-line summary string for a single provider's auth state.
+    /// Returns `(label_str, style_color)` for the renderer.
+    fn render_auth_line(status: &crate::subscription::SubscriptionStatus) -> (String, ratatui::style::Color) {
+        use crate::subscription::AuthState;
+        let label = status.provider.as_str();
+        let body = match &status.state {
+            AuthState::Active => {
+                let mut parts = Vec::new();
+                if let Some(plan) = &status.plan {
+                    parts.push(plan.clone());
+                }
+                if let Some(account) = &status.account {
+                    parts.push(account.clone());
+                }
+                let detail = if parts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", parts.join(" · "))
+                };
+                (format!("{} ✓{}", label, detail), Theme::GREEN)
+            }
+            AuthState::NotLoggedIn => (
+                format!(
+                    "{} ✗ not logged in (run `{} {} login`)",
+                    label,
+                    label,
+                    if matches!(status.provider, crate::agent::Runtime::Claude) {
+                        "auth"
+                    } else {
+                        ""
+                    }
+                    .trim(),
+                ),
+                Theme::RED,
+            ),
+            AuthState::Failed { reason, .. } => (
+                format!(
+                    "{} ⚠️ last call failed — may need re-login ({})",
+                    label,
+                    reason.chars().take(60).collect::<String>()
+                ),
+                Theme::YELLOW,
+            ),
+            AuthState::CliMissing => (
+                format!("{} ✗ CLI not installed", label),
+                Theme::OVERLAY1,
+            ),
+            AuthState::Unknown { reason } => (
+                format!("{} ? unknown ({})", label, reason),
+                Theme::OVERLAY1,
+            ),
+        };
+        body
     }
 
     fn delete_selected(&mut self) {
@@ -1362,6 +1482,7 @@ impl Component for AgentsPanel {
         self.poll_create();
         self.poll_skills();
         self.poll_op_errors();
+        self.poll_auth_status();
         match &self.mode {
             Mode::Normal | Mode::ConfirmDelete | Mode::EditModel | Mode::CreateAgent => self.render_normal(frame, area),
             Mode::SelectFile => self.render_select_file(frame, area),
@@ -1385,6 +1506,7 @@ impl AgentsPanel {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1),          // subscription status header
                 Constraint::Min(0),
                 Constraint::Length(ac_height),  // autocomplete popup (0 when not editing)
                 Constraint::Length(1),          // status
@@ -1392,10 +1514,32 @@ impl AgentsPanel {
             ])
             .split(area);
 
+        // Subscription header line: "claude ✓ max (dev@…)  ·  codex ✓ ChatGPT"
+        let header_line: Line = match &self.auth_status {
+            Some((claude, codex)) => {
+                let (c_text, c_color) = Self::render_auth_line(claude);
+                let (x_text, x_color) = Self::render_auth_line(codex);
+                Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(c_text, Style::default().fg(c_color)),
+                    Span::styled("  ·  ", Style::default().fg(Theme::OVERLAY1)),
+                    Span::styled(x_text, Style::default().fg(x_color)),
+                ])
+            }
+            None => Line::from(Span::styled(
+                " checking subscriptions…",
+                Style::default().fg(Theme::OVERLAY1),
+            )),
+        };
+        frame.render_widget(
+            Paragraph::new(header_line),
+            chunks[0],
+        );
+
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-            .split(chunks[0]);
+            .split(chunks[1]);
 
         // Left: agent list
         let items: Vec<ListItem> = self
@@ -1473,14 +1617,28 @@ impl AgentsPanel {
                     ),
                 ]),
                 Line::from(""),
-                Line::from(vec![
-                    Span::styled("Model:    ", Style::default().fg(Theme::OVERLAY1)),
-                    Span::styled(model_str, Style::default().fg(Theme::PEACH)),
-                ]),
-                Line::from(vec![
-                    Span::styled("Fallback: ", Style::default().fg(Theme::OVERLAY1)),
-                    Span::styled(fallback_str, Style::default().fg(Theme::PEACH)),
-                ]),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled("Model:    ", Style::default().fg(Theme::OVERLAY1)),
+                        Span::styled(model_str, Style::default().fg(Theme::PEACH)),
+                    ];
+                    if let Some(warning) = self.model_subscription_warning(model_str) {
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(warning, Style::default().fg(Theme::YELLOW)));
+                    }
+                    spans
+                }),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled("Fallback: ", Style::default().fg(Theme::OVERLAY1)),
+                        Span::styled(fallback_str, Style::default().fg(Theme::PEACH)),
+                    ];
+                    if let Some(warning) = self.model_subscription_warning(fallback_str) {
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(warning, Style::default().fg(Theme::YELLOW)));
+                    }
+                    spans
+                }),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("SOUL.md: ", Style::default().fg(Theme::OVERLAY1)),
@@ -1550,7 +1708,7 @@ impl AgentsPanel {
                     .title(" Models ")
                     .title_style(Style::default().fg(Theme::MAUVE)),
             );
-            frame.render_widget(list, chunks[1]);
+            frame.render_widget(list, chunks[2]);
         }
 
         // Status
@@ -1605,7 +1763,7 @@ impl AgentsPanel {
         } else {
             Paragraph::new("").style(Style::default().bg(Theme::MANTLE))
         };
-        frame.render_widget(status, chunks[2]);
+        frame.render_widget(status, chunks[3]);
 
         // Help bar — use styled spans so active keys are visible
         let help = if self.mode == Mode::ConfirmDelete {
@@ -1653,7 +1811,7 @@ impl AgentsPanel {
                 Span::styled(" Delete", Style::default().fg(Theme::OVERLAY1)),
             ]))
         };
-        frame.render_widget(help.style(Style::default().bg(Theme::MANTLE)), chunks[3]);
+        frame.render_widget(help.style(Style::default().bg(Theme::MANTLE)), chunks[4]);
     }
 
     fn render_tools(&self, frame: &mut Frame, area: Rect) {

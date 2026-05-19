@@ -292,6 +292,7 @@ async fn dispatch(
         "env.set" => handle_env_set(req, gw),
         "env.remove" => handle_env_remove(req, gw),
         "mcp.tools" => handle_mcp_tools(req, gw),
+        "auth.status" => handle_auth_status(req),
         "social.inbox.list" => handle_social_inbox_list(req, gw),
         "social.inbox.get" => handle_social_inbox_get(req, gw),
         "social.inbox.approve" => handle_social_inbox_approve(req, gw).await,
@@ -559,6 +560,22 @@ fn handle_gateway_status(req: &WsRequest, gw: &GatewayHandle) -> WsResponse {
     )
 }
 
+/// Probe both runtime CLIs for subscription status.
+///
+/// Spawns `claude auth status` + `codex login status` synchronously
+/// (each <1 s, no API call), then merges with any persisted failure marker
+/// from prior real-call 401/403s.
+fn handle_auth_status(req: &WsRequest) -> WsResponse {
+    let (claude, codex) = crate::subscription::check_all();
+    WsResponse::ok(
+        req.id,
+        json!({
+            "claude": claude,
+            "codex": codex,
+        }),
+    )
+}
+
 fn handle_sessions_list(req: &WsRequest, db: &Arc<StateDb>) -> WsResponse {
     match db.list_sessions() {
         Ok(sessions) => {
@@ -750,6 +767,40 @@ fn handle_sessions_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResp
     };
     // model: string to set, null/absent to clear
     let model = req.params.get("model").and_then(|v| v.as_str());
+
+    // C.3 — Validate provider/runtime alignment on the session's runtime.
+    // Pulls runtime from session metadata (defaults to Claude for legacy
+    // pre-v0.50 sessions that predate the metadata field).
+    if let Some(m) = model {
+        if !m.is_empty() {
+            let session_runtime = gw
+                .state_db
+                .get_session(key)
+                .ok()
+                .flatten()
+                .and_then(|row| row.runtime_from_metadata())
+                .unwrap_or(crate::agent::Runtime::Claude);
+            match crate::agent::models::parse_model_string(m) {
+                Ok(pm) if pm.provider == session_runtime => {}
+                Ok(pm) => {
+                    return WsResponse::err(
+                        req.id,
+                        -32602,
+                        format!(
+                            "model provider `{}` does not match session runtime `{}` — \
+                             use a `{}/*` model",
+                            pm.provider.as_str(),
+                            session_runtime.as_str(),
+                            session_runtime.as_str(),
+                        ),
+                    );
+                }
+                Err(e) => {
+                    return WsResponse::err(req.id, -32602, format!("invalid model: {}", e));
+                }
+            }
+        }
+    }
 
     match gw.session_manager.set_session_model(key, model) {
         Ok(()) => {
@@ -1264,6 +1315,45 @@ fn handle_agents_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRespon
         Some(a) => a,
         None => return WsResponse::err(req.id, -32602, format!("agent '{}' not found", agent_id)),
     };
+
+    // C.3 — Validate provider/runtime alignment for any model string being
+    // set. agent.runtime=codex cannot use a `claude/*` model and vice versa
+    // because each runtime spawns a different CLI; mismatch means the model
+    // is silently ignored. Reject with a friendly message before persisting.
+    let agent_runtime = agent_cfg.runtime;
+    let validate = |label: &str, change: &Option<Option<String>>| -> Option<WsResponse> {
+        let Some(Some(new_val)) = change else { return None };
+        if new_val.is_empty() {
+            return None;
+        }
+        match crate::agent::models::parse_model_string(new_val) {
+            Ok(pm) if pm.provider == agent_runtime => None,
+            Ok(pm) => Some(WsResponse::err(
+                req.id,
+                -32602,
+                format!(
+                    "{}: provider `{}` does not match agent runtime `{}` — \
+                     use a `{}/*` model or switch the agent's runtime first",
+                    label,
+                    pm.provider.as_str(),
+                    agent_runtime.as_str(),
+                    agent_runtime.as_str(),
+                ),
+            )),
+            Err(e) => Some(WsResponse::err(
+                req.id,
+                -32602,
+                format!("{}: invalid model string: {}", label, e),
+            )),
+        }
+    };
+    if let Some(err) = validate("model", &model_change) {
+        return err;
+    }
+    if let Some(err) = validate("fallback_model", &fallback_change) {
+        return err;
+    }
+
     if let Some(m) = model_change.clone() {
         agent_cfg.model = m;
     }

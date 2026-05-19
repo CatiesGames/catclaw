@@ -162,7 +162,10 @@ impl CodexHandle {
             info!("codex stdout reader ended");
         });
 
-        // stderr reader: just log
+        // stderr reader: log + auth-failure sniff. Codex prints rmcp /
+        // websocket errors here including 401 Unauthorized when the
+        // ChatGPT token has expired. Surfacing it through record_failure
+        // makes the TUI subscription row reflect reality.
         tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
@@ -170,6 +173,12 @@ impl CodexHandle {
                 let line = line.trim().to_string();
                 if !line.is_empty() {
                     warn!(line = %line, "codex stderr");
+                    if crate::memory::oneshot::is_auth_failure(&line) {
+                        crate::subscription::record_failure(
+                            crate::agent::Runtime::Codex,
+                            format!("codex stderr: {}", &line.chars().take(200).collect::<String>()),
+                        );
+                    }
                 }
             }
             info!("codex stderr reader ended");

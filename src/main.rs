@@ -18,6 +18,7 @@ mod scheduler;
 mod session;
 mod social;
 mod state;
+mod subscription;
 mod tui;
 mod ws_client;
 mod ws_protocol;

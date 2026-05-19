@@ -1,6 +1,7 @@
 mod db;
 pub mod analyze;
 pub mod embed;
+pub mod oneshot;
 pub mod search;
 pub mod kg;
 pub mod tools;

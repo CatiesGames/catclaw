@@ -321,7 +321,8 @@ impl ClaudeHandle {
             info!("claude stdout reader ended");
         });
 
-        // Spawn stderr reader — log it (warn level so errors are visible)
+        // Spawn stderr reader — log + sniff for auth failures so the TUI
+        // subscription row flips to ⚠️ when a real call returns 401/403.
         tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
@@ -329,6 +330,12 @@ impl ClaudeHandle {
                 let line = line.trim().to_string();
                 if !line.is_empty() {
                     warn!(line = %line, "claude stderr");
+                    if crate::memory::oneshot::is_auth_failure(&line) {
+                        crate::subscription::record_failure(
+                            crate::agent::Runtime::Claude,
+                            format!("claude stderr: {}", &line.chars().take(200).collect::<String>()),
+                        );
+                    }
                 }
             }
             info!("claude stderr reader ended");

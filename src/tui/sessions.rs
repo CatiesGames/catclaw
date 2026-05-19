@@ -638,8 +638,13 @@ impl SessionsPanel {
                 .unwrap_or_else(|| "(default)".to_string());
 
             let mut info = format!("Current model: {}\n\nAvailable models:", current);
-            for &(short, full) in KNOWN_MODELS {
-                info.push_str(&format!("\n  {} — {}", short, full));
+            for entry in KNOWN_MODELS {
+                info.push_str(&format!(
+                    "\n  {}/{} — {}",
+                    entry.provider.as_str(),
+                    entry.alias,
+                    entry.description
+                ));
             }
             info.push_str("\n\nUse /model <name> to switch. /model clear to reset.");
 

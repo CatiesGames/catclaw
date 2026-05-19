@@ -1,28 +1,224 @@
-/// Known Claude CLI model short names and their full model IDs.
-pub const KNOWN_MODELS: &[(&str, &str)] = &[
-    ("opus", "claude-opus-4-7"),
-    ("sonnet", "claude-sonnet-4-6"),
-    ("haiku", "claude-haiku-4-5-20251001"),
-];
+//! Model identifier handling: parsing, resolution, and the canonical
+//! `provider/model` form used by catclaw config files and WS protocols.
+//!
+//! All model strings stored in `catclaw.toml` or sent over WS are now in
+//! `provider/model` form — e.g. `claude/opus-4-7`, `codex/gpt-5.5-mini`.
+//! `Config::load` migrates old un-prefixed values (e.g. `opus`, `haiku`,
+//! `claude-opus-4-7`) on first load by writing them back with the
+//! `claude/` prefix preserved.
+//!
+//! The downstream CLI args builder (`claude_args_with_mcp` /
+//! `codex_args_from`) reads `ProviderModel.model` to get the raw model ID
+//! without the prefix — both CLIs expect bare model names.
 
-/// Resolve a model name: short name → full name, unknown names pass through.
-pub fn resolve_model(name: &str) -> String {
-    let name = name.trim();
-    for &(short, full) in KNOWN_MODELS {
-        if name.eq_ignore_ascii_case(short) {
-            return full.to_string();
-        }
-    }
-    name.to_string()
+use crate::agent::Runtime;
+
+/// A model identifier resolved to its `(provider, full_model_id)` parts.
+///
+/// Constructed from a `provider/model` string or a legacy un-prefixed alias.
+/// `model` is always the full upstream model ID (e.g. `claude-opus-4-7`,
+/// `gpt-5.5-mini`), never an alias — aliases are resolved during parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderModel {
+    pub provider: Runtime,
+    pub model: String,
 }
 
-/// Get a display-friendly short name for a full model ID.
-/// Returns the short name if found, otherwise the original string.
+impl ProviderModel {
+    /// Canonical wire form: `provider/model`. Stable across save/load cycles.
+    #[allow(dead_code)] // used by C.2 migration + C.6 TUI rendering
+    pub fn to_wire_string(&self) -> String {
+        format!("{}/{}", self.provider.as_str(), self.model)
+    }
+}
+
+/// Known model catalog. Aliases (shorter names that resolve to a full ID) are
+/// listed too — `parse_model_string` walks both alias and full-id lookups.
+pub struct ModelEntry {
+    pub provider: Runtime,
+    /// Short alias (e.g. "opus", "haiku") or canonical short name. May equal
+    /// `full_id` for entries that have no alias.
+    pub alias: &'static str,
+    /// Full upstream model ID that the CLI consumes (e.g. claude-opus-4-7).
+    pub full_id: &'static str,
+    /// Display description for TUI picker.
+    pub description: &'static str,
+}
+
+#[allow(dead_code)]
+pub const KNOWN_MODELS: &[ModelEntry] = &[
+    // ── Claude ────────────────────────────────────────────────────────────
+    ModelEntry {
+        provider: Runtime::Claude,
+        alias: "opus-4-7",
+        full_id: "claude-opus-4-7",
+        description: "Opus 4.7 — newest flagship, 1M context",
+    },
+    ModelEntry {
+        provider: Runtime::Claude,
+        alias: "opus-4-6",
+        full_id: "claude-opus-4-6",
+        description: "Opus 4.6 — previous flagship",
+    },
+    ModelEntry {
+        provider: Runtime::Claude,
+        alias: "sonnet-4-6",
+        full_id: "claude-sonnet-4-6",
+        description: "Sonnet 4.6 — balanced",
+    },
+    ModelEntry {
+        provider: Runtime::Claude,
+        alias: "haiku-4-5",
+        full_id: "claude-haiku-4-5-20251001",
+        description: "Haiku 4.5 — fastest, cheapest",
+    },
+    // Short top-level aliases (Claude is the default provider, so `opus`
+    // alone — no `claude/` prefix — resolves here for back-compat).
+    ModelEntry {
+        provider: Runtime::Claude,
+        alias: "opus",
+        full_id: "claude-opus-4-7",
+        description: "alias → claude/opus-4-7",
+    },
+    ModelEntry {
+        provider: Runtime::Claude,
+        alias: "sonnet",
+        full_id: "claude-sonnet-4-6",
+        description: "alias → claude/sonnet-4-6",
+    },
+    ModelEntry {
+        provider: Runtime::Claude,
+        alias: "haiku",
+        full_id: "claude-haiku-4-5-20251001",
+        description: "alias → claude/haiku-4-5",
+    },
+    // ── Codex (OpenAI) ─────────────────────────────────────────────────────
+    // Codex CLI's `-c model="..."` config key accepts any model name the
+    // ChatGPT account is subscribed to. The list below is the common set
+    // surfaced in the TUI picker; users can still set arbitrary IDs by
+    // editing catclaw.toml directly.
+    ModelEntry {
+        provider: Runtime::Codex,
+        alias: "gpt-5.5",
+        full_id: "gpt-5.5",
+        description: "GPT-5.5 — current flagship",
+    },
+    ModelEntry {
+        provider: Runtime::Codex,
+        alias: "gpt-5.5-mini",
+        full_id: "gpt-5.5-mini",
+        description: "GPT-5.5 mini — fastest, cheapest",
+    },
+    ModelEntry {
+        provider: Runtime::Codex,
+        alias: "o3",
+        full_id: "o3",
+        description: "o3 — reasoning",
+    },
+];
+
+/// Parse a model string in any of the supported forms into a [`ProviderModel`]:
+///
+/// 1. Canonical: `claude/opus-4-7` / `codex/gpt-5.5-mini`
+/// 2. Provider + alias: `claude/opus` / `codex/mini`
+/// 3. Legacy un-prefixed alias: `opus` / `haiku` (defaults to claude)
+/// 4. Legacy full ID: `claude-opus-4-7` / `gpt-5.5` (provider sniffed from prefix)
+///
+/// Returns `Err` for malformed strings (e.g. `unknown/foo`).
+pub fn parse_model_string(s: &str) -> Result<ProviderModel, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("model string is empty".to_string());
+    }
+
+    // Canonical / provider+alias form.
+    if let Some((provider_str, model_part)) = s.split_once('/') {
+        let provider = match provider_str.trim().to_lowercase().as_str() {
+            "claude" => Runtime::Claude,
+            "codex" => Runtime::Codex,
+            other => {
+                return Err(format!(
+                    "unknown provider '{}' (expected 'claude' or 'codex')",
+                    other
+                ));
+            }
+        };
+        let model_part = model_part.trim();
+        if model_part.is_empty() {
+            return Err(format!("model string '{}' has empty model part", s));
+        }
+        // Resolve alias if any (for the matching provider only).
+        let resolved = KNOWN_MODELS
+            .iter()
+            .find(|m| m.provider == provider && m.alias.eq_ignore_ascii_case(model_part))
+            .map(|m| m.full_id.to_string())
+            .unwrap_or_else(|| model_part.to_string());
+        return Ok(ProviderModel {
+            provider,
+            model: resolved,
+        });
+    }
+
+    // Legacy un-prefixed: try alias resolution across all providers (claude
+    // wins ties because its entries are listed first).
+    if let Some(entry) = KNOWN_MODELS
+        .iter()
+        .find(|m| m.alias.eq_ignore_ascii_case(s))
+    {
+        return Ok(ProviderModel {
+            provider: entry.provider,
+            model: entry.full_id.to_string(),
+        });
+    }
+
+    // Legacy full ID: provider sniff by prefix.
+    let lower = s.to_lowercase();
+    if lower.starts_with("claude-") {
+        return Ok(ProviderModel {
+            provider: Runtime::Claude,
+            model: s.to_string(),
+        });
+    }
+    if lower.starts_with("gpt-")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+        || lower.starts_with("codex-")
+    {
+        return Ok(ProviderModel {
+            provider: Runtime::Codex,
+            model: s.to_string(),
+        });
+    }
+
+    Err(format!(
+        "unrecognised model '{}' — use `claude/<name>` or `codex/<name>` form",
+        s
+    ))
+}
+
+/// Get a display-friendly short name for a full model ID (back-compat helper
+/// used by TUI rendering — returns the alias if one is registered, otherwise
+/// the original full ID unchanged).
+#[allow(dead_code)]
 pub fn model_display_name(full: &str) -> &str {
-    for &(short, full_name) in KNOWN_MODELS {
-        if full == full_name {
-            return short;
+    for entry in KNOWN_MODELS {
+        if entry.full_id == full && entry.alias != entry.full_id {
+            return entry.alias;
         }
     }
     full
+}
+
+/// Resolve a model string to its raw upstream model ID, dropping provider
+/// prefix and resolving aliases. Used by callers that already know which CLI
+/// to spawn and just want the bare name to pass via `--model` / `-c model=`.
+///
+/// Falls back to the input on unparseable strings so existing call sites that
+/// trusted `resolve_model` to not panic keep working.
+#[allow(dead_code)]
+pub fn resolve_model(name: &str) -> String {
+    match parse_model_string(name) {
+        Ok(pm) => pm.model,
+        Err(_) => name.to_string(),
+    }
 }

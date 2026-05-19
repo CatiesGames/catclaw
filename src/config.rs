@@ -286,6 +286,14 @@ pub struct GeneralConfig {
     #[serde(default)]
     pub default_fallback_model: Option<String>,
 
+    /// Model used by background analysis tasks (diary generation +
+    /// post-processing). Independent from agent.model — these are
+    /// catclaw-internal "fast / cheap" runs that don't need flagship
+    /// reasoning. Defaults to `claude/haiku-4-5`. Can be set to a
+    /// `codex/*` model to run analysis on OpenAI tokens instead.
+    #[serde(default)]
+    pub diary_model: Option<String>,
+
     /// Token for authenticating internal WS connections (TUI/CLI → gateway).
     /// Auto-generated on first run; stored in config so all internal clients share it.
     /// External processes do not have access to this file, providing local auth.
@@ -658,6 +666,69 @@ impl Config {
             }
         }
 
+        // Migration: upgrade un-prefixed model strings to canonical
+        // `provider/model` form. Pre-v0.50 catclaw.toml stored model values
+        // as bare aliases ("opus") or full IDs ("claude-opus-4-7"); the
+        // model picker, runtime/provider validation, and subscription UI
+        // all expect the prefixed form going forward. We re-canonicalise
+        // through parse_model_string and write back via to_wire_string —
+        // idempotent on already-prefixed values.
+        let migrate_model = |val: &mut Option<String>, label: &str| -> bool {
+            let Some(raw) = val.as_ref() else {
+                return false;
+            };
+            if raw.is_empty() {
+                return false;
+            }
+            // Already in `provider/model` form? Skip — but normalise alias.
+            let parsed = match crate::agent::models::parse_model_string(raw) {
+                Ok(pm) => pm,
+                Err(e) => {
+                    tracing::warn!(
+                        config = %path.display(),
+                        field = label,
+                        value = %raw,
+                        error = %e,
+                        "model migration: leaving unparseable value as-is",
+                    );
+                    return false;
+                }
+            };
+            let canonical = parsed.to_wire_string();
+            if canonical == *raw {
+                return false;
+            }
+            tracing::info!(
+                config = %path.display(),
+                field = label,
+                from = %raw,
+                to = %canonical,
+                "migrating model string to canonical provider/model form",
+            );
+            *val = Some(canonical);
+            true
+        };
+        if migrate_model(&mut config.general.default_model, "general.default_model") {
+            needs_save = true;
+        }
+        if migrate_model(
+            &mut config.general.default_fallback_model,
+            "general.default_fallback_model",
+        ) {
+            needs_save = true;
+        }
+        for agent in &mut config.agents {
+            if migrate_model(&mut agent.model, &format!("agents[{}].model", agent.id)) {
+                needs_save = true;
+            }
+            if migrate_model(
+                &mut agent.fallback_model,
+                &format!("agents[{}].fallback_model", agent.id),
+            ) {
+                needs_save = true;
+            }
+        }
+
         if needs_save {
             // Persist immediately so all clients share the same token,
             // and so the stripped [embedding] section doesn't reappear.
@@ -702,6 +773,7 @@ impl Config {
             "streaming" => Ok(self.general.streaming.to_string()),
             "default_model" => Ok(self.general.default_model.clone().unwrap_or_default()),
             "default_fallback_model" => Ok(self.general.default_fallback_model.clone().unwrap_or_default()),
+            "diary_model" => Ok(self.general.diary_model.clone().unwrap_or_default()),
             "timezone" => Ok(self.general.timezone.clone().unwrap_or_default()),
             "logging.level" => Ok(self.logging.level.clone()),
             "heartbeat.enabled" => Ok(self.heartbeat.as_ref().is_some_and(|h| h.enabled).to_string()),
@@ -814,6 +886,23 @@ impl Config {
             }
             "default_fallback_model" => {
                 self.general.default_fallback_model = if value.is_empty() { None } else { Some(value.to_string()) };
+                Ok(false)
+            }
+            "diary_model" => {
+                // Validate as a parseable provider/model string before
+                // accepting — `config.set diary_model claude/garbage` should
+                // fail fast, not at the next diary tick.
+                let cleaned = if value.is_empty() { None } else { Some(value.to_string()) };
+                if let Some(ref v) = cleaned {
+                    crate::agent::models::parse_model_string(v)
+                        .map_err(|e| CatClawError::Config(format!("invalid diary_model: {}", e)))?;
+                }
+                self.general.diary_model = cleaned;
+                // Hot-reload: re-install the snapshot so the next diary tick
+                // uses the new model without a gateway restart.
+                crate::memory::oneshot::install_diary_model(
+                    self.general.diary_model.as_deref(),
+                );
                 Ok(false)
             }
             "max_concurrent_sessions" => {
@@ -1304,6 +1393,7 @@ impl Config {
                 streaming: default_streaming(),
                 default_model: None,
                 default_fallback_model: None,
+                diary_model: None,
                 ws_token: generate_token(),
                 timezone: None,
                 webhook_base_url: None,

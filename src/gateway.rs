@@ -100,6 +100,11 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
         config.general.timezone.as_deref(),
     )?));
 
+    // 3a-bis. Install the diary-model snapshot so background analysis
+    // (diary extraction + post-processing) picks up `general.diary_model`.
+    // Defaults to claude/haiku-4-5 — see memory::oneshot for details.
+    crate::memory::oneshot::install_diary_model(config.general.diary_model.as_deref());
+
     // 3b. Initialize embedding model (downloads BGE-M3 on first run, ~560MB)
     let embedder: Arc<tokio::sync::OnceCell<crate::memory::embed::Embedder>> =
         Arc::new(tokio::sync::OnceCell::new());

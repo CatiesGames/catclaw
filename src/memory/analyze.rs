@@ -1,14 +1,11 @@
 use std::sync::Arc;
 
-use tokio::process::Command;
 use tracing::warn;
 
 use crate::error::{CatClawError, Result};
 use crate::memory::embed::Embedder;
 use crate::memory::{DiaryAnalysis, WriteRequest};
 use crate::state::StateDb;
-
-const HAIKU_MODEL: &str = "claude-haiku-4-5-20251001";
 
 const ANALYZE_PROMPT: &str = r#"You are a memory analyst. Given a diary entry, extract structured data.
 
@@ -218,53 +215,18 @@ pub async fn classify_memory(
     Ok(())
 }
 
-/// Call Haiku model to analyze diary text. Returns parsed DiaryAnalysis.
+/// Call the configured analysis model on `diary_text` and parse its JSON
+/// reply into a [`DiaryAnalysis`]. The provider/model comes from
+/// `general.diary_model` (defaults to `claude/haiku-4-5`) via a process-wide
+/// snapshot installed at gateway startup.
 async fn call_haiku(diary_text: &str, rooms_list: &str) -> Result<DiaryAnalysis> {
     let prompt = ANALYZE_PROMPT
         .replace("{diary_text}", diary_text)
         .replace("{rooms_list}", rooms_list);
 
-    let result = Command::new("claude")
-        .args([
-            "-p",
-            &prompt,
-            "--model",
-            HAIKU_MODEL,
-            "--max-turns",
-            "1",
-            "--output-format",
-            "text",
-            "--dangerously-skip-permissions",
-            "--tools",
-            "",
-            "--strict-mcp-config",
-            "--mcp-config",
-            r#"{"mcpServers":{}}"#,
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .env_remove("CLAUDECODE")
-        .output()
-        .await;
-
-    match result {
-        Ok(output) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(CatClawError::Memory(format!(
-                    "haiku exited with {}: {}",
-                    output.status, stderr
-                )));
-            }
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            parse_analysis(&text)
-        }
-        Err(e) => Err(CatClawError::Memory(format!(
-            "failed to spawn haiku: {}",
-            e
-        ))),
-    }
+    let model = crate::memory::oneshot::current_diary_model();
+    let text = crate::memory::oneshot::run_oneshot_inference(&model, &prompt).await?;
+    parse_analysis(&text)
 }
 
 /// Parse JSON output from Haiku, handling potential markdown fences.

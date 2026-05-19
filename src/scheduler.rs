@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use croner::Cron;
-use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 use crate::agent::{Agent, AgentRegistry};
@@ -989,48 +988,23 @@ async fn generate_diary(agent: &Agent, transcript_text: &str, state_db: &StateDb
         .replace("{memory_context}", &memory_context)
         .replace("{transcript}", transcript_text);
 
-    // Call Haiku for diary generation — doesn't need deep reasoning,
-    // just personality-aware journaling. Personality context is in the prompt.
-    let result = Command::new("claude")
-        .args([
-            "-p",
-            &prompt,
-            "--model",
-            "claude-haiku-4-5-20251001",
-            "--max-turns",
-            "1",
-            "--output-format",
-            "text",
-            "--dangerously-skip-permissions",
-            "--tools",
-            "",
-            "--strict-mcp-config",
-            "--mcp-config",
-            r#"{"mcpServers":{}}"#,
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .env_remove("CLAUDECODE")
-        .output()
-        .await;
-
-    match result {
-        Ok(output) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return DiaryResult::Error(format!("claude exited with {}: {}", output.status, stderr));
-            }
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Diary generation — small/cheap inference using whatever model the user
+    // selected for analysis tasks (defaults to claude/haiku-4-5). Provider
+    // dispatch lives in memory::oneshot, so swapping general.diary_model to
+    // a codex model routes this through `codex exec` instead.
+    let model = crate::memory::oneshot::current_diary_model();
+    match crate::memory::oneshot::run_oneshot_inference(&model, &prompt).await {
+        Ok(text) => {
+            let text = text.trim().to_string();
             if text == "NO_DIARY" {
                 DiaryResult::NoDiary
             } else if text.is_empty() {
-                DiaryResult::Error("claude returned empty output".to_string())
+                DiaryResult::Error("diary model returned empty output".to_string())
             } else {
                 DiaryResult::Entry(text)
             }
         }
-        Err(e) => DiaryResult::Error(format!("failed to spawn claude: {}", e)),
+        Err(e) => DiaryResult::Error(format!("diary model call failed: {}", e)),
     }
 }
 
