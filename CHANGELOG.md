@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.50.0](https://github.com/CatiesGames/catclaw/compare/v0.49.0...v0.50.0) (2026-05-19)
+
+
+### Features
+
+* **auth:** catclaw auth CLI + SKILL_CATCLAW model/provider guide ([7a34968](https://github.com/CatiesGames/catclaw/commit/7a34968042e3cd46c01c41785808c85374a92b02))
+* **codex:** Phase B.1 + B.2 — codex runtime spawn path ([bf4f176](https://github.com/CatiesGames/catclaw/commit/bf4f176f01d501c82aa0c212802f68cdbe5a09d9))
+* **codex:** Phase B.3 + B.4 — approval gate covers codex tool calls ([f56b979](https://github.com/CatiesGames/catclaw/commit/f56b97991b1a17ee0c154ca878733c4edac7b5a9))
+* **codex:** Phase B.5 — channel adapters render ApprovalCard ([b73789d](https://github.com/CatiesGames/catclaw/commit/b73789d76f715147d3f85f419ded109883cec4be))
+* **codex:** Phase B.7 — CLI/WS user surface for codex runtime ([2c40046](https://github.com/CatiesGames/catclaw/commit/2c40046d98aa778f75ea7e94b877c4b38c1f5661))
+* **models:** provider/model format + TUI subscription status ([defb6cd](https://github.com/CatiesGames/catclaw/commit/defb6cd3b05bc45959b98029fed12ceb4d1ceff6))
+
+
+### Bug Fixes
+
+* **codex:** scenario walkthrough — 5 bugs from cross-runtime path audit ([383287a](https://github.com/CatiesGames/catclaw/commit/383287a417ebc3773131a61d412d8b5155b2b69b))
+* **codex:** scenario walkthrough round 2 — 3 more bugs ([db595d1](https://github.com/CatiesGames/catclaw/commit/db595d177f8f91bd86b8af34b00242d6c2ec8489))
+* **codex:** scenario walkthrough round 3 — session_key alignment + ephemeral forward ([05c5e8b](https://github.com/CatiesGames/catclaw/commit/05c5e8bcfaea53f6d519b368b266fc635fcf7685))
+* **diary:** kill 100 GiB disk-read spike from transcript rescans ([663a45b](https://github.com/CatiesGames/catclaw/commit/663a45b5c2a12ea696dfaaa8aa434630e66d29ce))
+* **embed:** load BGE-M3 as owned bytes to defeat mmap thrash ([fe05da9](https://github.com/CatiesGames/catclaw/commit/fe05da932cef0d19010ca06eebcf5a595044e5ca))
+
 ## [0.49.0](https://github.com/CatiesGames/catclaw/compare/v0.48.1...v0.49.0) (2026-05-13)
 
 
