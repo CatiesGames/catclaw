@@ -167,6 +167,12 @@ enum Commands {
     /// Show version information
     Version,
 
+    /// Check Claude / Codex subscription status (no API calls, local CLI probes).
+    Auth {
+        #[command(subcommand)]
+        command: Option<AuthCommands>,
+    },
+
     /// Internal hooks called by Claude Code (not for direct user use)
     #[command(hide = true)]
     Hook {
@@ -206,6 +212,17 @@ enum HookCommands {
         /// Session key for routing approval requests
         #[arg(long)]
         session_key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Show Claude / Codex login status (default when `catclaw auth` is called
+    /// with no subcommand).
+    Status {
+        /// Output as JSON for scripts / agents to consume.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1645,6 +1662,19 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         Some(Commands::Version) => {
             println!("catclaw {}", env!("CARGO_PKG_VERSION"));
+        }
+
+        Some(Commands::Auth { command }) => {
+            // Default to `status` when `catclaw auth` is invoked with no subcommand.
+            let json_output = matches!(command, Some(AuthCommands::Status { json: true }));
+            let (claude, codex) = subscription::check_all();
+            if json_output {
+                let payload = serde_json::json!({ "claude": claude, "codex": codex });
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+            } else {
+                cmd_auth_status_pretty(&claude);
+                cmd_auth_status_pretty(&codex);
+            }
         }
 
         Some(Commands::Social { command }) => {
@@ -3577,6 +3607,57 @@ async fn cmd_agent_new(
     println!("Edit SOUL.md: catclaw agent edit {} soul", name);
 
     Ok(())
+}
+
+fn cmd_auth_status_pretty(status: &crate::subscription::SubscriptionStatus) {
+    use crate::subscription::AuthState;
+    let provider = status.provider.as_str();
+    match &status.state {
+        AuthState::Active => {
+            let mut detail = Vec::new();
+            if let Some(plan) = &status.plan {
+                detail.push(plan.clone());
+            }
+            if let Some(account) = &status.account {
+                detail.push(account.clone());
+            }
+            let suffix = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", detail.join(" · "))
+            };
+            println!("{:8} ✓ logged in{}", provider, suffix);
+        }
+        AuthState::NotLoggedIn => {
+            let cmd = match status.provider {
+                crate::agent::Runtime::Claude => "claude auth login",
+                crate::agent::Runtime::Codex => "codex login",
+            };
+            println!("{:8} ✗ not logged in — run `{}`", provider, cmd);
+        }
+        AuthState::Failed { reason, .. } => {
+            println!(
+                "{:8} ⚠️ recent call failed: {}",
+                provider,
+                reason.chars().take(120).collect::<String>()
+            );
+            let cmd = match status.provider {
+                crate::agent::Runtime::Claude => "claude auth login",
+                crate::agent::Runtime::Codex => "codex login",
+            };
+            println!("         (try `{}` if credentials expired)", cmd);
+        }
+        AuthState::CliMissing => {
+            let pkg = match status.provider {
+                crate::agent::Runtime::Claude => "Claude Code (https://claude.com/claude-code)",
+                crate::agent::Runtime::Codex => "codex (npm install -g @openai/codex)",
+            };
+            println!("{:8} ✗ CLI not installed — install {}", provider, pkg);
+        }
+        AuthState::Unknown { reason } => {
+            println!("{:8} ? unknown — {}", provider, reason);
+        }
+    }
 }
 
 fn cmd_agent_list(config: &Config) {

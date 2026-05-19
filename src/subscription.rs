@@ -250,7 +250,15 @@ fn probe_codex() -> (Option<String>, Option<String>, AuthState) {
             );
         }
     };
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Codex writes its status line to STDERR when stdout isn't a TTY (verified
+    // by raw subprocess probe — shell-as-tty sees it on stdout, but
+    // `Command::output()` gets it on stderr). Merge both so we don't miss it.
+    let stdout = {
+        let so = String::from_utf8_lossy(&output.stdout);
+        let se = String::from_utf8_lossy(&output.stderr);
+        let combined = if so.trim().is_empty() { se } else { so };
+        combined.trim().to_string()
+    };
     // Codex outputs free-form text — examples:
     //   "Logged in using ChatGPT"
     //   "Logged in with API key (env: OPENAI_API_KEY)"

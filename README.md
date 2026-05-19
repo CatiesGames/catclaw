@@ -190,6 +190,47 @@ These come from the underlying model or CLI itself — catclaw documents them bu
 
 For per-account isolation (e.g. work + personal codex accounts), pass `--codex-auth-path` to point at a different `auth.json`.
 
+#### Models
+
+All model references use the canonical `provider/model` form:
+
+```bash
+# Per-agent model
+catclaw agent set-model my-agent --model claude/opus-4-7
+catclaw agent set-model my-codex-agent --model codex/gpt-5.5
+
+# Global defaults
+catclaw config set default_model claude/sonnet-4-6
+catclaw config set default_fallback_model claude/haiku-4-5
+
+# Background diary/memory analysis (catclaw-internal — runs independent of agents)
+catclaw config set diary_model claude/haiku-4-5   # default; fast & cheap
+catclaw config set diary_model codex/gpt-5.5-mini # switch to OpenAI mini
+```
+
+The provider must match the agent's runtime — `claude/*` for Claude agents,
+`codex/*` for Codex agents. Mismatched combinations are rejected with a
+clear error.
+
+Legacy un-prefixed values (`opus`, `claude-opus-4-7`) auto-migrate to the
+canonical form on first load after upgrade.
+
+#### Check subscription status
+
+```bash
+catclaw auth                  # claude ✓ max (dev@…)  ·  codex ✓ logged in
+catclaw auth status --json    # JSON for scripts
+```
+
+Statuses surfaced:
+- `✓ logged in` — provider ready
+- `✗ not logged in` — run `claude auth login` or `codex login`
+- `⚠️ recent call failed` — token likely expired; re-login (warning clears
+  on the next successful call automatically)
+
+The TUI agents panel shows the same status live in the header and flags
+agents whose configured model points at an unsubscribed provider.
+
 ### Channels
 
 ```bash

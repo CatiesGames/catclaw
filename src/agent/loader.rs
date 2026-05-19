@@ -1389,8 +1389,9 @@ daemon mode won't inherit interactive shell env.
 | `session_archive_timeout_hours` | 168 | Hours before archival |
 | `session_retention_days` | 30 | Days to keep archived sessions (rows + transcripts) before permanent deletion; 0 = never. Pruned in the 6-hourly cleanup pass — requires restart |
 | `streaming` | true | Streaming mode (true/false) |
-| `default_model` | — | e.g. "sonnet", "opus", "" to clear |
-| `default_fallback_model` | — | Fallback when primary is overloaded |
+| `default_model` | — | Canonical `provider/model` (e.g. `claude/sonnet-4-6`, `codex/gpt-5.5`). Empty string clears. Legacy un-prefixed values auto-migrate to `claude/<old>`. |
+| `default_fallback_model` | — | Same format. Used when primary returns overload/rate-limit errors. |
+| `diary_model` | `claude/haiku-4-5` | Model for catclaw-internal diary generation + memory fact extraction. Independent from any agent's model. Hot-reloads. |
 | `timezone` | — | IANA timezone (e.g. "Asia/Taipei") for `--at` time parsing. Empty = system local |
 | `logging.level` | debug | error/warn/info/debug/trace — hot-reloads |
 
@@ -1465,6 +1466,84 @@ Do, in order:
 4. Check swap: if the host is swap-thrashing, embed calls block on
    `spawn_blocking` and look like timeouts. Memory pressure is the most
    common cause of "embedding hangs" in production.
+
+## Models & Providers
+
+All model strings use the canonical `provider/model` form. CatClaw drives
+two CLI runtimes:
+
+- **claude** — uses Claude Code CLI (`claude -p`). Models like
+  `claude/opus-4-7`, `claude/sonnet-4-6`, `claude/haiku-4-5`.
+- **codex** — uses Codex CLI (`codex exec`). Models like `codex/gpt-5.5`,
+  `codex/gpt-5.5-mini`, `codex/o3`.
+
+Common short aliases work too: `claude/opus` → `claude/opus-4-7`,
+`claude/haiku` → `claude/haiku-4-5`, `codex/mini` → check `catclaw config get default_model`
+options.
+
+### Setting models
+
+```bash
+# Per-agent model (validated against agent.runtime)
+catclaw agent set-model my-agent --model claude/opus-4-7
+catclaw agent set-model my-codex-agent --model codex/gpt-5.5
+
+# Global default (used by agents that don't override)
+catclaw config set default_model claude/sonnet-4-6
+catclaw config set default_fallback_model claude/haiku-4-5
+```
+
+**Provider/runtime must match**: a codex-runtime agent CANNOT use a
+`claude/*` model, and vice versa — `catclaw` rejects mismatched
+combinations with a friendly error. To use a different provider on an
+existing agent, switch the runtime first.
+
+Legacy un-prefixed values (`"opus"`, `"haiku"`, `"claude-opus-4-7"`)
+auto-migrate to the canonical form on the next `catclaw config` load,
+including a one-line warn in the gateway log explaining the rewrite.
+
+### Diary model (memory analysis)
+
+CatClaw's internal background tasks — diary generation from transcripts
++ Haiku-style fact extraction — run on a separate model independent of
+any agent. Default: `claude/haiku-4-5`. Change with:
+
+```bash
+# Use OpenAI's GPT mini for diary instead:
+catclaw config set diary_model codex/gpt-5.5-mini
+
+# Or pick a higher tier for richer summaries:
+catclaw config set diary_model claude/sonnet-4-6
+
+# Reset to default:
+catclaw config set diary_model ""
+```
+
+Hot-reload — applies to the next diary tick, no gateway restart. This is
+NOT bound to any specific agent's runtime; it's a catclaw-wide setting.
+
+### Subscription / login status
+
+Check which providers you're logged into:
+
+```bash
+catclaw auth                       # human-readable
+catclaw auth status --json         # JSON for scripting
+```
+
+Output covers:
+- `✓ logged in` — provider ready to use
+- `✗ not logged in` — run `claude auth login` or `codex login`
+- `⚠️ recent call failed` — token likely expired; re-login + the warning
+  clears on the next successful call
+- `✗ CLI not installed` — install the missing CLI
+
+The TUI agents panel header shows the same status live, and the agent
+detail view annotates each `Model:` row with a `⚠️` if it references a
+provider that's not currently usable.
+
+WS method `auth.status` returns the same data structurally — gateway
+clients (TUI / future remote dashboards) read it directly.
 
 ## Access Control
 
