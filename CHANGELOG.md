@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.51.0](https://github.com/CatiesGames/catclaw/compare/v0.50.0...v0.51.0) (2026-05-20)
+
+
+### Features
+
+* **codex:** codex agent 自動具備 gpt-image-2 圖片生成 ([5ce05cf](https://github.com/CatiesGames/catclaw/commit/5ce05cf56d0be9ecd0edbba84e4f5f66eb119bf0))
+* **contacts:** Telegram 改走 contacts 作為 toC 入口 + 每平台預設 agent + 可改派 owning agent ([f3d4bc9](https://github.com/CatiesGames/catclaw/commit/f3d4bc9f5e7961862c8affa7d3ef9d2cfcb91759))
+
+
+### Bug Fixes
+
+* **dist:** drift-detect systemd unit so deploys can't leave stale limits ([f028c09](https://github.com/CatiesGames/catclaw/commit/f028c09ecc76bfcb6d0281d8c02b4ab405cce18a))
+
 ## [0.50.0](https://github.com/CatiesGames/catclaw/compare/v0.49.0...v0.50.0) (2026-05-19)
 
 
