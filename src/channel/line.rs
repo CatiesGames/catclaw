@@ -1166,7 +1166,7 @@ async fn receive_webhook(
         let cfg = gw.config.read().unwrap();
         (
             cfg.contacts.enabled,
-            cfg.default_agent_id().unwrap_or("main").to_string(),
+            cfg.default_agent_for_platform("line").unwrap_or("main").to_string(),
         )
     };
     adapter

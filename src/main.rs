@@ -635,6 +635,9 @@ enum ContactCommands {
         /// Disable approval requirement
         #[arg(long)]
         no_approval: bool,
+        /// Reassign this contact to a different owning agent (must already exist)
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Delete a contact (cascade: removes channels + drafts)
     Delete {
@@ -1970,6 +1973,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     forward_channel,
                     approval,
                     no_approval,
+                    agent,
                 } => {
                     let mut c = state_db
                         .get_contact(&id)?
@@ -1982,6 +1986,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     }
                     if approval { c.approval_required = true; }
                     if no_approval { c.approval_required = false; }
+                    if let Some(new_agent) = agent {
+                        // Validate against config so a typo can't strand the
+                        // contact on a non-existent agent.
+                        if !config.agents.iter().any(|a| a.id == new_agent) {
+                            eprintln!(
+                                "unknown agent '{}' — create it first (catclaw agent new) or pick an existing agent",
+                                new_agent
+                            );
+                            std::process::exit(1);
+                        }
+                        c.agent_id = new_agent;
+                    }
 
                     // forward_channel must be unique across contacts (DB enforces
                     // it; check first for a clear error before SQLite barks).

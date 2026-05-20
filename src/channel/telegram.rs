@@ -4,8 +4,9 @@ use teloxide::types::{
     ChatId, ChatKind, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup,
     MessageId as TgMessageId, ThreadId, UserId as TgUserId,
 };
+use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::{
     ActionInfo, AdapterFilter, ChannelAdapter, ChannelCapabilities, ChannelType, MsgContext,
@@ -31,6 +32,16 @@ pub struct TelegramAdapter {
     contact_action_tx: mpsc::UnboundedSender<crate::contacts::ContactAction>,
     contact_action_rx:
         tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<crate::contacts::ContactAction>>>,
+    /// State DB + Config for private-chat contact auto-registration. Injected
+    /// by gateway via `set_contacts_context` before `start()`. None = disabled
+    /// (older callers without contacts wiring).
+    contacts_state: RwLock<Option<ContactsContext>>,
+}
+
+#[derive(Clone)]
+struct ContactsContext {
+    state_db: Arc<crate::state::StateDb>,
+    config: Arc<std::sync::RwLock<crate::config::Config>>,
 }
 
 impl TelegramAdapter {
@@ -48,7 +59,21 @@ impl TelegramAdapter {
             social_action_rx: tokio::sync::Mutex::new(Some(social_action_rx)),
             contact_action_tx,
             contact_action_rx: tokio::sync::Mutex::new(Some(contact_action_rx)),
+            contacts_state: RwLock::new(None),
         }
+    }
+
+    /// Inject the state DB + shared Config so the dispatcher closure can
+    /// auto-register private-chat senders as `role=unknown` contacts (mirroring
+    /// the LINE and Discord-DM adapters). Must be called BEFORE `start()` — the
+    /// closure reads the value once at `start()` time and captures it by clone.
+    pub async fn set_contacts_context(
+        &self,
+        state_db: Arc<crate::state::StateDb>,
+        config: Arc<std::sync::RwLock<crate::config::Config>>,
+    ) {
+        let mut slot = self.contacts_state.write().await;
+        *slot = Some(ContactsContext { state_db, config });
     }
 
     /// Take the approval receiver (called once by gateway to wire into approval handling).
@@ -103,6 +128,10 @@ impl ChannelAdapter for TelegramAdapter {
         }
 
         let filter_arc = self.filter.clone();
+        // Snapshot the contacts context once; the dispatcher closure captures
+        // this Option and clones it per-invocation (like msg_tx). None when the
+        // gateway didn't wire contacts (feature off / older setup).
+        let contacts = self.contacts_state.read().await.clone();
 
         // Get bot info for mention detection
         let me = bot
@@ -128,6 +157,7 @@ impl ChannelAdapter for TelegramAdapter {
                 let msg_tx = msg_tx.clone();
                 let filter_arc = filter_arc.clone();
                 let bot_username = bot_username.clone();
+                let contacts = contacts.clone();
                 async move {
                     // Extract text: from text message or caption on media messages
                     let text = msg
@@ -295,6 +325,32 @@ impl ChannelAdapter for TelegramAdapter {
                     };
 
                     let thread_id = msg.thread_id.map(|t| t.to_string());
+
+                    // Private-chat contact auto-registration. Group messages
+                    // are workspace chat (admin ↔ agent) and bypass the contacts
+                    // system, mirroring the Discord guild/DM asymmetry (CLAUDE.md
+                    // lesson #28). Idempotent, no LLM — see ensure_unknown_telegram_contact.
+                    if is_private && !sender_id.is_empty() {
+                        if let Some(ref cx) = contacts {
+                            let (contacts_enabled, default_agent) = {
+                                let cfg = cx.config.read().unwrap();
+                                (
+                                    cfg.contacts.enabled,
+                                    cfg.default_agent_for_platform("telegram")
+                                        .unwrap_or("main")
+                                        .to_string(),
+                                )
+                            };
+                            if contacts_enabled {
+                                ensure_unknown_telegram_contact(
+                                    &cx.state_db,
+                                    &default_agent,
+                                    &sender_id,
+                                    &sender_name,
+                                );
+                            }
+                        }
+                    }
 
                     let ctx = MsgContext {
                         channel_type: ChannelType::Telegram,
@@ -1001,6 +1057,50 @@ impl ChannelAdapter for TelegramAdapter {
 }
 
 // ── Helper functions ──────────────────────────────────────────────────
+
+/// Idempotent private-chat contact registration for Telegram. Mirrors LINE's
+/// `ensure_unknown_contact` and Discord's `ensure_unknown_telegram_contact`:
+/// if the telegram user_id is already bound, no-op; otherwise create a
+/// `role=unknown` contact (with the supplied display_name) owned by
+/// `default_agent_id` and bind the channel. All failures log + return —
+/// non-fatal, no LLM.
+fn ensure_unknown_telegram_contact(
+    db: &crate::state::StateDb,
+    default_agent_id: &str,
+    user_id: &str,
+    display_name: &str,
+) {
+    match db.get_contact_by_platform_user("telegram", user_id) {
+        Ok(Some(_)) => return, // already bound
+        Ok(None) => {}
+        Err(e) => {
+            warn!(error = %e, user_id, "ensure_unknown_telegram_contact: lookup failed");
+            return;
+        }
+    }
+    let name = if display_name.is_empty() {
+        format!("Telegram:{}", &user_id[..user_id.len().min(8)])
+    } else {
+        display_name.to_string()
+    };
+    let contact = crate::contacts::Contact::new(default_agent_id, name);
+    let contact_id = contact.id.clone();
+    if let Err(e) = db.insert_contact(&contact) {
+        warn!(error = %e, user_id, "ensure_unknown_telegram_contact: insert failed");
+        return;
+    }
+    let mut ch = crate::contacts::ContactChannel::new(&contact_id, "telegram", user_id);
+    ch.is_primary = true;
+    if let Err(e) = db.upsert_contact_channel(&ch) {
+        warn!(error = %e, user_id, contact_id = %contact_id, "ensure_unknown_telegram_contact: bind failed");
+        return;
+    }
+    info!(
+        user_id,
+        contact_id = %contact_id,
+        "auto-registered unknown Telegram contact"
+    );
+}
 
 fn parse_chat_id(params: &serde_json::Value, field: &str) -> Result<i64> {
     params.get(field)

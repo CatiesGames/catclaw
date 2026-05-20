@@ -1417,6 +1417,9 @@ daemon mode won't inherit interactive shell env.
 |-----|---------|-------|
 | `contacts.enabled` | false | Advertise `contacts_*` MCP tools to agents (saves ~3-4KB tokens when off). Hot-reload — no restart needed. |
 | `contacts.unknown_inbox_channel` | "" | Mirror target for `role=unknown` inbound (e.g. `discord:guild/未分類`). Empty = log only (rows still saved to DB for review via TUI Contacts / `catclaw contact list --role unknown`). |
+| `contacts.default_agent_telegram` | "" (=global default) | Owning agent for contacts auto-registered from a Telegram private chat. Lets a Telegram bot route to a different agent than LINE/Discord. Validated against existing agents at set time. Hot-reload. |
+| `contacts.default_agent_line` | "" (=global default) | Owning agent for contacts auto-registered from LINE. Same rules as above. |
+| `contacts.default_agent_discord` | "" (=global default) | Owning agent for contacts auto-registered from a Discord DM. Same rules as above. |
 
 ### Per-Channel Keys (`channels[N].field`)
 
@@ -1820,6 +1823,13 @@ disconnect / response / typing frames) load skill `catclaw-backend`, or read
 `src/channel/backend.rs` — full protocol + session lifecycle + history
 injection + memory-deny recommendation are there.
 
+### Telegram / LINE / Discord DM 是 toC 客戶入口
+
+當 `contacts.enabled=true`,這些頻道的 **1:1 私訊**會自動把寄件者建檔成 contact 走
+approval pipeline(規則見 Contacts 章節)。設 TG/LINE channel 給「接客戶」用時,主動
+提醒可設 `contacts.default_agent_telegram`(該平台客戶導向特定 agent)與
+`contacts.unknown_inbox_channel`(集中審視陌生入站)。
+
 ---
 
 ## Updates
@@ -1923,33 +1933,45 @@ CatClaw 的 contacts 系統是「人」的抽象,跨 Discord/Telegram/Slack/LINE
 tokens)。若使用者描述了對話對象管理需求(「幫我管客戶」「把他設為學員」...)
 但你看不到 `contacts_*` 工具,請提示他們開啟此 key。
 
-**平台自動建檔(無 LLM)**:contacts 啟用後,**LINE 全部訊息**和 **Discord DM**
-會自動建立 `role=unknown` contact 並綁定 platform user_id — **不會觸發 agent**。
-這是「儲存備查」狀態。
+**平台自動建檔(無 LLM)**:contacts 啟用後,toC 入口的入站訊息會自動建立
+`role=unknown` contact 並綁定 platform user_id — **不會觸發 agent**(「儲存備查」狀態)。
+toC 入口包括:**LINE 全部訊息**、**Telegram 私訊**、**Discord DM**。
 
-**Discord 不對稱設計**:
-- Discord DM 進入 contacts 系統(同 LINE 邏輯)。
-- Discord guild(server)頻道**不進入** contacts — 那是 admin 跟你的工作場域,
-  guild 訊息照標準 dispatch 走、不會被 contact pipeline 攔截、不需要 approval。
-- 即使某 Discord 用戶已被綁為 contact,他在 guild 發訊息仍然走標準路徑(只有
-  他 DM 你時才走 contacts pipeline)。
-- 用戶可以**跨平台**綁定同一個 contact(同時綁 LINE userId 跟 Discord
-  user_id),`contacts_reply` 自動依 via_platform / last-active 挑出送的平台。
-- Telegram / Slack 目前**未實作**自動建檔 — 需要 contacts 時手動 `contacts_create
-  + contacts_bind_channel`。
+**頻道範圍不對稱設計**(重點是「頻道是否為 1:1 私訊」,不是平台):
+- LINE 全部 / Telegram 私訊 / Discord DM → 進入 contacts 系統。
+- Telegram 群組 / Discord guild(server)頻道**不進入** contacts — 那是 admin 跟你的
+  工作場域,訊息照標準 dispatch 走、不會被 contact pipeline 攔截、不需要 approval。
+- 即使某用戶已被綁為 contact,他在群組/guild 發訊息仍走標準路徑(只有 1:1 私訊才走
+  contacts pipeline)。
+- 用戶可以**跨平台**綁定同一個 contact(同時綁 LINE / Telegram / Discord user_id),
+  `contacts_reply` 自動依 via_platform / last-active 挑出送的平台。
+- Slack 目前**未實作**自動建檔 — 需要 contacts 時手動 `contacts_create + contacts_bind_channel`。
 
-升級流程(由人類發起):
-1. 使用者在 TUI Contacts 看到未分類列表,或從 `unknown_inbox_channel` 鏡射
-   看到 unknown 入站
-2. 使用者跟你說(任何語氣都算):
-   - 「把 X 設為客戶」「把 X 加為個案」「X 是我新學員」「標成 VIP」
-3. 你呼叫 `contacts_list(role="unknown")` → 找到對應 contact id
-4. 你呼叫 `contacts_update(id, role="client", tags=[...], metadata={...},
-   forward_channel="discord:...")`
-   - tags / metadata 欄位自由 — 依使用者領域設計(見下面「業務資料」)
-5. 之後該人的訊息開始正常派給你處理
+**每平台預設 agent**:自動建檔的 contact 預設歸屬全域 default agent。可用
+`contacts.default_agent_telegram` / `_line` / `_discord` 讓不同 toC 入口的新 contact
+歸屬不同 agent(例如 Telegram 機器人 → agent A、LINE OA → agent B)。操作:
 
-不要主動催使用者升級 unknown contact — 等使用者明確指示再操作。
+```bash
+catclaw agent list                                          # 先確認目標 agent 存在
+catclaw config set contacts.default_agent_telegram alice    # TG 客戶 → agent alice
+catclaw config set contacts.default_agent_line bob          # LINE 客戶 → agent bob
+```
+
+- set 時會校驗 agent 是否存在(不存在直接報錯 — 先 `catclaw agent new` 建好)。
+- 此設定**只影響未來** auto-register 的新 contact,**不回溯**既有 contact。
+- 若該 agent 之後被刪除,新 contact 自動回退到全域 default(不會卡死)。
+- 要改既有 contact 的歸屬 agent:`contacts_update(id, agent_id="...")` 或
+  `catclaw contact update <id> --agent <agent>`(見「改派 owning agent」)。
+
+**升級 unknown → client**(人類發起,別主動催):使用者說「把 X 設為客戶/個案/學員」時,
+`contacts_list(role="unknown")` 找 id → `contacts_update(id, role="client", ...)`。完整
+步驟(含先看歷史、建專屬頻道、教兩種輸入)見下方「升級 unknown contact 前先看歷史」。
+
+**owning agent 可隨時改**:`contacts_update(id, agent_id="alice")` /
+`catclaw contact update <id> --agent alice`(目標 agent 須存在)。升級 + 改派可一次做完:
+`contacts_update(id, role="client", agent_id="alice")`。建立時也可 `contacts_create(...,
+agent_id="alice")` 一步到位。
+
 LINE unfollow 事件會自動把對應 contact 設 `ai_paused=true` + tag `unfollowed`。
 
 **核心觀念**:
@@ -2005,10 +2027,10 @@ LINE unfollow 事件會自動把對應 contact 設 `ai_paused=true` + tag `unfol
 
 | Tool | 說明 |
 |------|------|
-| `contacts_create` | 建立 contact (name + role + tags + approval_required) |
-| `contacts_get` | 用 id 或 (platform, platform_user_id) 查 |
+| `contacts_create` | 建立 contact (name + role + tags + approval_required + **agent_id**)。`agent_id` 指定 owning agent(省略則歸全域 default)。要讓某客戶由特定 agent 處理,建立時就帶 `agent_id`。 |
+| `contacts_get` | 用 id 或 (platform, platform_user_id) 查。回傳含 `agent_id`(owning agent)。 |
 | `contacts_list` | 列表,可 filter agent_id / role / tag |
-| `contacts_update` | 部分更新欄位(role/tags/forward_channel/approval_required/external_ref/metadata) |
+| `contacts_update` | 部分更新欄位(role/tags/forward_channel/approval_required/external_ref/metadata/**agent_id**)。`agent_id` 可**改派** owning agent(目標 agent 須存在)— auto-register 出來的 unknown contact 歸屬平台 default,要改派給特定 agent 就用這個。 |
 | `contacts_delete` | 刪除(cascade channels + drafts) |
 | `contacts_bind_channel` | 綁定 LINE userId / Discord id / TG user_id 等 |
 | `contacts_unbind_channel` | 解綁 |
@@ -2094,12 +2116,21 @@ unknown contact 期間的訊息**沒寫到 catclaw 的對話 transcript**,但若
 4. `contacts_update(id, role="client", tags=[...], metadata={...},
    forward_channel="discord:{guild}/{channel}")` 一次寫齊
    - tags / metadata 用使用者該領域的術語 — 不要硬套樣板
+   - 若要交給特定 agent,順手帶 `agent_id="..."`
 5. **教使用者該頻道兩種輸入**(很重要,使用者第一次設定時不知道):
    「以後這個頻道:
     - 你直接打字 → 是跟我對話(問狀況、查紀錄、改設定)
     - 用 `>>` 開頭 → 我會以你名義轉發給對方(手動回覆)
     - 我傳的草稿會出現綠色卡片,你按按鈕審核」
 6. 之後該 contact 入站開始正常派給你 — 你已有上下文,首次回應就能精準
+
+### 取得 platform user_id(綁定用)
+
+`contacts_bind_channel` 需要對方的 platform user_id。**多數情況不必手動拿** —— toC 入口
+(LINE / TG 私訊 / Discord DM)首次傳訊就 auto-register + 自動綁好,`contacts_list(role=
+"unknown")` 找到那筆升級即可。只有要**主動**加未傳訊者才需手動:請對方傳一句話讓系統
+auto-register(最省事),或從 `unknown_inbox_channel` 鏡射卡片讀 id。Telegram 綁的是
+**數字 user_id**(如 `123456789`)不是 @username — 別讓使用者手填 username。
 
 ### 業務資料建議
 
@@ -2128,15 +2159,9 @@ catclaw contact draft discard <draft_id>
 
 ## LINE (optional channel)
 
-LINE 為**選用**通訊管道,需要 LINE Official Account + Messaging API + 公開 HTTPS
-endpoint。未配置時整個 adapter 不啟動。
-
-當 LINE 配置存在(或 contact 綁了 LINE userId)且需要平台特性(訊息格式、Rich Menu
-設計、Flex Message、reply token 機制等),載入 `line` skill 取得完整指引。
-
-回覆 LINE 上的 contact,**仍走** `contacts_reply` (透過 contacts pipeline,享有
-forward 鏡射 + approval gate)。`line_*` actions 用於非 contact 場景(廣播、
-Rich Menu 管理、配額查詢等)。
+LINE 為**選用**管道(需 LINE OA + Messaging API + 公開 HTTPS endpoint,未配置則不啟動)。
+需要平台特性(訊息格式 / Rich Menu / Flex / reply token)時載入 `line` skill —— 含完整
+指引與「LINE contact 仍走 `contacts_reply`、`line_*` 用於非 contact 廣播」的路徑規則。
 "#;
 
 const SKILL_INJECTION_GUARD: &str = r#"---

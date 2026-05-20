@@ -242,6 +242,26 @@ impl ConfigPanel {
             section: "Contacts".to_string(),
             editable: true,
         });
+        // Per-platform default agent for auto-registered unknown contacts.
+        // Empty = fall back to the global default agent.
+        entries.push(ConfigEntry {
+            key: "contacts.default_agent_telegram".to_string(),
+            value: config.contacts.default_agent_telegram.clone().unwrap_or_default(),
+            section: "Contacts".to_string(),
+            editable: true,
+        });
+        entries.push(ConfigEntry {
+            key: "contacts.default_agent_line".to_string(),
+            value: config.contacts.default_agent_line.clone().unwrap_or_default(),
+            section: "Contacts".to_string(),
+            editable: true,
+        });
+        entries.push(ConfigEntry {
+            key: "contacts.default_agent_discord".to_string(),
+            value: config.contacts.default_agent_discord.clone().unwrap_or_default(),
+            section: "Contacts".to_string(),
+            editable: true,
+        });
 
         // Channels
         for (i, ch) in config.channels.iter().enumerate() {

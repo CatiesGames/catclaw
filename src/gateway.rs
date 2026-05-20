@@ -256,6 +256,14 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
                 adapter_filters.push(filter);
                 let adapter = Arc::new(ta);
 
+                // Wire state_db + Config so the dispatcher closure can
+                // auto-register private-chat senders as unknown contacts.
+                // Must happen before start() — the closure captures the value
+                // at start() time.
+                adapter
+                    .set_contacts_context(state_db.clone(), gw_config.clone())
+                    .await;
+
                 // Take approval_rx before moving adapter into the start task
                 if let Some(rx) = adapter.take_approval_rx().await {
                     approval_receivers.push(rx);

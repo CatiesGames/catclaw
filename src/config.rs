@@ -239,6 +239,20 @@ pub struct ContactsConfig {
     /// TUI Contacts (role=unknown filter) or `catclaw contact list --role unknown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown_inbox_channel: Option<String>,
+
+    /// Per-platform default agent for auto-registered contacts. When a
+    /// Telegram/LINE/Discord-DM sender is auto-registered as a `role=unknown`
+    /// contact, the new contact is owned by the agent named here for that
+    /// platform; if unset, falls back to the global default agent
+    /// (`default_agent_id()`). Lets each toC entry point (e.g. a Telegram bot
+    /// vs a LINE OA) route to a different agent. Validated against existing
+    /// agents at `config set` time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent_telegram: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent_line: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent_discord: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -781,6 +795,27 @@ impl Config {
             .map(|a| a.id.as_str())
     }
 
+    /// Resolve the default agent for an auto-registered contact arriving on a
+    /// given platform ("telegram"/"line"/"discord"). Uses the per-platform
+    /// override (`contacts.default_agent_{platform}`) when set AND the named
+    /// agent still exists; otherwise falls back to the global default agent.
+    /// Guarding on existence means a deleted/renamed agent never strands new
+    /// contacts on a dangling owner — they revert to the global default.
+    pub fn default_agent_for_platform(&self, platform: &str) -> Option<&str> {
+        let override_id = match platform {
+            "telegram" => self.contacts.default_agent_telegram.as_deref(),
+            "line" => self.contacts.default_agent_line.as_deref(),
+            "discord" => self.contacts.default_agent_discord.as_deref(),
+            _ => None,
+        };
+        if let Some(id) = override_id {
+            if self.agents.iter().any(|a| a.id == id) {
+                return Some(id);
+            }
+        }
+        self.default_agent_id()
+    }
+
     /// Get a configuration value by key path.
     pub fn config_get(&self, key: &str) -> Result<String> {
         match key {
@@ -810,6 +845,15 @@ impl Config {
             "contacts.enabled" => Ok(self.contacts.enabled.to_string()),
             "contacts.unknown_inbox_channel" => {
                 Ok(self.contacts.unknown_inbox_channel.clone().unwrap_or_default())
+            }
+            "contacts.default_agent_telegram" => {
+                Ok(self.contacts.default_agent_telegram.clone().unwrap_or_default())
+            }
+            "contacts.default_agent_line" => {
+                Ok(self.contacts.default_agent_line.clone().unwrap_or_default())
+            }
+            "contacts.default_agent_discord" => {
+                Ok(self.contacts.default_agent_discord.clone().unwrap_or_default())
             }
             "webhook_base_url" => Ok(self.general.webhook_base_url.clone().unwrap_or_else(|| format!("http://localhost:{}", self.general.port))),
             "social.instagram.mode" => Ok(self.social.instagram.as_ref().map_or_else(|| "off".to_string(), |c| c.mode.clone())),
@@ -982,6 +1026,32 @@ impl Config {
             "contacts.unknown_inbox_channel" => {
                 self.contacts.unknown_inbox_channel =
                     if value.is_empty() { None } else { Some(value.to_string()) };
+                Ok(false)
+            }
+            "contacts.default_agent_telegram"
+            | "contacts.default_agent_line"
+            | "contacts.default_agent_discord" => {
+                // Empty clears the override; otherwise the named agent must
+                // exist so we never strand new contacts on a dangling owner.
+                let resolved = if value.is_empty() {
+                    None
+                } else {
+                    if !self.agents.iter().any(|a| a.id == value) {
+                        return Err(CatClawError::Config(format!(
+                            "unknown agent '{}' — create it first or pick an existing agent",
+                            value
+                        )));
+                    }
+                    Some(value.to_string())
+                };
+                match key {
+                    "contacts.default_agent_telegram" => {
+                        self.contacts.default_agent_telegram = resolved
+                    }
+                    "contacts.default_agent_line" => self.contacts.default_agent_line = resolved,
+                    _ => self.contacts.default_agent_discord = resolved,
+                }
+                // Auto-register reads config live, so no restart needed.
                 Ok(false)
             }
             "heartbeat.enabled" => {

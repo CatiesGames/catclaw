@@ -253,7 +253,7 @@ impl EventHandler for Handler {
                 if contacts_enabled {
                     let default_agent = {
                         let cfg = cx.config.read().unwrap();
-                        cfg.default_agent_id().unwrap_or("main").to_string()
+                        cfg.default_agent_for_platform("discord").unwrap_or("main").to_string()
                     };
                     let display_name = msg
                         .author

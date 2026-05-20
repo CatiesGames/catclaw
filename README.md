@@ -619,11 +619,19 @@ catclaw config set contacts.enabled true
 ```
 When disabled, `contacts_*` MCP tools are not advertised to agents. Schema, CLI, and TUI remain functional — you can still build up contacts manually before flipping the switch.
 
-**Auto-registration of unknown contacts (LINE)**: when enabled, every LINE inbound sender (including follow events) is auto-registered as a `role=unknown` contact — **no LLM invoked**. These are storage-only until promoted to `client`/`admin` via `contacts_update`. This prevents strangers adding your OA from burning agent tokens. Optionally mirror unknown inbound to a channel for admin review:
+**Auto-registration of unknown contacts (LINE / Telegram / Discord DM)**: when enabled, every inbound sender on a toC entry point — LINE (including follow events), Telegram **private chats**, and Discord **DMs** — is auto-registered as a `role=unknown` contact — **no LLM invoked**. These are storage-only until promoted to `client`/`admin` via `contacts_update`. This prevents strangers messaging your bot from burning agent tokens. (Group/guild messages are workspace chat between you and the agent and intentionally bypass the contacts system.) Optionally mirror unknown inbound to a channel for admin review:
 ```bash
 catclaw config set contacts.unknown_inbox_channel "discord:guild_id/channel_id"
 ```
 If unset, unknown inbound is only logged (`info!`); browse via TUI Contacts tab or `catclaw contact list --role unknown`.
+
+**Per-platform default agent**: auto-registered contacts are owned by the global default agent unless you route a platform to a specific agent. This lets a Telegram bot, a LINE OA, and Discord DMs each feed a different agent:
+```bash
+catclaw config set contacts.default_agent_telegram alice
+catclaw config set contacts.default_agent_line bob
+catclaw config set contacts.default_agent_discord carol
+```
+The named agent must already exist (validated at set time); leave empty to fall back to the global default. If the agent is later deleted, new contacts revert to the global default rather than being stranded.
 
 Unfollow events on LINE set `ai_paused=true` + tag `unfollowed` on the corresponding contact, preserving history.
 
@@ -659,10 +667,10 @@ A message arriving in a forward_channel (admin's monitoring channel) and not bou
 ### CLI
 
 ```bash
-catclaw contact add <name> [--role admin|client|unknown] [--tag ...] [--no-approval]
+catclaw contact add <name> [--agent ID] [--role admin|client|unknown] [--tag ...] [--no-approval]
 catclaw contact list [--agent ID] [--role ...]
 catclaw contact show <id>
-catclaw contact update <id> [--name ...] [--role ...] [--forward-channel ...] [--approval|--no-approval]
+catclaw contact update <id> [--name ...] [--role ...] [--forward-channel ...] [--approval|--no-approval] [--agent ID]
 catclaw contact bind <id> --platform line --user-id U123...
 catclaw contact unbind --platform line --user-id U123...
 catclaw contact pause <id>
@@ -684,9 +692,11 @@ catclaw contact draft discard <draft_id>
 
 `contacts_reply` payload supports `{type:"text"}`, `{type:"image"}`, `{type:"flex"}` (LINE-only Flex passes through to the LINE adapter).
 
-### Multi-agent extension path
+### Owning agent
 
-v1 binds each contact to a single agent (`contacts.agent_id`). All read paths go through `Contact::owning_agents() -> Vec<AgentId>` which currently returns one entry. To support sharing a contact across multiple agents in v2, migrate to a `contact_agents` join table and update the helper — call sites unchanged.
+Each contact is owned by one agent (`contacts.agent_id`). For auto-registered contacts the owner defaults per-platform (`contacts.default_agent_{telegram,line,discord}`, falling back to the global default). The owner can be set at creation (`contacts_create agent_id=…` / `contact add --agent`) **and reassigned later** (`contacts_update agent_id=…` / `contact update --agent`); the target agent must exist.
+
+**Multi-agent extension path**: v1 binds each contact to a single agent. All read paths go through `Contact::owning_agents() -> Vec<AgentId>` which currently returns one entry. To support sharing a contact across multiple agents in v2, migrate to a `contact_agents` join table and update the helper — call sites unchanged.
 
 ---
 

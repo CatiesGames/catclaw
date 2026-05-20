@@ -84,7 +84,8 @@ fn build_contacts_tools_inner() -> Vec<Value> {
                     "approval_required":{"type":"boolean"},
                     "ai_paused":{"type":"boolean","description":"When true, inbound messages from this contact are NOT dispatched to the agent (manual takeover)."},
                     "external_ref":{"type":"object","description":"Free-form JSON to store pointers into external systems (Notion page id, etc)."},
-                    "metadata":{"type":"object","description":"Free-form JSON for slow-changing profile data (allergies, goals, etc)."}
+                    "metadata":{"type":"object","description":"Free-form JSON for slow-changing profile data (allergies, goals, etc)."},
+                    "agent_id":{"type":"string","description":"Reassign this contact to a different owning agent. The agent must already exist. Use this to re-route an auto-registered contact (which defaulted to the platform default agent) to a specific agent."}
                 },
                 "required":["id"]
             }),
@@ -356,6 +357,21 @@ pub async fn execute_contacts_tool(
             }
             if let Some(v) = args.get("metadata") {
                 c.metadata = v.clone();
+            }
+            // Reassign owning agent. Validate against the live registry so a
+            // typo can't strand the contact on a non-existent agent (mirrors
+            // the `contacts.default_agent_*` config-set validation).
+            if let Some(new_agent) = args.get("agent_id").and_then(|v| v.as_str()) {
+                if !new_agent.is_empty() && new_agent != c.agent_id {
+                    let exists = agent_registry.read().unwrap().get(new_agent).is_some();
+                    if !exists {
+                        return Err(CatClawError::Other(format!(
+                            "unknown agent '{}' — create it first (catclaw agent new) or pick an existing agent",
+                            new_agent
+                        )));
+                    }
+                    c.agent_id = new_agent.to_string();
+                }
             }
             // Map any remaining UNIQUE-constraint failure (race between
             // pre-flight check and update) to a friendly message too.

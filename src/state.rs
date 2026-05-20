@@ -1651,8 +1651,8 @@ impl StateDb {
         conn.execute(
             "UPDATE contacts SET display_name=?1, role=?2, tags=?3, forward_channel=?4,
                                 approval_required=?5, ai_paused=?6, external_ref=?7,
-                                metadata=?8, updated_at=?9
-             WHERE id=?10",
+                                metadata=?8, agent_id=?9, updated_at=?10
+             WHERE id=?11",
             params![
                 c.display_name,
                 c.role.as_str(),
@@ -1662,6 +1662,7 @@ impl StateDb {
                 c.ai_paused as i32,
                 serde_json::to_string(&c.external_ref).unwrap_or_else(|_| "{}".into()),
                 serde_json::to_string(&c.metadata).unwrap_or_else(|_| "{}".into()),
+                c.agent_id,
                 now,
                 c.id,
             ],
