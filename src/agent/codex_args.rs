@@ -94,6 +94,16 @@ pub fn codex_args_from(agent: &super::Agent, params: &SpawnParams<'_>) -> Vec<St
     args.push("-c".to_string());
     args.push("sandbox_mode=\"workspace-write\"".to_string());
 
+    // Image generation (gpt-image-2) — auto-on for every codex agent, the same
+    // way codex's built-in `imagegen` skill is always available. ChatGPT login
+    // covers it (no OPENAI_API_KEY needed). Equivalent to `--enable
+    // image_generation`. Output lands in `.codex-home/generated_images/`; the
+    // agent moves it into the workspace and uploads via `{platform}_upload_file`
+    // (see the "Image generation" note in CODEX_RUNTIME_OVERRIDES). Inline `-c`
+    // overrides are honoured even under `--ignore-user-config`.
+    args.push("-c".to_string());
+    args.push("features.image_generation=true".to_string());
+
     // Developer instructions only on first turn — codex thread-binds them
     // (PoC verified resume can't change the original).
     if !params.is_resume {

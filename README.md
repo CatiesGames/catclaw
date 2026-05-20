@@ -182,6 +182,10 @@ These come from the underlying model or CLI itself — catclaw documents them bu
 | Codex has no token-delta events | Slack streaming response degrades to one-shot send on codex agents (full reply arrives at once, not progressively) |
 | Codex multi-host limitation | Codex subprocess must run on the same host as the catclaw gateway (`127.0.0.1` MCP endpoint). Cross-host / container-isolated deployments not supported in this release. |
 
+#### Image generation (codex only)
+
+Codex-runtime agents automatically get image generation (gpt-image-2) via codex's built-in `image_gen` tool and `imagegen` skill — no flag to enable, no `OPENAI_API_KEY` needed (your `codex login` / ChatGPT subscription covers it). catclaw turns it on for every codex agent (`-c features.image_generation=true`). Generated images land in the agent's `.codex-home/generated_images/`; the agent then sends them to the conversation via the platform's `upload_file` tool (`discord_upload_file` / `telegram_upload_file` / `slack_upload_file`). Claude-runtime agents have no built-in image generation.
+
 #### Setup
 
 1. Run `codex login` once on the host (creates `~/.codex/auth.json`).

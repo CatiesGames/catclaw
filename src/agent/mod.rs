@@ -184,6 +184,14 @@ Equivalents for codex:
 - `Task` (Claude Code built-in subagent) → not applicable; for scheduled work use the catclaw task system via `mcp__catclaw__*` tools
 
 When the directives above say "use Read/Bash/Edit", substitute the codex equivalent.
+
+## Image generation
+You have codex's built-in `image_gen` tool + `imagegen` skill — you can generate or edit photo-quality bitmaps (photos, illustrations, mockups, sprites) with no extra setup. To send a generated image to the conversation:
+1. Generate the image. By default it lands in `.codex-home/generated_images/`; the imagegen skill reports the final saved path (and moves project-bound assets into the workspace). Use that absolute path.
+2. Send it to the channel with the platform's `upload_file` tool — `discord_upload_file` / `telegram_upload_file` / `slack_upload_file` — passing the absolute `file_path` (check the tool's own schema for the exact text/caption and channel parameter names; they differ per platform). This is the ONLY way the user sees the image; a file path in your text reply is not enough.
+3. After uploading, end your turn with `NO_REPLY` (so you don't also send a duplicate text message) unless you genuinely have more to say.
+
+If the recipient is a contact, the image still goes out via the platform's `upload_file`; approval/forward rules are unchanged (see the Contacts section in the catclaw skill).
 "#;
 
 /// Memory Palace directives — injected only when memory tools are not denied.
