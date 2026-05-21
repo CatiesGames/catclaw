@@ -290,8 +290,29 @@ impl MessageRouter {
         // 1. Start typing indicator
         let _typing = adapter.start_typing(&ctx.channel_id, &ctx.peer_id).await?;
 
-        // 2. Resolve agent
-        let (agent_id, is_explicit_binding) = self.resolve_agent(ctx);
+        // 2. Resolve agent.
+        //
+        // Priority: explicit binding  >  contact.agent_id  >  global default.
+        //
+        // `resolve_agent` returns `is_explicit_binding = true` only when a real
+        // binding pattern matched (not the default fallback). A binding is the
+        // admin's deliberate routing rule, so it OUTRANKS the contact's owning
+        // agent — `catclaw bind "telegram:*" main` pulls every Telegram message
+        // (including known contacts) to `main`, on purpose.
+        //
+        // When no binding matches, a known contact's owning agent takes over so
+        // inbound aligns with outbound (replies route through
+        // `contact.owning_agents()` in contacts::pipeline; without this the same
+        // client would be answered by two different agents). Only client/admin
+        // contacts reach here — unknown and ai_paused already returned above.
+        let (mut agent_id, is_explicit_binding) = self.resolve_agent(ctx);
+        if !is_explicit_binding {
+            if let Some(ref c) = contact {
+                if !c.agent_id.is_empty() {
+                    agent_id = c.agent_id.clone();
+                }
+            }
+        }
 
         // Backend channel requires an explicit binding — never fall through to
         // the default agent, which may have elevated permissions.
