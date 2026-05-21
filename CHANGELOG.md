@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.51.1](https://github.com/CatiesGames/catclaw/compare/v0.51.0...v0.51.1) (2026-05-21)
+
+
+### Bug Fixes
+
+* **router:** 已知 contact 的 inbound 改用 contact.agent_id,binding 仍可覆寫 ([7cf6df8](https://github.com/CatiesGames/catclaw/commit/7cf6df85a9a9dea6c5867a7ca4c0343b5d831b45))
+
 ## [0.51.0](https://github.com/CatiesGames/catclaw/compare/v0.50.0...v0.51.0) (2026-05-20)
 
 
