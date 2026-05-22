@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.51.2](https://github.com/CatiesGames/catclaw/compare/v0.51.1...v0.51.2) (2026-05-22)
+
+
+### Bug Fixes
+
+* **router:** 群組訊息不再誤入 contacts,只有 1:1 私訊進 contacts ([aac70a8](https://github.com/CatiesGames/catclaw/commit/aac70a86dcec110deeccbb26b2ebd740e531386d))
+* **update:** 自我替換後 current_exe() 帶 (deleted) 污染 systemd unit 導致 203/EXEC ([9b56ff4](https://github.com/CatiesGames/catclaw/commit/9b56ff4b917ad74457cc3a6184b8408f8461a180))
+
 ## [0.51.1](https://github.com/CatiesGames/catclaw/compare/v0.51.0...v0.51.1) (2026-05-21)
 
 
