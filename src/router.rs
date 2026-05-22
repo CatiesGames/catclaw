@@ -176,15 +176,17 @@ impl MessageRouter {
     ) -> Result<()> {
         // 0a. Contact lookup: if this sender is a known contact, mirror inbound
         //     to forward channel and (when ai_paused) skip agent dispatch.
-        // Discord guild messages are intentionally OUT of scope for the contacts
-        // system — guild = workspace chat (admin ↔ agent), DM = customer service.
-        // Even if a Discord user has been bound as a contact (e.g. via
-        // cross-platform identity), messages they send in a guild are routed
-        // normally without going through the approval pipeline.
+        // ONLY 1:1 direct messages enter the contacts system. Group / guild /
+        // room messages are workspace chat (admin ↔ agent), routed normally —
+        // even if the sender is a bound contact on another (DM) channel, a
+        // group message from them must NOT get pulled into the approval/forward
+        // pipeline (it would be replied to in the DM, never reaching the group).
+        // This is uniform across platforms: Telegram groups, Discord guilds,
+        // LINE groups/rooms are all out of scope; only `is_direct_message`
+        // senders are looked up. (CLAUDE.md lesson #28.)
         let db = self.session_manager.state_db();
         let platform = ctx.channel_type.as_str();
-        let contact_in_scope = platform != "discord" || ctx.is_direct_message;
-        let contact = if contact_in_scope {
+        let contact = if ctx.is_direct_message {
             db.get_contact_by_platform_user(platform, &ctx.sender_id)
                 .ok()
                 .flatten()

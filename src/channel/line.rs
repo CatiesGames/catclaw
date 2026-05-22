@@ -148,7 +148,15 @@ impl LineAdapter {
             // ensures we have a record of every LINE sender, even if they're
             // never promoted to a client. Fail-soft — log and continue on error.
             let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if contacts_enabled {
+            // Only 1:1 DMs enter contacts (uniform rule across platforms — see
+            // router.rs). LINE group/room messages are workspace chat, not toC:
+            // `source.type == "user"` is a DM; "group"/"room" are excluded.
+            let source_type = event
+                .get("source")
+                .and_then(|s| s.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if contacts_enabled && source_type == "user" {
                 if let Some(source) = event.get("source") {
                     let user_id = source
                         .get("userId")
