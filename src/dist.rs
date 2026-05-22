@@ -323,6 +323,83 @@ fn unit_path() -> PathBuf {
         .join(".config/systemd/user/catclaw.service")
 }
 
+/// Resolve the path to the currently-running binary, robust to self-replacement.
+///
+/// **Why this exists:** `catclaw update` replaces its own binary via
+/// `fs::rename` and then, in the *same process*, calls `service_install` to
+/// refresh the systemd unit. On Linux `std::env::current_exe()` reads
+/// `/proc/self/exe`, which — once the original inode is unlinked by the rename
+/// — resolves to a path with a literal `" (deleted)"` suffix (e.g.
+/// `/home/u/.local/bin/catclaw (deleted)`). If that string lands in the unit's
+/// `ExecStart`, systemd's `execve` fails with `status=203/EXEC` and the service
+/// thrashes in `auto-restart` forever (prod incident 2026-05-22).
+///
+/// We strip the suffix to recover the real on-disk path (which, post-rename, is
+/// the freshly-installed new binary at the same location). `canonicalize` is
+/// best-effort — if it fails (e.g. the stripped path momentarily doesn't
+/// resolve), we keep the stripped path so the caller can still validate it.
+/// Callers that write the path into a unit MUST additionally check it exists +
+/// is executable (see `ensure_executable`) so a still-broken path errors loudly
+/// instead of producing a unit that can never start.
+///
+/// Use this anywhere the running binary's path is consumed *after* a possible
+/// self-replacement — service unit writes, and any subprocess spawn of
+/// ourselves — instead of bare `std::env::current_exe()`.
+pub(crate) fn resolve_self_exe() -> Result<PathBuf, CatClawError> {
+    let raw = std::env::current_exe()
+        .map_err(|e| CatClawError::Service(format!("cannot determine exe path: {}", e)))?;
+    // Strip a trailing " (deleted)" marker that Linux appends to /proc/self/exe
+    // when the running binary's inode has been unlinked (self-replacement).
+    let cleaned = match raw.to_str() {
+        Some(s) if s.ends_with(" (deleted)") => {
+            PathBuf::from(&s[..s.len() - " (deleted)".len()])
+        }
+        _ => raw,
+    };
+    Ok(std::fs::canonicalize(&cleaned).unwrap_or(cleaned))
+}
+
+/// Verify a resolved exe path is a real, executable file before it is baked
+/// into a service unit. Refusing here turns a "service silently thrashes
+/// forever" failure into an immediate, actionable error.
+#[cfg(unix)]
+fn ensure_executable(exe: &Path) -> Result<(), CatClawError> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(exe).map_err(|e| {
+        CatClawError::Service(format!(
+            "binary path '{}' is not a regular file ({}); refusing to write a service unit \
+             that would fail to start. If you just ran `catclaw update`, re-run \
+             `catclaw gateway install`.",
+            exe.display(),
+            e
+        ))
+    })?;
+    if !meta.is_file() {
+        return Err(CatClawError::Service(format!(
+            "binary path '{}' is not a regular file; refusing to write service unit",
+            exe.display()
+        )));
+    }
+    if meta.permissions().mode() & 0o111 == 0 {
+        return Err(CatClawError::Service(format!(
+            "binary '{}' is not executable; refusing to write service unit",
+            exe.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_executable(exe: &Path) -> Result<(), CatClawError> {
+    if !exe.is_file() {
+        return Err(CatClawError::Service(format!(
+            "binary path '{}' is not a regular file; refusing to write service unit",
+            exe.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Result of comparing the installed service unit against what
 /// `service_install` would produce. Used by both the install path (to skip
 /// no-op reinstalls) and the gateway start path (to warn on drift).
@@ -357,8 +434,8 @@ pub fn unit_sync_state(config_path: &Path) -> UnitSyncState {
     if !unit.exists() {
         return UnitSyncState::NotInstalled;
     }
-    let exe = match std::env::current_exe() {
-        Ok(p) => std::fs::canonicalize(&p).unwrap_or(p),
+    let exe = match resolve_self_exe() {
+        Ok(p) => p,
         Err(_) => return UnitSyncState::Drifted,
     };
     let config_abs = std::fs::canonicalize(config_path)
@@ -434,10 +511,12 @@ pub fn service_install(config_path: &Path) -> Result<(), CatClawError> {
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
 
-    let exe = std::env::current_exe()
-        .map_err(|e| CatClawError::Service(format!("cannot determine exe path: {}", e)))?;
-    let exe = std::fs::canonicalize(&exe)
-        .unwrap_or(exe);
+    let exe = resolve_self_exe()?;
+    // Guard against writing a unit whose ExecStart can never execve. This is
+    // the backstop for the self-replacement race (see resolve_self_exe): if the
+    // stripped path still doesn't point at a runnable binary, fail loudly here
+    // rather than producing a unit that thrashes in auto-restart forever.
+    ensure_executable(&exe)?;
     let config_abs = std::fs::canonicalize(config_path)
         .unwrap_or_else(|_| config_path.to_path_buf());
 

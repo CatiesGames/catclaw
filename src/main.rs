@@ -3525,7 +3525,9 @@ fn process_name(pid: u32) -> Option<String> {
 
 /// Spawn the gateway as a background process using `catclaw --config <path> gateway`.
 fn start_background_gateway(config_path: &std::path::Path) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let exe = std::env::current_exe()?;
+    // resolve_self_exe (not bare current_exe) so a post-`catclaw update` spawn
+    // never inherits a " (deleted)" /proc/self/exe path — see dist.rs.
+    let exe = dist::resolve_self_exe()?;
     let config_str = config_path.to_string_lossy().to_string();
 
     let child = std::process::Command::new(exe)
@@ -3541,7 +3543,7 @@ fn start_background_gateway(config_path: &std::path::Path) -> std::result::Resul
 
 /// Same as start_background_gateway but doesn't print (for use with spinner).
 fn start_background_gateway_quiet(config_path: &std::path::Path) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let exe = std::env::current_exe()?;
+    let exe = dist::resolve_self_exe()?;
     let config_str = config_path.to_string_lossy().to_string();
 
     std::process::Command::new(exe)
