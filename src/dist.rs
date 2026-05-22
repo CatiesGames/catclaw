@@ -359,6 +359,34 @@ pub(crate) fn resolve_self_exe() -> Result<PathBuf, CatClawError> {
     Ok(std::fs::canonicalize(&cleaned).unwrap_or(cleaned))
 }
 
+/// Wait (up to ~6s) for the gateway's WS/MCP port to become bindable again
+/// after stopping the old instance. `systemctl stop` (and `pidfile::stop_process`)
+/// only *signal* the process; the old gateway then runs graceful shutdown
+/// (BGE-M3 teardown, draining claude subprocesses) and only releases the port
+/// when it actually exits. Without this wait, `service_install` would `systemctl
+/// start` the new instance while the port is still held → bind fails → the
+/// start command returns non-zero (the `catclaw update` failure we saw — the
+/// later manual `catclaw gateway install` "worked" only because the old process
+/// had finished dying by then). Polling for an actual bind is more reliable than
+/// a fixed sleep: it returns the instant the port frees, and caps the wait so a
+/// truly stuck port doesn't hang the install. Best-effort — logs and proceeds on
+/// timeout (systemd's Restart=on-failure is the final backstop).
+fn wait_for_port_release(port: u16) {
+    use std::net::TcpListener;
+    for _ in 0..60 {
+        // Binding to 127.0.0.1 succeeds only once the previous holder has
+        // released the socket. We immediately drop the listener.
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    crate::cli_ui::status_msg(
+        "⚠️",
+        &format!("port {port} still busy after waiting; starting service anyway"),
+    );
+}
+
 /// Verify a resolved exe path is a real, executable file before it is baked
 /// into a service unit. Refusing here turns a "service silently thrashes
 /// forever" failure into an immediate, actionable error.
@@ -508,7 +536,15 @@ pub fn service_install(config_path: &Path) -> Result<(), CatClawError> {
     if is_service_installed() {
         crate::cli_ui::status_msg("🔄", "Reinstalling service (unit drift detected)...");
         let _ = service_uninstall();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    // Wait for the old gateway to fully release the port before the install
+    // step's `systemctl start` (or launchctl load) tries to bind it. Both the
+    // manual-gateway stop above and `service_uninstall`'s `systemctl stop` only
+    // signal the process; the port stays held until it exits. A fixed sleep
+    // raced (the `catclaw update` start-failure); poll for an actual bind.
+    if let Some(ref cfg) = config {
+        wait_for_port_release(cfg.general.port);
     }
 
     let exe = resolve_self_exe()?;
