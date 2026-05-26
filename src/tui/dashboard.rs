@@ -9,6 +9,8 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::error;
 
+use unicode_width::UnicodeWidthChar;
+
 use super::theme::Theme;
 use super::{Action, Component};
 use crate::config::Config;
@@ -764,10 +766,24 @@ fn extract_time(ts: &str) -> String {
     }
 }
 
+/// Pad or truncate `s` to a terminal display width of `width` columns.
+///
+/// Operates on display width (CJK / full-width chars count as 2), not bytes or
+/// chars — and never slices through a multi-byte character. Truncating on a
+/// byte index (e.g. `s[..width]`) panics on non-ASCII (e.g. "Domi 同事測試群").
 fn pad_right(s: &str, width: usize) -> String {
-    if s.len() >= width {
-        s[..width].to_string()
-    } else {
-        format!("{:<width$}", s, width = width)
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cw > width {
+            break;
+        }
+        out.push(ch);
+        used += cw;
     }
+    if used < width {
+        out.extend(std::iter::repeat_n(' ', width - used));
+    }
+    out
 }
