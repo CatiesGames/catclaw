@@ -13,6 +13,7 @@ use crate::social::instagram::InstagramClient;
 use crate::social::threads::ThreadsClient;
 use crate::social::{SocialItem, SocialPlatform};
 use crate::state::StateDb;
+use std::collections::HashSet;
 use tracing::{debug, warn};
 
 /// Compare two ISO 8601 timestamp strings. Returns true if `a` is strictly after `b`.
@@ -274,10 +275,21 @@ async fn poll_th_replies(client: &ThreadsClient, db: &StateDb) -> Result<Vec<Soc
         }
     }
 
-    // Check sub-replies on items we have replied to (our reply_id is in social_inbox).
+    // Check sub-replies on threads we have replied to (our reply_id is in social_inbox).
     // This catches "reply to our reply" — the conversation thread we're participating in.
+    //
+    // `/conversation` (used by get_replies above) already returns the *flattened*
+    // tree for each root post we poll, so any reply that lives under one of those
+    // roots is already covered by the first pass (collected in `seen_reply_ids`).
+    // We only need to chase the ones NOT covered — i.e. our replies on *other
+    // people's* posts, whose root we never polled. Skipping the rest saves the
+    // reply-read quota (1000/24h) without dropping any inbound reply.
+    let seen_reply_ids: HashSet<&str> = first_level_ids.iter().map(String::as_str).collect();
     let our_reply_ids = db.list_replied_platform_ids("threads").unwrap_or_default();
     for reply_id in &our_reply_ids {
+        if seen_reply_ids.contains(reply_id.as_str()) {
+            continue;
+        }
         let sub_replies = match client.get_replies(reply_id, None).await {
             Ok(r) => r,
             Err(e) => {

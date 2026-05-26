@@ -49,9 +49,18 @@ impl ThreadsClient {
         self.get(&url).await
     }
 
+    /// Fetch replies to a post via the `/conversation` edge.
+    ///
+    /// `/conversation` returns a *flattened* list of the entire reply tree
+    /// (top-level + all nested replies, regardless of depth) and is intended
+    /// to be called on a root-level Threads post. We use it instead of
+    /// `/replies` (which returns only the immediate first level) because the
+    /// `/replies` edge is restricted in dev mode while `/conversation` works,
+    /// and a flat tree means we don't have to chain calls via `has_replies`.
+    /// Scope required: `threads_basic` + `threads_read_replies`.
     pub async fn get_replies(&self, post_id: &str, since_id: Option<&str>) -> Result<Value> {
         let mut url = format!(
-            "{}/{}/replies?fields=id,text,username,timestamp",
+            "{}/{}/conversation?fields=id,text,username,timestamp,is_reply,has_replies,replied_to",
             self.base(), post_id,
         );
         if let Some(sid) = since_id {
