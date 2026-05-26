@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.51.3](https://github.com/CatiesGames/catclaw/compare/v0.51.2...v0.51.3) (2026-05-26)
+
+
+### Bug Fixes
+
+* **threads:** 回覆擷取改用 /conversation 取代 /replies(dev mode 受限) ([e07bd42](https://github.com/CatiesGames/catclaw/commit/e07bd42c655f6f3a42618d2f7866334eee775025))
+
 ## [0.51.2](https://github.com/CatiesGames/catclaw/compare/v0.51.1...v0.51.2) (2026-05-22)
 
 
