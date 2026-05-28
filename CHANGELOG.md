@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.51.4](https://github.com/CatiesGames/catclaw/compare/v0.51.3...v0.51.4) (2026-05-26)
+
+
+### Bug Fixes
+
+* **tui:** pad_right 改用顯示寬度,修中文 channel/session 名稱導致 TUI panic ([80fca06](https://github.com/CatiesGames/catclaw/commit/80fca06247d2aa749db27a9afb935cbc6878943f))
+
 ## [0.51.3](https://github.com/CatiesGames/catclaw/compare/v0.51.2...v0.51.3) (2026-05-26)
 
 
