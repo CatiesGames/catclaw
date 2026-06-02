@@ -1478,14 +1478,14 @@ All model strings use the canonical `provider/model` form — see the
 **Agents > Runtime: claude vs codex** section below for the two
 runtimes catclaw drives and the available models in each.
 
-Common short aliases: `claude/opus` → `claude/opus-4-7`,
+Common short aliases: `claude/opus` → `claude/opus-4-8`,
 `claude/haiku` → `claude/haiku-4-5`.
 
 ### Setting models
 
 ```bash
 # Per-agent model (validated against agent.runtime)
-catclaw agent set-model my-agent --model claude/opus-4-7
+catclaw agent set-model my-agent --model claude/opus-4-8
 catclaw agent set-model my-codex-agent --model codex/gpt-5.5
 
 # Global default (used by agents that don't override)
@@ -1589,10 +1589,10 @@ catclaw agent tools <name> --allow "Read,Edit,Bash" --deny "WebFetch" --approve 
 
 CatClaw can drive two CLI runtimes. Models use the canonical
 `provider/model` form (set with `catclaw agent set-model my-agent --model
-claude/opus-4-7` etc.):
+claude/opus-4-8` etc.):
 
 - **claude** (default) — `claude -p` subprocesses with PreToolUse hook +
-  `--mcp-config` for catclaw's MCP server. Models: `claude/opus-4-7`
+  `--mcp-config` for catclaw's MCP server. Models: `claude/opus-4-8`
   (flagship), `claude/sonnet-4-6` (balanced), `claude/haiku-4-5`
   (fastest/cheapest).
 - **codex** — `codex exec` subprocesses with isolated `CODEX_HOME` per
@@ -1752,7 +1752,7 @@ Scheduling options (pick one, mutually exclusive):
 
 Session behavior:
 - `--keep-context` — Reuse the same session across runs (context persists). **Without this flag (default), each run starts a fresh session with no memory of previous runs.** Use `--keep-context` only when the task needs to remember what it did last time.
-- `--model <provider/name>` — Override the agent's default model for this task only (e.g. `--model claude/haiku-4-5` for cheap routine checks when the agent is otherwise on `claude/opus-4-7`). Use the canonical `provider/model` form; the provider must match the agent's runtime. With `--keep-context`, model changes propagate on the next run (we re-sync session metadata each tick).
+- `--model <provider/name>` — Override the agent's default model for this task only (e.g. `--model claude/haiku-4-5` for cheap routine checks when the agent is otherwise on `claude/opus-4-8`). Use the canonical `provider/model` form; the provider must match the agent's runtime. With `--keep-context`, model changes propagate on the next run (we re-sync session metadata each tick).
 
 ### Cron Timezone Conversion (IMPORTANT)
 

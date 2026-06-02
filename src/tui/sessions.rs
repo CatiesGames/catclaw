@@ -27,6 +27,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// aliases so the user gets dropdown options regardless of session runtime —
 /// the gateway rejects provider/runtime mismatches with a clear error.
 const MODEL_COMPLETIONS: &[&str] = &[
+    "claude/opus-4-8",
     "claude/opus-4-7",
     "claude/opus",
     "claude/sonnet-4-6",

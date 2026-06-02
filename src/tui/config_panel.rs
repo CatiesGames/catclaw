@@ -518,6 +518,7 @@ impl ConfigPanel {
             // parseable `provider/model` so users can type their own value;
             // these are completion hints. Empty string clears the key.
             return vec![
+                "claude/opus-4-8".into(),
                 "claude/opus-4-7".into(),
                 "claude/sonnet-4-6".into(),
                 "claude/haiku-4-5".into(),

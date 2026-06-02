@@ -4,7 +4,7 @@
 //! All model strings stored in `catclaw.toml` or sent over WS are now in
 //! `provider/model` form — e.g. `claude/opus-4-7`, `codex/gpt-5.5-mini`.
 //! `Config::load` migrates old un-prefixed values (e.g. `opus`, `haiku`,
-//! `claude-opus-4-7`) on first load by writing them back with the
+//! `claude-opus-4-8`) on first load by writing them back with the
 //! `claude/` prefix preserved.
 //!
 //! The downstream CLI args builder (`claude_args_with_mcp` /
@@ -16,7 +16,7 @@ use crate::agent::Runtime;
 /// A model identifier resolved to its `(provider, full_model_id)` parts.
 ///
 /// Constructed from a `provider/model` string or a legacy un-prefixed alias.
-/// `model` is always the full upstream model ID (e.g. `claude-opus-4-7`,
+/// `model` is always the full upstream model ID (e.g. `claude-opus-4-8`,
 /// `gpt-5.5-mini`), never an alias — aliases are resolved during parsing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModel {
@@ -50,15 +50,21 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
     // ── Claude ────────────────────────────────────────────────────────────
     ModelEntry {
         provider: Runtime::Claude,
+        alias: "opus-4-8",
+        full_id: "claude-opus-4-8",
+        description: "Opus 4.8 — newest flagship, 1M context, Fast mode",
+    },
+    ModelEntry {
+        provider: Runtime::Claude,
         alias: "opus-4-7",
         full_id: "claude-opus-4-7",
-        description: "Opus 4.7 — newest flagship, 1M context",
+        description: "Opus 4.7 — previous flagship",
     },
     ModelEntry {
         provider: Runtime::Claude,
         alias: "opus-4-6",
         full_id: "claude-opus-4-6",
-        description: "Opus 4.6 — previous flagship",
+        description: "Opus 4.6 — older flagship",
     },
     ModelEntry {
         provider: Runtime::Claude,
@@ -77,8 +83,8 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
     ModelEntry {
         provider: Runtime::Claude,
         alias: "opus",
-        full_id: "claude-opus-4-7",
-        description: "alias → claude/opus-4-7",
+        full_id: "claude-opus-4-8",
+        description: "alias → claude/opus-4-8",
     },
     ModelEntry {
         provider: Runtime::Claude,
@@ -122,7 +128,7 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
 /// 1. Canonical: `claude/opus-4-7` / `codex/gpt-5.5-mini`
 /// 2. Provider + alias: `claude/opus` / `codex/mini`
 /// 3. Legacy un-prefixed alias: `opus` / `haiku` (defaults to claude)
-/// 4. Legacy full ID: `claude-opus-4-7` / `gpt-5.5` (provider sniffed from prefix)
+/// 4. Legacy full ID: `claude-opus-4-8` / `gpt-5.5` (provider sniffed from prefix)
 ///
 /// Returns `Err` for malformed strings (e.g. `unknown/foo`).
 pub fn parse_model_string(s: &str) -> Result<ProviderModel, String> {
