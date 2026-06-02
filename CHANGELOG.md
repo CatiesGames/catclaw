@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.52.0](https://github.com/CatiesGames/catclaw/compare/v0.51.4...v0.52.0) (2026-06-02)
+
+
+### Features
+
+* **models:** 新增 Claude Opus 4.8 為最新旗艦,opus 別名改指向 4.8 ([7e33674](https://github.com/CatiesGames/catclaw/commit/7e336743aed243995d89ae21cd6046c626d14129))
+
 ## [0.51.4](https://github.com/CatiesGames/catclaw/compare/v0.51.3...v0.51.4) (2026-05-26)
 
 
