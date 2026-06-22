@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.53.0](https://github.com/CatiesGames/catclaw/compare/v0.52.0...v0.53.0) (2026-06-22)
+
+
+### Features
+
+* **channel:** activation override 新增 guild 層級,支援同 bot 跨 server 差異化回應 ([48c75af](https://github.com/CatiesGames/catclaw/commit/48c75afec14e86198b3a6b2252328e77a16e5980))
+
 ## [0.52.0](https://github.com/CatiesGames/catclaw/compare/v0.51.4...v0.52.0) (2026-06-02)
 
 
