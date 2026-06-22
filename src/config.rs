@@ -392,6 +392,15 @@ pub struct ChannelConfig {
     pub secret_env: Option<String>,
 }
 
+/// Per-scope activation override. Resolution is most-specific-first:
+/// channel override beats guild override beats the channel's global `activation`.
+///
+/// `pattern` formats:
+/// - `discord:channel:<channel_id>` / `telegram:chat:<chat_id>` / `slack:channel:<channel_id>` — single channel
+/// - `discord:guild:<guild_id>` — every channel in a Discord guild (guild fallback; Discord only)
+///
+/// `activation` values: `"all"` (respond to everything), `"mention"` (only DM / @mention),
+/// any other string (e.g. `"none"`) means never respond.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelOverride {
     pub pattern: String,

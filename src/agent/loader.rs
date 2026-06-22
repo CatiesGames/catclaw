@@ -1436,6 +1436,44 @@ daemon mode won't inherit interactive shell env.
 
 Use `catclaw config get channels[0].dm_allow` first when appending to a list.
 
+### Per-channel / per-guild activation overrides (`channels[N].overrides`)
+
+`channels[N].activation` is the channel-wide default. To make ONE specific
+channel (or one whole Discord guild) behave differently, add override entries.
+**No CLI for this — hand-edit `catclaw.toml` and restart the gateway.**
+
+Resolution is most-specific-first: **channel override → guild override → global `activation`**.
+
+| `pattern` | Scope |
+|-----------|-------|
+| `discord:channel:<channel_id>` / `telegram:chat:<chat_id>` / `slack:channel:<channel_id>` | one channel |
+| `discord:guild:<guild_id>` | every channel in a Discord server (Discord only) |
+
+`activation` values: `all` (reply to everything), `mention` (reply only on DM / @mention),
+or any other string such as `none` (never reply).
+
+Example — agent is in two Discord servers on the same bot token. Server 1 replies
+to everything; Server 2 stays silent except in one channel:
+
+```toml
+[[channels]]
+type = "discord"
+token_env = "CATCLAW_DISCORD_TOKEN"
+activation = "all"                       # server 1 (and anything not overridden): reply to all
+
+[[channels.overrides]]
+pattern = "discord:guild:<SERVER2_GUILD_ID>"
+activation = "none"                      # server 2: silent by default
+
+[[channels.overrides]]
+pattern = "discord:channel:<SERVER2_CHANNEL1_ID>"
+activation = "all"                       # except this one channel (channel beats guild)
+```
+
+Overrides only control *whether the bot replies*. They do NOT change which agent
+handles the message (that is `bindings`) or tool permissions (that is the agent's
+`tools.toml`).
+
 ---
 
 ## Embedding (memory_write / memory_search)

@@ -378,6 +378,45 @@ impl AdapterFilter {
             .unwrap_or(&self.activation)
     }
 
+    /// Determine activation mode with optional guild-level fallback.
+    ///
+    /// Resolution order, most specific first:
+    /// 1. `discord:channel:<channel_id>` — per-channel override
+    /// 2. `discord:guild:<guild_id>` — per-guild override (only when `guild_id` is Some)
+    /// 3. global `activation`
+    ///
+    /// `channel_prefix` is the per-channel namespace (e.g. `"discord:channel"`).
+    /// `guild_prefix` is the per-guild namespace (e.g. `"discord:guild"`).
+    pub fn activation_for_guild(
+        &self,
+        channel_prefix: &str,
+        channel_id: &str,
+        guild_prefix: &str,
+        guild_id: Option<&str>,
+    ) -> &str {
+        let channel_key = format!("{}:{}", channel_prefix, channel_id);
+        if let Some(act) = self
+            .overrides
+            .iter()
+            .find(|(pattern, _)| pattern == &channel_key)
+            .map(|(_, act)| act.as_str())
+        {
+            return act;
+        }
+        if let Some(gid) = guild_id {
+            let guild_key = format!("{}:{}", guild_prefix, gid);
+            if let Some(act) = self
+                .overrides
+                .iter()
+                .find(|(pattern, _)| pattern == &guild_key)
+                .map(|(_, act)| act.as_str())
+            {
+                return act;
+            }
+        }
+        &self.activation
+    }
+
     /// Check whether a sender is allowed based on DM/group policy.
     /// Returns true if the message should be processed.
     pub fn is_sender_allowed(&self, is_dm: bool, sender_id: &str) -> bool {

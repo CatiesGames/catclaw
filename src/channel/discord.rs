@@ -172,7 +172,15 @@ impl EventHandler for Handler {
                 return;
             }
 
-            filter.activation_for("discord:channel", &channel_id_str).to_string()
+            let guild_id_str = msg.guild_id.map(|g| g.get().to_string());
+            filter
+                .activation_for_guild(
+                    "discord:channel",
+                    &channel_id_str,
+                    "discord:guild",
+                    guild_id_str.as_deref(),
+                )
+                .to_string()
         };
 
         // Check if we should respond

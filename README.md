@@ -485,7 +485,17 @@ diary_max_concurrent = 1            # max parallel diary extractions — keep at
 type = "discord"
 token_env = "CATCLAW_DISCORD_TOKEN"
 guilds = ["123456789"]
-activation = "mention"
+activation = "mention"                  # channel-wide default
+
+# Optional: per-channel / per-guild activation overrides.
+# Resolution is most-specific-first: channel > guild > global activation.
+# Same bot in two servers — server 1 replies to all, server 2 silent except one channel:
+[[channels.overrides]]
+pattern = "discord:guild:222222222"     # whole server 2: never reply
+activation = "none"
+[[channels.overrides]]
+pattern = "discord:channel:333333333"   # except this channel (channel beats guild)
+activation = "all"
 
 [[channels]]
 type = "telegram"
