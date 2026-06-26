@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.54.0](https://github.com/CatiesGames/catclaw/compare/v0.53.0...v0.54.0) (2026-06-26)
+
+
+### Features
+
+* **discord:** 新增論壇(forum)完整管理 + activation none/override CLI ([e08c751](https://github.com/CatiesGames/catclaw/commit/e08c751ba2dda97927b48c1bba4f134483bc8ee2))
+
 ## [0.53.0](https://github.com/CatiesGames/catclaw/compare/v0.52.0...v0.53.0) (2026-06-22)
 
 
