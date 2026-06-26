@@ -487,6 +487,20 @@ impl MessageRouter {
                 meta_str,
             );
         }
+        // Forum post context: let the agent know it's replying within a forum post,
+        // its title and tags. `is_new_post` flags the post's very first message.
+        if let Some(ref fp) = ctx.forum_post {
+            let tags_str = if fp.tags.is_empty() {
+                String::new()
+            } else {
+                format!(", tags=[{}]", fp.tags.join(","))
+            };
+            let new_str = if fp.is_new_post { ", NEW POST" } else { "" };
+            context_header = format!(
+                "{}\n[Forum post: title=\"{}\"{}{}]",
+                context_header, fp.title, tags_str, new_str,
+            );
+        }
         let reply_line = ctx.reply_to.as_ref().and_then(|r| {
             r.text.as_ref().map(|t| {
                 let preview: String = t.chars().take(200).collect();

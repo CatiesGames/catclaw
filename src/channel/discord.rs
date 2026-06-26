@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use serenity::all::{
-    ButtonStyle, ChannelId, ChannelType as SerenityChannelType, Command, Context, CreateActionRow,
-    CreateAttachment, CreateButton, CreateChannel, CreateCommand, CreateEmbed,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateThread,
-    EditChannel, EditMessage, EventHandler, GatewayIntents, GuildId, Interaction, Message,
-    MessageId, MessageType, PermissionOverwrite, PermissionOverwriteType, Permissions,
-    ReactionType, RoleId, Ready, UserId,
+    ButtonStyle, ChannelFlags, ChannelId, ChannelType as SerenityChannelType, Command, Context,
+    CreateActionRow, CreateAttachment, CreateButton, CreateChannel, CreateCommand, CreateEmbed,
+    CreateForumPost, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    CreateThread, EditChannel, EditMessage, EditThread, EventHandler, ForumTagId, GatewayIntents,
+    GuildChannel, GuildId, Interaction, Message, MessageId, MessageReference, MessageReferenceKind,
+    MessageType, PermissionOverwrite, PermissionOverwriteType, Permissions, ReactionType, RoleId,
+    Ready, UserId,
 };
 use serenity::builder::GetMessages;
 use serenity::Client;
@@ -156,6 +157,26 @@ impl EventHandler for Handler {
         let is_dm = msg.guild_id.is_none();
         let sender_id = msg.author.id.get().to_string();
 
+        // For a forum post, msg.channel_id is the POST (thread) id, not the forum
+        // channel. Activation overrides are keyed on the forum channel id (there is
+        // no per-post override), so resolve the parent forum id here and use it as
+        // the channel scope for the activation gate — keeping this consistent with
+        // the `thread_create` join gate (which already uses the parent id). Without
+        // this, the documented "guild=none, forum=all" setup would join new posts
+        // but never reply (the post id matches no override → falls to guild=none).
+        let activation_channel_id = msg
+            .guild_id
+            .and_then(|gid| {
+                _ctx.cache.guild(gid).and_then(|guild| {
+                    let thread = guild.threads.iter().find(|t| t.id == msg.channel_id)?;
+                    let parent_id = thread.parent_id?;
+                    let parent = guild.channels.get(&parent_id)?;
+                    (parent.kind == SerenityChannelType::Forum)
+                        .then(|| parent_id.get().to_string())
+                })
+            })
+            .unwrap_or_else(|| channel_id_str.clone());
+
         // Read filter inside a block so the guard is dropped before any await
         let activation = {
             let filter = self.filter.read().unwrap();
@@ -176,7 +197,7 @@ impl EventHandler for Handler {
             filter
                 .activation_for_guild(
                     "discord:channel",
-                    &channel_id_str,
+                    &activation_channel_id,
                     "discord:guild",
                     guild_id_str.as_deref(),
                 )
@@ -219,25 +240,54 @@ impl EventHandler for Handler {
             })
             .collect();
 
-        // Detect if this message is inside a thread.
-        // In Discord, thread channels have their own channel_id.
-        // Check guild cache for thread channel type (guild.threads, not guild.channels).
-        let thread_id = if !is_dm {
-            let is_thread = msg.guild_id.and_then(|gid| {
+        // Detect if this message is inside a thread, and if that thread is a forum
+        // post, capture its title + tags so the agent knows the context it replies in.
+        // In Discord, thread channels have their own channel_id. Check guild cache for
+        // thread channel type (guild.threads, not guild.channels). A forum post is a
+        // thread whose parent channel kind == Forum.
+        let (thread_id, forum_post) = if !is_dm {
+            let detected = msg.guild_id.and_then(|gid| {
                 _ctx.cache.guild(gid).and_then(|guild| {
-                    // guild.channels doesn't include threads; guild.threads does
-                    guild.threads.iter()
-                        .find(|t| t.id == msg.channel_id)
-                        .map(|t| matches!(t.kind, SerenityChannelType::PublicThread | SerenityChannelType::PrivateThread))
+                    let thread = guild.threads.iter().find(|t| t.id == msg.channel_id)?;
+                    if !matches!(
+                        thread.kind,
+                        SerenityChannelType::PublicThread | SerenityChannelType::PrivateThread
+                    ) {
+                        return None;
+                    }
+                    // Is the parent a forum channel? Resolve tag names against it.
+                    let forum = thread.parent_id.and_then(|pid| {
+                        let parent = guild.channels.get(&pid)?;
+                        if parent.kind != SerenityChannelType::Forum {
+                            return None;
+                        }
+                        let tags: Vec<String> = thread
+                            .applied_tags
+                            .iter()
+                            .filter_map(|tid| {
+                                parent
+                                    .available_tags
+                                    .iter()
+                                    .find(|t| &t.id == tid)
+                                    .map(|t| t.name.clone())
+                            })
+                            .collect();
+                        Some(super::ForumPostContext {
+                            title: thread.name.clone(),
+                            tags,
+                            // Forum post's starter message shares the thread's id.
+                            is_new_post: msg.id.get() == thread.id.get(),
+                        })
+                    });
+                    Some(forum)
                 })
-            }).unwrap_or(false);
-            if is_thread {
-                Some(channel_id_str.clone())
-            } else {
-                None
+            });
+            match detected {
+                Some(forum) => (Some(channel_id_str.clone()), forum),
+                None => (None, None),
             }
         } else {
-            None
+            (None, None)
         };
 
         let peer_id = if is_dm {
@@ -301,10 +351,63 @@ impl EventHandler for Handler {
             channel_name,
             guild_id: guild_id_str,
             message_id: Some(msg.id.get().to_string()),
+            forum_post,
         };
 
         if let Err(e) = self.msg_tx.send(ctx).await {
             error!(error = %e, "failed to send message to router");
+        }
+    }
+
+    /// Fires when a thread is created — including a new forum post. We do NOT
+    /// produce an inbound wake-up here; the post's first message arrives as a
+    /// normal `MessageType::Regular` MESSAGE_CREATE and wakes the agent through
+    /// the `message` handler (carrying the post title/tags). This handler's job
+    /// is to (1) ignore non-forum threads, (2) respect the forum channel's
+    /// activation setting (so `none` keeps the bot fully silent), and (3) join
+    /// the thread so subsequent replies in the post are reliably delivered
+    /// (Discord only forwards thread messages to members).
+    async fn thread_create(&self, ctx: Context, thread: GuildChannel) {
+        // Only care about forum posts: a thread whose parent channel is a Forum.
+        let Some(parent_id) = thread.parent_id else {
+            return;
+        };
+        let is_forum = ctx
+            .cache
+            .guild(thread.guild_id)
+            .and_then(|g| g.channels.get(&parent_id).map(|c| c.kind))
+            .map(|k| k == SerenityChannelType::Forum)
+            .unwrap_or(false);
+        if !is_forum {
+            return;
+        }
+
+        // Gate on the forum channel's activation (most-specific-first:
+        // channel override → guild override → global). `none` → stay silent.
+        let activation = {
+            let filter = self.filter.read().unwrap();
+            if !filter.guilds.is_empty() && !filter.guilds.contains(&thread.guild_id.get()) {
+                return;
+            }
+            filter
+                .activation_for_guild(
+                    "discord:channel",
+                    &parent_id.get().to_string(),
+                    "discord:guild",
+                    Some(&thread.guild_id.get().to_string()),
+                )
+                .to_string()
+        };
+        if activation != "all" && activation != "mention" {
+            // "none" or any other value → do not engage with this forum at all.
+            return;
+        }
+
+        // Join the post so we receive its subsequent messages.
+        if let Err(e) = thread.id.join_thread(&ctx.http).await {
+            error!(error = %e, thread_id = %thread.id.get(), "failed to join forum post thread");
+        } else {
+            info!(thread_id = %thread.id.get(), title = %thread.name, "joined new forum post");
         }
     }
 
@@ -508,6 +611,7 @@ impl EventHandler for Handler {
                         channel_name,
                         guild_id: guild_id_str,
                         message_id: None, // slash commands don't have a message to react to
+                        forum_post: None,
                     };
 
                     if let Err(e) = self.msg_tx.send(msg_ctx).await {
@@ -1112,7 +1216,17 @@ impl ChannelAdapter for DiscordAdapter {
             "send_message" => {
                 let cid = parse_channel_id(&params)?;
                 let text = require_str(&params, "text")?;
-                let builder = CreateMessage::new().content(text);
+                let mut builder = CreateMessage::new().content(text);
+                // Optional: reply to a specific message (sets message_reference).
+                // Works in forum posts / threads too — pass the post id as channel_id.
+                if let Some(mid_str) = params.get("reply_to_message_id").and_then(|v| v.as_str()) {
+                    let mid = MessageId::new(mid_str.parse::<u64>().map_err(|e| {
+                        CatClawError::Discord(format!("invalid reply_to_message_id: {}", e))
+                    })?);
+                    builder = builder.reference_message(
+                        MessageReference::new(MessageReferenceKind::Default, cid).message_id(mid),
+                    );
+                }
                 let msg = cid.send_message(http, builder).await
                     .map_err(|e| CatClawError::Discord(format!("send_message: {}", e)))?;
                 Ok(serde_json::json!({"id": msg.id.get().to_string()}))
@@ -1230,6 +1344,107 @@ impl ChannelAdapter for DiscordAdapter {
                 Ok(serde_json::json!(result))
             }
 
+            // ── Forum ─────────────────────────────────────────────────
+            // A forum "post" is a thread whose parent is a Forum channel. Discord
+            // requires the initial message to be sent in the same request that opens
+            // the post — hence create_forum_post carries `content`.
+            "create_forum_post" => {
+                let cid = parse_channel_id(&params)?;
+                let name = require_str(&params, "name")?;
+                let content = require_str(&params, "content")?;
+                let mut builder =
+                    CreateForumPost::new(name, CreateMessage::new().content(content));
+                for tag in parse_forum_tag_ids(&params) {
+                    builder = builder.add_applied_tag(tag);
+                }
+                let post = cid.create_forum_post(http, builder).await
+                    .map_err(|e| CatClawError::Discord(format!("create_forum_post: {}", e)))?;
+                Ok(serde_json::json!({
+                    "id": post.id.get().to_string(),
+                    "name": post.name,
+                }))
+            }
+            // List posts in a forum channel: active threads whose parent == this forum,
+            // plus (optionally) archived posts.
+            "list_forum_posts" => {
+                let cid = parse_channel_id(&params)?;
+                let guild_id = parse_guild_id(&params)?;
+                let include_archived = params
+                    .get("include_archived")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let active = guild_id.get_active_threads(http).await
+                    .map_err(|e| CatClawError::Discord(format!("list_forum_posts: {}", e)))?;
+                let mut posts: Vec<serde_json::Value> = active
+                    .threads
+                    .iter()
+                    .filter(|t| t.parent_id == Some(cid))
+                    .map(|t| forum_post_json(t, false))
+                    .collect();
+                if include_archived {
+                    let limit = params.get("limit").and_then(|v| v.as_u64());
+                    let archived = cid.get_archived_public_threads(http, None, limit).await
+                        .map_err(|e| {
+                            CatClawError::Discord(format!("list_forum_posts (archived): {}", e))
+                        })?;
+                    posts.extend(archived.threads.iter().map(|t| forum_post_json(t, true)));
+                }
+                Ok(serde_json::json!(posts))
+            }
+            // Detailed info about a single forum post (thread): title, owner, tags, state.
+            "forum_post_info" => {
+                let cid = parse_channel_id(&params)?;
+                let ch = cid.to_channel(http).await
+                    .map_err(|e| CatClawError::Discord(format!("forum_post_info: {}", e)))?;
+                let gc = ch.guild().ok_or_else(|| {
+                    CatClawError::Discord("forum_post_info: not a guild channel".to_string())
+                })?;
+                Ok(forum_post_json(&gc, gc.thread_metadata.map(|m| m.archived).unwrap_or(false)))
+            }
+            // List the available tags defined on a forum channel.
+            "list_forum_tags" => {
+                let cid = parse_channel_id(&params)?;
+                let ch = cid.to_channel(http).await
+                    .map_err(|e| CatClawError::Discord(format!("list_forum_tags: {}", e)))?;
+                let gc = ch.guild().ok_or_else(|| {
+                    CatClawError::Discord("list_forum_tags: not a guild channel".to_string())
+                })?;
+                let tags: Vec<serde_json::Value> = gc.available_tags.iter().map(|t| serde_json::json!({
+                    "id": t.id.get().to_string(),
+                    "name": t.name,
+                    "moderated": t.moderated,
+                })).collect();
+                Ok(serde_json::json!(tags))
+            }
+            // Edit a forum post (thread): rename, archive/unarchive, lock/unlock,
+            // pin/unpin to top of forum, or replace applied tags.
+            "edit_forum_post" => {
+                let cid = parse_channel_id(&params)?;
+                let mut builder = EditThread::new();
+                if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
+                    builder = builder.name(name);
+                }
+                if let Some(archived) = params.get("archived").and_then(|v| v.as_bool()) {
+                    builder = builder.archived(archived);
+                }
+                if let Some(locked) = params.get("locked").and_then(|v| v.as_bool()) {
+                    builder = builder.locked(locked);
+                }
+                if let Some(pinned) = params.get("pinned").and_then(|v| v.as_bool()) {
+                    builder = builder.flags(if pinned {
+                        ChannelFlags::PINNED
+                    } else {
+                        ChannelFlags::empty()
+                    });
+                }
+                if params.get("applied_tags").is_some() {
+                    builder = builder.applied_tags(parse_forum_tag_ids(&params));
+                }
+                cid.edit_thread(http, builder).await
+                    .map_err(|e| CatClawError::Discord(format!("edit_forum_post: {}", e)))?;
+                Ok(serde_json::json!({"edited": true}))
+            }
+
             // ── Channels ──────────────────────────────────────────────
             "get_channels" => {
                 let guild_id = parse_guild_id(&params)?;
@@ -1269,6 +1484,19 @@ impl ChannelAdapter for DiscordAdapter {
                 let guild_id = parse_guild_id(&params)?;
                 let name = require_str(&params, "name")?;
                 let mut builder = CreateChannel::new(name);
+                // Optional channel kind: "text" (default) or "forum".
+                if let Some(kind) = params.get("kind").and_then(|v| v.as_str()) {
+                    match kind {
+                        "forum" => builder = builder.kind(SerenityChannelType::Forum),
+                        "text" => {}
+                        other => {
+                            return Err(CatClawError::Discord(format!(
+                                "create_channel: unsupported kind '{}' (use 'text' or 'forum')",
+                                other
+                            )))
+                        }
+                    }
+                }
                 if let Some(topic) = params.get("topic").and_then(|v| v.as_str()) {
                     builder = builder.topic(topic);
                 }
@@ -1279,6 +1507,10 @@ impl ChannelAdapter for DiscordAdapter {
                 }
                 if params.get("nsfw").and_then(|v| v.as_bool()).unwrap_or(false) {
                     builder = builder.nsfw(true);
+                }
+                // Forum channels can ship with a predefined set of available tags.
+                if let Some(tags) = parse_forum_tags(&params) {
+                    builder = builder.available_tags(tags);
                 }
                 let channel = guild_id.create_channel(http, builder).await
                     .map_err(|e| CatClawError::Discord(format!("create_channel: {}", e)))?;
@@ -1843,6 +2075,69 @@ fn require_str<'a>(params: &'a serde_json::Value, field: &str) -> Result<&'a str
         .ok_or_else(|| CatClawError::Discord(format!("missing '{}'", field)))
 }
 
+/// Parse the optional `applied_tags` param (array of forum tag id strings/ints)
+/// into `ForumTagId`s. Returns an empty Vec when absent or malformed.
+fn parse_forum_tag_ids(params: &serde_json::Value) -> Vec<ForumTagId> {
+    params
+        .get("applied_tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    v.as_str()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .or_else(|| v.as_u64())
+                })
+                .map(ForumTagId::new)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse the optional `available_tags` param (array of `{name, moderated?}`)
+/// used when creating a forum channel. `ForumTag` is `#[non_exhaustive]`, so we
+/// build it via deserialization. The `id` is a placeholder: `ForumTagId` wraps
+/// `NonZeroU64`, so it MUST be non-zero to deserialize at all (id=0 would Err and
+/// the tag would be silently dropped) — Discord ignores the id field for new tags
+/// on the channel-create endpoint and assigns the real snowflake. Returns None
+/// when the param is absent. If a tag fails to build, log instead of swallowing.
+fn parse_forum_tags(params: &serde_json::Value) -> Option<Vec<serenity::all::ForumTag>> {
+    let arr = params.get("available_tags").and_then(|v| v.as_array())?;
+    let tags = arr
+        .iter()
+        .filter_map(|v| {
+            let name = v.get("name").and_then(|n| n.as_str())?;
+            let moderated = v.get("moderated").and_then(|m| m.as_bool()).unwrap_or(false);
+            match serde_json::from_value::<serenity::all::ForumTag>(serde_json::json!({
+                "id": "1", // placeholder; non-zero required, Discord assigns the real id
+                "name": name,
+                "moderated": moderated,
+            })) {
+                Ok(tag) => Some(tag),
+                Err(e) => {
+                    error!(error = %e, tag = %name, "failed to build forum tag, skipping");
+                    None
+                }
+            }
+        })
+        .collect();
+    Some(tags)
+}
+
+/// Render a forum post (thread `GuildChannel`) as JSON for MCP responses.
+fn forum_post_json(t: &GuildChannel, archived: bool) -> serde_json::Value {
+    serde_json::json!({
+        "id": t.id.get().to_string(),
+        "name": t.name,
+        "parent_id": t.parent_id.map(|p| p.get().to_string()),
+        "owner_id": t.owner_id.map(|o| o.get().to_string()),
+        "applied_tags": t.applied_tags.iter().map(|id| id.get().to_string()).collect::<Vec<_>>(),
+        "message_count": t.message_count,
+        "archived": archived,
+        "locked": t.thread_metadata.map(|m| m.locked).unwrap_or(false),
+    })
+}
+
 /// Parse an emoji string into a ReactionType.
 /// Supports unicode emoji (e.g. "👍") and custom emoji (e.g. "<:name:123>").
 fn parse_reaction(emoji: &str) -> ReactionType {
@@ -1880,9 +2175,13 @@ fn discord_action_infos() -> Vec<ActionInfo> {
             "properties": {"channel_id": ch, "limit": {"type": "integer", "description": "Max messages (default 50, max 100)"}},
             "required": ["channel_id"]
         })),
-        action("send_message", "Send a message to a channel", serde_json::json!({
+        action("send_message", "Send a message to a channel (or forum post / thread — pass the post id as channel_id)", serde_json::json!({
             "type": "object",
-            "properties": {"channel_id": ch, "text": {"type": "string", "description": "Message content"}},
+            "properties": {
+                "channel_id": ch,
+                "text": {"type": "string", "description": "Message content"},
+                "reply_to_message_id": {"type": "string", "description": "Optional: reply to this message id (sets message_reference)"}
+            },
             "required": ["channel_id", "text"]
         })),
         action("edit_message", "Edit an existing message (bot's own)", serde_json::json!({
@@ -1934,6 +2233,45 @@ fn discord_action_infos() -> Vec<ActionInfo> {
         action("list_threads", "List active threads in a guild", serde_json::json!({
             "type": "object", "properties": {"guild_id": gid}, "required": ["guild_id"]
         })),
+        // Forum (a forum post is a thread under a Forum channel)
+        action("create_forum_post", "Open a new post in a forum channel. Discord requires the initial message, so `content` is mandatory.", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "channel_id": ch,
+                "name": {"type": "string", "description": "Post title"},
+                "content": {"type": "string", "description": "Initial message body (required by Discord)"},
+                "applied_tags": {"type": "array", "items": {"type": "string"}, "description": "Optional: forum tag ids to apply"}
+            },
+            "required": ["channel_id", "name", "content"]
+        })),
+        action("list_forum_posts", "List posts in a forum channel (active, optionally including archived)", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "channel_id": ch,
+                "guild_id": gid,
+                "include_archived": {"type": "boolean", "description": "Also list archived posts (default false)"},
+                "limit": {"type": "integer", "description": "Max archived posts to fetch"}
+            },
+            "required": ["channel_id", "guild_id"]
+        })),
+        action("forum_post_info", "Get details of a forum post (title, owner, tags, archived/locked state)", serde_json::json!({
+            "type": "object", "properties": {"channel_id": ch}, "required": ["channel_id"]
+        })),
+        action("list_forum_tags", "List the available tags defined on a forum channel", serde_json::json!({
+            "type": "object", "properties": {"channel_id": ch}, "required": ["channel_id"]
+        })),
+        action("edit_forum_post", "Edit a forum post: rename, archive/unarchive, lock/unlock, pin/unpin, or replace tags", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "channel_id": ch,
+                "name": {"type": "string"},
+                "archived": {"type": "boolean"},
+                "locked": {"type": "boolean"},
+                "pinned": {"type": "boolean", "description": "Pin/unpin to top of forum"},
+                "applied_tags": {"type": "array", "items": {"type": "string"}, "description": "Replace the post's tags with these tag ids"}
+            },
+            "required": ["channel_id"]
+        })),
         // Channels
         action("get_channels", "List all channels in a guild (sorted by position)", serde_json::json!({
             "type": "object", "properties": {"guild_id": gid}, "required": ["guild_id"]
@@ -1941,11 +2279,13 @@ fn discord_action_infos() -> Vec<ActionInfo> {
         action("channel_info", "Get detailed info about a channel", serde_json::json!({
             "type": "object", "properties": {"channel_id": ch}, "required": ["channel_id"]
         })),
-        action("create_channel", "Create a new text channel", serde_json::json!({
+        action("create_channel", "Create a new channel (text or forum)", serde_json::json!({
             "type": "object",
             "properties": {
                 "guild_id": gid, "name": {"type": "string"}, "topic": {"type": "string"},
-                "parent_id": {"type": "string", "description": "Category ID"}, "nsfw": {"type": "boolean"}
+                "kind": {"type": "string", "enum": ["text", "forum"], "description": "Channel type (default text)"},
+                "parent_id": {"type": "string", "description": "Category ID"}, "nsfw": {"type": "boolean"},
+                "available_tags": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "moderated": {"type": "boolean"}}}, "description": "Forum only: predefined tags"}
             },
             "required": ["guild_id", "name"]
         })),

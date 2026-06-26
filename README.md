@@ -427,6 +427,16 @@ MCP tools appear in the TUI Tools panel under "User MCP Servers" and can be deni
 **Activation modes** (DMs always respond; this controls group/server channels):
 - `mention` (default) &mdash; respond only when @mentioned
 - `all` &mdash; respond to every message
+- `none` &mdash; never respond (silent)
+
+Per-channel / per-guild overrides let you mix modes (e.g. a whole guild silent, one forum channel `all`). Manage via CLI &mdash; hot-reloads, no restart:
+
+```bash
+catclaw channel override set discord:guild:<id> none     # whole server silent
+catclaw channel override set discord:channel:<id> all    # except this channel/forum
+catclaw channel override list
+catclaw channel override delete discord:guild:<id>
+```
 
 ### Built-in MCP Server
 
@@ -439,7 +449,7 @@ Agent wants to list Discord channels
   → JSON result back to agent
 ```
 
-**Discord** (32 tools): messages, reactions, pins, threads, channels, categories, permissions, guilds, members, roles, emojis, moderation, events, stickers.
+**Discord** (39 tools): messages, reactions, pins, threads, **forum posts** (create/list/info/tags/edit), channels (text + forum), categories, permissions, guilds, members, roles, emojis, moderation, events, stickers. New forum posts also wake the agent automatically (governed by the forum channel's `activation`).
 
 **Telegram** (26 tools): messages, pins, chat info/management, moderation, polls, forum topics, permissions, invite links.
 

@@ -374,6 +374,7 @@ impl ChannelAdapter for TelegramAdapter {
                         channel_name,
                         guild_id: None,
                         message_id: None,
+                        forum_post: None,
                     };
 
                     if let Err(e) = msg_tx.send(ctx).await {

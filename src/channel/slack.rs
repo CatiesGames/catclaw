@@ -523,6 +523,7 @@ impl ChannelAdapter for SlackAdapter {
                                 Some(team_id)
                             },
                             message_id: msg_ts,
+                            forum_post: None,
                         };
 
                         if let Err(e) = msg_tx.send(ctx).await {
@@ -784,6 +785,7 @@ impl ChannelAdapter for SlackAdapter {
                                 Some(team_id)
                             },
                             message_id: None,
+                            forum_post: None,
                         };
 
                         if let Err(e) = msg_tx.send(ctx).await {

@@ -936,6 +936,12 @@ impl Config {
                                     "group_allow" => Ok(ch.group_allow.join(",")),
                                     "group_deny" => Ok(ch.group_deny.join(",")),
                                     "app_token_env" => Ok(ch.app_token_env.clone().unwrap_or_default()),
+                                    "overrides" => Ok(ch
+                                        .overrides
+                                        .iter()
+                                        .map(|o| format!("{}={}", o.pattern, o.activation))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")),
                                     _ => Err(CatClawError::Config(format!("unknown channel field: {}", field))),
                                 };
                             }
@@ -1454,9 +1460,14 @@ impl Config {
                         let ch = &mut self.channels[idx];
                         match field {
                             "activation" => {
+                                // Engine semantics (channel handlers): "all" replies to
+                                // everything, "mention" only on DM/@mention, and anything
+                                // else (canonically "none") never replies. Accept the three
+                                // documented values; reject typos so a misspelled "mention"
+                                // doesn't silently become "never reply".
                                 match value {
-                                    "mention" | "all" => ch.activation = value.to_string(),
-                                    _ => return Err(CatClawError::Config("activation must be 'mention' or 'all'".into())),
+                                    "mention" | "all" | "none" => ch.activation = value.to_string(),
+                                    _ => return Err(CatClawError::Config("activation must be 'mention', 'all', or 'none'".into())),
                                 }
                                 Ok(false)
                             }
@@ -1489,6 +1500,39 @@ impl Config {
                             "app_token_env" => {
                                 ch.app_token_env = if value.is_empty() { None } else { Some(value.to_string()) };
                                 Ok(true)
+                            }
+                            // Per-scope activation override. Key form:
+                            //   channels[N].override.<pattern>
+                            // where <pattern> is e.g. discord:guild:123 / discord:channel:456.
+                            // value = activation ("all" | "mention" | "none"); an empty value
+                            // or "-" deletes the override. Hot-reloads via adapter filters.
+                            f if f.starts_with("override.") => {
+                                let pattern = f.trim_start_matches("override.").to_string();
+                                if pattern.is_empty() {
+                                    return Err(CatClawError::Config(
+                                        "override pattern is empty (use channels[N].override.<pattern>)".into(),
+                                    ));
+                                }
+                                if value.is_empty() || value == "-" {
+                                    // Delete
+                                    ch.overrides.retain(|o| o.pattern != pattern);
+                                } else {
+                                    match value {
+                                        "mention" | "all" | "none" => {}
+                                        _ => return Err(CatClawError::Config(
+                                            "override activation must be 'mention', 'all', or 'none'".into(),
+                                        )),
+                                    }
+                                    if let Some(existing) = ch.overrides.iter_mut().find(|o| o.pattern == pattern) {
+                                        existing.activation = value.to_string();
+                                    } else {
+                                        ch.overrides.push(ChannelOverride {
+                                            pattern,
+                                            activation: value.to_string(),
+                                        });
+                                    }
+                                }
+                                Ok(false)
                             }
                             _ => Err(CatClawError::Config(format!("unknown channel field: {}", field))),
                         }

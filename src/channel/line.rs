@@ -304,6 +304,7 @@ impl LineAdapter {
             channel_name: Some(format!("line:{}", &channel_id)),
             guild_id: None,
             message_id,
+            forum_post: None,
         };
 
         match event_type {

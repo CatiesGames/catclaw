@@ -500,6 +500,8 @@ impl AgentsPanel {
                     "react", "get_reactions", "delete_reaction",
                     "pin_message", "unpin_message", "list_pins",
                     "create_thread", "list_threads",
+                    "create_forum_post", "list_forum_posts", "forum_post_info",
+                    "list_forum_tags", "edit_forum_post",
                     "get_channels", "channel_info", "create_channel", "create_category",
                     "edit_channel", "delete_channel", "edit_permissions",
                     "get_guilds", "get_guild_info", "member_info",

@@ -988,7 +988,7 @@ You have access to Discord tools provided by CatClaw via MCP. Use them directly 
 
 **Messages:**
 - `discord_get_messages` — Read messages (params: channel_id, limit?)
-- `discord_send_message` — Send message (params: channel_id, text)
+- `discord_send_message` — Send message (params: channel_id, text, reply_to_message_id? to reply to a specific message). To post in a forum post or thread, pass the post/thread id as channel_id.
 - `discord_edit_message` — Edit bot's message (params: channel_id, message_id, text)
 - `discord_delete_message` — Delete message (params: channel_id, message_id)
 
@@ -1005,10 +1005,19 @@ You have access to Discord tools provided by CatClaw via MCP. Use them directly 
 - `discord_create_thread` — Create thread (params: channel_id, name; optional message_id to start the thread from a specific message)
 - `discord_list_threads` — List active threads (params: guild_id)
 
+**Forum** (a forum "post" is a thread under a Forum channel):
+- `discord_create_forum_post` — Open a new forum post (params: channel_id = forum channel, name = title, content = REQUIRED first message, applied_tags? = tag id array). Discord requires the initial message in the same request, so `content` is mandatory — this is why a plain `create_thread` cannot open a forum post.
+- `discord_list_forum_posts` — List posts in a forum (params: channel_id = forum, guild_id, include_archived?, limit?)
+- `discord_forum_post_info` — Post details: title, owner, tags, archived/locked (params: channel_id = post id)
+- `discord_list_forum_tags` — List the tags available on a forum (params: channel_id = forum)
+- `discord_edit_forum_post` — Rename / archive / lock / pin / re-tag a post (params: channel_id = post id, name?, archived?, locked?, pinned?, applied_tags?)
+- To READ a post's messages, use `discord_get_messages` with the post id as channel_id. To REPLY, use `discord_send_message` with the post id as channel_id.
+- New forum posts wake the agent automatically (the post's first message routes like any message), with the post title + tags injected into context. Whether the bot engages is governed by the forum channel's `activation` (set it to `none` to stay silent, `all` to reply without an @mention — see the activation overrides section).
+
 **Channels:**
 - `discord_get_channels` — List all channels (params: guild_id)
 - `discord_channel_info` — Channel details (params: channel_id)
-- `discord_create_channel` — Create channel (params: guild_id, name, topic?, parent_id?, nsfw?)
+- `discord_create_channel` — Create channel (params: guild_id, name, kind? = "text"|"forum", topic?, parent_id?, nsfw?, available_tags? = [{name, moderated?}] for forums)
 - `discord_create_category` — Create category (params: guild_id, name)
 - `discord_edit_channel` — Edit channel (params: channel_id, name?, topic?, nsfw?, parent_id?)
 - `discord_delete_channel` — Delete channel (params: channel_id)
@@ -1425,7 +1434,7 @@ daemon mode won't inherit interactive shell env.
 
 | Key | Values | Notes |
 |-----|--------|-------|
-| `channels[N].activation` | mention / all | When to respond |
+| `channels[N].activation` | mention / all / none | When to respond. `none` = never reply (silent). |
 | `channels[N].guilds` | comma-separated IDs | Discord only; empty = all servers |
 | `channels[N].dm_policy` | open / allowlist / disabled | DM access control |
 | `channels[N].dm_allow` | comma-separated user IDs | Only used when dm_policy=allowlist |
@@ -1440,7 +1449,17 @@ Use `catclaw config get channels[0].dm_allow` first when appending to a list.
 
 `channels[N].activation` is the channel-wide default. To make ONE specific
 channel (or one whole Discord guild) behave differently, add override entries.
-**No CLI for this — hand-edit `catclaw.toml` and restart the gateway.**
+Manage them via CLI (hot-reloads, no restart):
+
+```bash
+catclaw channel override set discord:guild:<SERVER2_GUILD_ID> none      # whole server silent
+catclaw channel override set discord:channel:<CHANNEL_ID> all           # except this channel
+catclaw channel override list                                           # show overrides
+catclaw channel override delete discord:guild:<SERVER2_GUILD_ID>        # remove
+```
+
+(Use `--channel-index N` if you have more than one channel of the same type;
+default 0. The TUI Config panel also lists existing overrides for inline editing.)
 
 Resolution is most-specific-first: **channel override → guild override → global `activation`**.
 
@@ -1450,24 +1469,16 @@ Resolution is most-specific-first: **channel override → guild override → glo
 | `discord:guild:<guild_id>` | every channel in a Discord server (Discord only) |
 
 `activation` values: `all` (reply to everything), `mention` (reply only on DM / @mention),
-or any other string such as `none` (never reply).
+`none` (never reply).
 
 Example — agent is in two Discord servers on the same bot token. Server 1 replies
-to everything; Server 2 stays silent except in one channel:
+to everything; Server 2 stays silent except in one channel. This is also how you
+make a forum channel auto-reply: set `none` on the guild, `all` on the forum
+channel — new forum posts then wake the agent without an @mention.
 
-```toml
-[[channels]]
-type = "discord"
-token_env = "CATCLAW_DISCORD_TOKEN"
-activation = "all"                       # server 1 (and anything not overridden): reply to all
-
-[[channels.overrides]]
-pattern = "discord:guild:<SERVER2_GUILD_ID>"
-activation = "none"                      # server 2: silent by default
-
-[[channels.overrides]]
-pattern = "discord:channel:<SERVER2_CHANNEL1_ID>"
-activation = "all"                       # except this one channel (channel beats guild)
+```bash
+catclaw channel override set discord:guild:<SERVER2_GUILD_ID> none
+catclaw channel override set discord:channel:<SERVER2_CHANNEL1_ID> all
 ```
 
 Overrides only control *whether the bot replies*. They do NOT change which agent

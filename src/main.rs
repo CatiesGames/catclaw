@@ -520,6 +520,42 @@ enum ChannelCommands {
     },
     /// List configured channels
     List,
+    /// Manage per-scope activation overrides (e.g. silence a whole guild, but
+    /// reply in one forum/channel). Resolution is channel > guild > global.
+    Override {
+        #[command(subcommand)]
+        command: ChannelOverrideCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChannelOverrideCommands {
+    /// Set (or update) an activation override.
+    /// PATTERN: discord:channel:<id> / discord:guild:<id> / telegram:chat:<id> / slack:channel:<id>
+    /// ACTIVATION: all | mention | none
+    Set {
+        /// Scope pattern, e.g. discord:guild:123456789
+        pattern: String,
+        /// Activation: all | mention | none
+        activation: String,
+        /// Channel index in catclaw.toml (default 0)
+        #[arg(long, default_value = "0")]
+        channel_index: usize,
+    },
+    /// List activation overrides for a channel.
+    List {
+        /// Channel index in catclaw.toml (default 0)
+        #[arg(long, default_value = "0")]
+        channel_index: usize,
+    },
+    /// Delete an activation override by pattern.
+    Delete {
+        /// Scope pattern to remove
+        pattern: String,
+        /// Channel index in catclaw.toml (default 0)
+        #[arg(long, default_value = "0")]
+        channel_index: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1652,11 +1688,55 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     if config.channels.is_empty() {
                         println!("No channels configured.");
                     } else {
-                        for ch in &config.channels {
+                        for (i, ch) in config.channels.iter().enumerate() {
                             println!(
-                                "  {} (token_env: {}, activation: {})",
-                                ch.channel_type, ch.token_env, ch.activation
+                                "  [{}] {} (token_env: {}, activation: {})",
+                                i, ch.channel_type, ch.token_env, ch.activation
                             );
+                            for ov in &ch.overrides {
+                                println!("        override {} = {}", ov.pattern, ov.activation);
+                            }
+                        }
+                    }
+                }
+                ChannelCommands::Override { command } => {
+                    match command {
+                        ChannelOverrideCommands::List { channel_index } => {
+                            match config.channels.get(channel_index) {
+                                Some(ch) if ch.overrides.is_empty() => {
+                                    println!("No overrides on channel [{}].", channel_index);
+                                }
+                                Some(ch) => {
+                                    println!("Overrides on channel [{}] ({}):", channel_index, ch.channel_type);
+                                    for ov in &ch.overrides {
+                                        println!("  {} = {}", ov.pattern, ov.activation);
+                                    }
+                                }
+                                None => {
+                                    eprintln!("Error: channel index {} out of range", channel_index);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        ChannelOverrideCommands::Set { pattern, activation, channel_index } => {
+                            let key = format!("channels[{}].override.{}", channel_index, pattern);
+                            apply_config_set_cli(&cli.config, &config, &key, &activation).await?;
+                        }
+                        ChannelOverrideCommands::Delete { pattern, channel_index } => {
+                            // Warn (don't fail) when the pattern isn't present, so a
+                            // mistyped delete isn't silently reported as success.
+                            let exists = config
+                                .channels
+                                .get(channel_index)
+                                .map(|ch| ch.overrides.iter().any(|o| o.pattern == pattern))
+                                .unwrap_or(false);
+                            if !exists {
+                                println!("Note: no override '{}' on channel [{}] — nothing to delete.", pattern, channel_index);
+                            }
+                            // Empty value deletes the override (see apply_config_set).
+                            let key = format!("channels[{}].override.{}", channel_index, pattern);
+                            apply_config_set_cli(&cli.config, &config, &key, "").await?;
+                            println!("Removed override '{}' from channel [{}].", pattern, channel_index);
                         }
                     }
                 }
@@ -3624,6 +3704,50 @@ async fn cmd_agent_new(
     );
     println!("Edit SOUL.md: catclaw agent edit {} soul", name);
 
+    Ok(())
+}
+
+/// Apply a `config.set`-style mutation from the CLI: try the running gateway
+/// over WS first (hot-reload, no restart), and fall back to writing the file
+/// directly when the gateway is offline. Mirrors `ConfigCommands::Set`.
+async fn apply_config_set_cli(
+    config_path: &std::path::Path,
+    config: &Config,
+    key: &str,
+    value: &str,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+    if let Ok((client, _event_rx)) =
+        crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await
+    {
+        match client
+            .request("config.set", serde_json::json!({"key": key, "value": value}))
+            .await
+        {
+            Ok(_) => println!("Set {} = {} (applied immediately)", key, value),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        let mut config = config.clone();
+        match config.apply_config_set(key, value) {
+            Ok(_) => {
+                config.save(config_path)?;
+                println!(
+                    "Set {} = {} (gateway not running, saved to {} — will apply on next start)",
+                    key,
+                    value,
+                    config_path.display()
+                );
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
     Ok(())
 }
 

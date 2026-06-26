@@ -63,6 +63,22 @@ pub struct MsgContext {
     pub guild_id: Option<String>,
     /// Platform message ID of the user's original message. Used for reaction status.
     pub message_id: Option<String>,
+    /// When the message is in a forum post (thread under a Forum channel), carries
+    /// the post's metadata so the agent knows the title/tags it's replying within.
+    /// None for non-forum messages.
+    pub forum_post: Option<ForumPostContext>,
+}
+
+/// Metadata about a Discord forum post (thread) that an inbound message belongs to.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ForumPostContext {
+    /// The post title (thread name).
+    pub title: String,
+    /// Names of the tags applied to this post.
+    pub tags: Vec<String>,
+    /// True when this message is the post's first message (a brand-new post).
+    pub is_new_post: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -329,6 +329,18 @@ impl ConfigPanel {
                     editable: true,
                 });
             }
+            // Per-scope activation overrides (e.g. silence a whole guild but reply
+            // in one forum/channel). Each is editable: set value to all/mention/none,
+            // or "-" to delete (the TUI auto-accepts a completion on empty input, so
+            // use "-" rather than blanking the field). Key channels[N].override.<pattern>.
+            for ov in &ch.overrides {
+                entries.push(ConfigEntry {
+                    key: format!("channels[{}].override.{}", i, ov.pattern),
+                    value: ov.activation.clone(),
+                    section: format!("Channel: {} ({})", ch.channel_type, ch.activation),
+                    editable: true,
+                });
+            }
         }
 
         // (No "Embedding" section — embedding is always in-process BGE-M3,
@@ -543,9 +555,14 @@ impl ConfigPanel {
         if key == "heartbeat.enabled" || key == "contacts.enabled" {
             return vec!["true".into(), "false".into()];
         }
+        // channels[N].override.<pattern> — activation value for a scope override
+        // ("none" silences that scope; "-" deletes the override).
+        if key.contains("].override.") && key.starts_with("channels[") {
+            return vec!["mention".into(), "all".into(), "none".into(), "-".into()];
+        }
         // channels[N].activation
         if key.ends_with(".activation") && key.starts_with("channels[") {
-            return vec!["mention".into(), "all".into()];
+            return vec!["mention".into(), "all".into(), "none".into()];
         }
         // channels[N].dm_policy
         if key.ends_with(".dm_policy") && key.starts_with("channels[") {

@@ -748,6 +748,7 @@ async fn handle_message(
         channel_name: Some(ukey),
         guild_id: None,
         message_id: None,
+        forum_post: None,
     };
 
     if let Some(tx) = adapter.msg_tx().await {
@@ -793,6 +794,7 @@ async fn handle_context_event(
         channel_name: Some(ukey),
         guild_id: None,
         message_id: None,
+        forum_post: None,
     };
 
     if let Some(tx) = adapter.msg_tx().await {
