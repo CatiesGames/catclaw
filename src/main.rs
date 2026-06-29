@@ -294,6 +294,30 @@ enum AgentCommands {
         /// Agent name/ID
         name: String,
     },
+    /// Switch an agent's runtime (claude ↔ codex) in place. Preserves all
+    /// workspace data, transcripts, memory, contacts and bindings. Resets the
+    /// model to the new runtime's default and archives old sessions.
+    SetRuntime {
+        /// Agent name/ID
+        name: String,
+        /// Target runtime: claude or codex
+        runtime: String,
+        /// Optional path to codex auth.json (only meaningful for codex).
+        /// Defaults to ~/.codex/auth.json.
+        #[arg(long)]
+        codex_auth_path: Option<PathBuf>,
+    },
+    /// Set an agent's model (and optional fallback). Must match the agent's
+    /// runtime provider (claude/* for claude, codex/* for codex).
+    SetModel {
+        /// Agent name/ID
+        name: String,
+        /// Model string, e.g. claude/opus-4-8 or codex/gpt-5.5
+        model: String,
+        /// Optional fallback model
+        #[arg(long)]
+        fallback: Option<String>,
+    },
     /// Mark an agent as the default (used when no binding matches)
     SetDefault {
         /// Agent name/ID
@@ -1187,6 +1211,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 }
                 AgentCommands::Delete { name } => {
                     cmd_agent_delete(&mut config, &cli.config, &name).await?;
+                }
+                AgentCommands::SetRuntime { name, runtime, codex_auth_path } => {
+                    cmd_agent_set_runtime(&mut config, &cli.config, &name, &runtime, codex_auth_path).await?;
+                }
+                AgentCommands::SetModel { name, model, fallback } => {
+                    cmd_agent_set_model(&config, &name, &model, fallback.as_deref()).await?;
                 }
                 AgentCommands::SetDefault { name } => {
                     cmd_agent_set_default(&mut config, &cli.config, &name).await?;
@@ -4360,6 +4390,119 @@ async fn cmd_agent_delete(config: &mut Config, config_path: &Path, name: &str) -
     println!("Delete manually if needed: rm -rf {}", agent.workspace.display());
 
     Ok(())
+}
+
+async fn cmd_agent_set_runtime(
+    config: &mut Config,
+    config_path: &Path,
+    name: &str,
+    runtime: &str,
+    codex_auth_path: Option<PathBuf>,
+) -> Result<()> {
+    let runtime_enum = match runtime {
+        "claude" => crate::agent::Runtime::Claude,
+        "codex" => crate::agent::Runtime::Codex,
+        other => {
+            cli_ui::status_msg("❌", &format!("unknown runtime: {} (must be 'claude' or 'codex')", other));
+            std::process::exit(1);
+        }
+    };
+
+    let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+    if let Ok((client, _event_rx)) =
+        crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await
+    {
+        let mut params = serde_json::json!({"agent_id": name, "runtime": runtime});
+        if let Some(ref p) = codex_auth_path {
+            params["codex_auth_path"] = serde_json::Value::String(p.display().to_string());
+        }
+        match client.request("agents.set_runtime", params).await {
+            Ok(v) => {
+                let model = v.get("model").and_then(|m| m.as_str()).unwrap_or("?");
+                let archived = v.get("archived_sessions").and_then(|a| a.as_u64()).unwrap_or(0);
+                println!(
+                    "Agent '{}' runtime → {} (model reset to {}, {} old session(s) archived, applied immediately)",
+                    name, runtime, model, archived
+                );
+                println!("  Note: existing threads keep the prior runtime — a new session starts on the next message.");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Fallback: gateway offline → edit config + set up codex-home directly.
+    let agent = match config.agents.iter_mut().find(|a| a.id == name) {
+        Some(a) => a,
+        None => return Err(crate::error::CatClawError::Agent(format!("agent '{}' not found", name))),
+    };
+    if agent.runtime == runtime_enum {
+        return Err(crate::error::CatClawError::Agent(format!(
+            "agent '{}' is already on runtime '{}'",
+            name, runtime
+        )));
+    }
+    let workspace = agent.workspace.clone();
+    match runtime_enum {
+        crate::agent::Runtime::Codex => {
+            crate::agent::AgentLoader::setup_codex_home(&workspace, codex_auth_path.as_deref())?;
+        }
+        crate::agent::Runtime::Claude => {
+            let _ = crate::agent::AgentLoader::cleanup_codex_home(&workspace);
+        }
+    }
+    agent.runtime = runtime_enum;
+    agent.model = Some(crate::agent::models::default_model_for_runtime(runtime_enum).to_string());
+    agent.fallback_model = None;
+    agent.codex_auth_path = match runtime_enum {
+        crate::agent::Runtime::Codex => codex_auth_path,
+        crate::agent::Runtime::Claude => None,
+    };
+    config.save(config_path)?;
+    println!(
+        "Agent '{}' runtime → {} (gateway not running, saved to file — will apply on next start)",
+        name, runtime
+    );
+    Ok(())
+}
+
+async fn cmd_agent_set_model(
+    config: &Config,
+    name: &str,
+    model: &str,
+    fallback: Option<&str>,
+) -> Result<()> {
+    let ws_url = format!("ws://127.0.0.1:{}/ws", config.general.port);
+    if let Ok((client, _event_rx)) =
+        crate::ws_client::GatewayClient::connect(&ws_url, &config.general.ws_token).await
+    {
+        let mut params = serde_json::json!({"agent_id": name, "model": model});
+        if let Some(fb) = fallback {
+            params["fallback_model"] = serde_json::Value::String(fb.to_string());
+        }
+        match client.request("agents.set_model", params).await {
+            Ok(v) => {
+                println!("Agent '{}' model → {} (applied immediately)", name, model);
+                if let Some(note) = v.get("note").and_then(|n| n.as_str()) {
+                    println!("  Note: {}", note);
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+    // No file fallback: model changes need the gateway's provider/runtime
+    // validation + registry reload. Direct file edit would skip validation and
+    // leave memory stale.
+    Err(crate::error::CatClawError::Agent(
+        "gateway not running — start it first (model changes require the gateway for validation + hot-reload)".to_string(),
+    ))
 }
 
 async fn cmd_agent_set_default(config: &mut Config, config_path: &Path, name: &str) -> Result<()> {

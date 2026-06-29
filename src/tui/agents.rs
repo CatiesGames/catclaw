@@ -1027,8 +1027,17 @@ impl AgentsPanel {
     /// status line. Replaces any optimistic "saved" message so the user
     /// learns the change did not actually reach the gateway.
     fn poll_op_errors(&mut self) {
+        let mut had_err = false;
         while let Ok(msg) = self.op_err_rx.try_recv() {
             self.status_msg = Some(msg);
+            had_err = true;
+        }
+        // Re-sync from disk so any optimistic local edit (e.g. runtime toggle)
+        // that the gateway rejected is reverted to the persisted truth.
+        if had_err {
+            if let Ok(config) = Config::load(&self.config_path) {
+                self.agents = Self::load_agents(&config);
+            }
         }
     }
 
@@ -1177,6 +1186,35 @@ impl AgentsPanel {
             }
         });
     }
+
+    /// Toggle the selected agent's runtime (claude ↔ codex). Switching to codex
+    /// requires `~/.codex/auth.json` (the gateway validates and will reject if
+    /// missing). The model resets to the new runtime's default and old sessions
+    /// are archived — all handled gateway-side.
+    fn toggle_selected_runtime(&mut self) {
+        let Some(agent) = self.agents.get_mut(self.selected) else { return; };
+        let agent_id = agent.id.clone();
+        let target = if agent.runtime == "codex" { "claude" } else { "codex" };
+        // Optimistic local update; reverted via op_err if the gateway rejects.
+        agent.runtime = target.to_string();
+        self.status_msg = Some(format!("'{}' runtime → {} (applying…)", agent_id, target));
+
+        let client = self.client.clone();
+        let err_tx = self.op_err_tx.clone();
+        let aid = agent_id.clone();
+        let tgt = target.to_string();
+        tokio::spawn(async move {
+            match client
+                .request("agents.set_runtime", serde_json::json!({"agent_id": &aid, "runtime": &tgt}))
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = err_tx.send(format!("Failed to switch '{}' to {}: {}", aid, tgt, e));
+                }
+            }
+        });
+    }
 }
 
 impl Component for AgentsPanel {
@@ -1229,6 +1267,10 @@ impl Component for AgentsPanel {
                 }
                 KeyCode::Char('*') => {
                     self.set_selected_as_default();
+                    Action::None
+                }
+                KeyCode::Char('R') => {
+                    self.toggle_selected_runtime();
                     Action::None
                 }
                 _ => Action::None,
@@ -1807,6 +1849,8 @@ impl AgentsPanel {
                 Span::styled(" Skills  ", Style::default().fg(Theme::OVERLAY1)),
                 Span::styled("m", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
                 Span::styled(" Model  ", Style::default().fg(Theme::OVERLAY1)),
+                Span::styled("R", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::styled(" Runtime  ", Style::default().fg(Theme::OVERLAY1)),
                 Span::styled("n", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
                 Span::styled(" New  ", Style::default().fg(Theme::OVERLAY1)),
                 Span::styled("d", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),

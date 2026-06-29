@@ -989,6 +989,37 @@ impl SessionManager {
         self.state_db.list_sessions()
     }
 
+    /// Stop in-flight subprocesses then archive every non-archived session for
+    /// an agent. Used when an agent's runtime is switched: each session binds
+    /// its runtime in metadata at creation, so old sessions would keep spawning
+    /// the prior CLI. Archiving forces the next message to open a fresh session
+    /// under the new runtime. Returns the number of sessions archived.
+    pub async fn archive_all_for_agent(&self, agent_id: &str) -> usize {
+        // Kill any live subprocesses first (best-effort; returns immediately).
+        self.stop_all_for_agent(agent_id);
+        let rows = match self.state_db.list_sessions() {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(agent = %agent_id, error = %e, "archive_all_for_agent: list_sessions failed");
+                return 0;
+            }
+        };
+        let mut n = 0;
+        for row in rows {
+            if row.agent_id == agent_id && row.state != "archived" {
+                if let Err(e) = self.archive(&row.session_key).await {
+                    warn!(agent = %agent_id, session = %row.session_key, error = %e, "archive_all_for_agent: archive failed");
+                } else {
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            info!(agent = %agent_id, archived = n, "archived sessions after runtime switch");
+        }
+        n
+    }
+
     /// Find sessions that have been idle longer than the given duration
     pub fn find_stale_sessions(&self, max_idle_hours: u64) -> Result<Vec<SessionRow>> {
         let cutoff = Utc::now() - chrono::Duration::hours(max_idle_hours as i64);

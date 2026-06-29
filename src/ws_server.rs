@@ -238,6 +238,7 @@ fn is_config_mutating(method: &str) -> bool {
         | "social.mode"
         | "agents.new" | "agents.delete"
         | "agents.set_tools" | "agents.set_model" | "agents.set_default"
+        | "agents.set_runtime"
         | "agents.reload_tools"
         | "bindings.set" | "bindings.delete"
     )
@@ -271,6 +272,7 @@ async fn dispatch(
         "agents.delete" => handle_agents_delete(req, gw),
         "agents.set_tools" => handle_agents_set_tools(req, gw),
         "agents.set_model" => handle_agents_set_model(req, gw),
+        "agents.set_runtime" => handle_agents_set_runtime(req, gw).await,
         "agents.set_default" => handle_agents_set_default(req, gw),
         "bindings.set" => handle_bindings_set(req, gw),
         "bindings.delete" => handle_bindings_delete(req, gw),
@@ -1409,6 +1411,158 @@ fn handle_agents_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRespon
         );
     }
     WsResponse::ok(req.id, result)
+}
+
+/// Switch an agent's runtime (claude ↔ codex) in place — no delete/recreate, so
+/// workspace files, tools.toml, transcripts, memory, contacts and bindings are
+/// all preserved. Because `reload_agent_config` doesn't touch `runtime`, this
+/// rebuilds the registry's Agent entry from the updated config via
+/// `AgentLoader::load`. The model is reset to the new runtime's default (a
+/// `claude/*` model can't run on codex and vice versa). Old sessions are
+/// archived since their runtime is bound in metadata at creation time.
+async fn handle_agents_set_runtime(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResponse {
+    let agent_id = match req.params.get("agent_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return WsResponse::err(req.id, -32602, "missing param: agent_id"),
+    };
+    let new_runtime = match req.params.get("runtime").and_then(|v| v.as_str()) {
+        Some("claude") => crate::agent::Runtime::Claude,
+        Some("codex") => crate::agent::Runtime::Codex,
+        Some(other) => {
+            return WsResponse::err(
+                req.id,
+                -32602,
+                format!("invalid runtime: {} (must be 'claude' or 'codex')", other),
+            )
+        }
+        None => return WsResponse::err(req.id, -32602, "missing param: runtime"),
+    };
+    let codex_auth_path = req
+        .params
+        .get("codex_auth_path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from);
+
+    // Disk-first reload — this handler rewrites the whole config file.
+    let mut full = match crate::config::Config::load(&gw.config_path) {
+        Ok(c) => c,
+        Err(e) => return WsResponse::err(req.id, -1, format!("failed to reload config from disk: {}", e)),
+    };
+    let agent_cfg = match full.agents.iter_mut().find(|a| a.id == agent_id) {
+        Some(a) => a,
+        None => return WsResponse::err(req.id, -32602, format!("agent '{}' not found", agent_id)),
+    };
+
+    // No-op guard: already on the requested runtime.
+    if agent_cfg.runtime == new_runtime {
+        return WsResponse::err(
+            req.id,
+            -32602,
+            format!("agent '{}' is already on runtime '{}'", agent_id, new_runtime.as_str()),
+        );
+    }
+
+    let workspace = agent_cfg.workspace.clone();
+
+    // For codex, build .codex-home/ + verify auth.json BEFORE persisting so we
+    // fail loudly here rather than leaving a half-switched agent. For claude,
+    // tear down the codex auth symlink so a later codex switch picks up fresh.
+    match new_runtime {
+        crate::agent::Runtime::Codex => {
+            if let Err(e) = crate::agent::AgentLoader::setup_codex_home(
+                &workspace,
+                codex_auth_path.as_deref(),
+            ) {
+                return WsResponse::err(req.id, -1, format!("setup_codex_home failed: {}", e));
+            }
+        }
+        crate::agent::Runtime::Claude => {
+            if let Err(e) = crate::agent::AgentLoader::cleanup_codex_home(&workspace) {
+                warn!(agent = %agent_id, error = %e, "failed to clean .codex-home/auth.json on switch to claude");
+            }
+        }
+    }
+
+    // Apply the runtime + reset model to the new runtime's default + record the
+    // codex_auth_path override (cleared when switching to claude).
+    agent_cfg.runtime = new_runtime;
+    let new_model = crate::agent::models::default_model_for_runtime(new_runtime).to_string();
+    agent_cfg.model = Some(new_model.clone());
+    agent_cfg.fallback_model = None;
+    agent_cfg.codex_auth_path = match new_runtime {
+        crate::agent::Runtime::Codex => codex_auth_path,
+        crate::agent::Runtime::Claude => None,
+    };
+
+    let serialized = match toml::to_string_pretty(&full) {
+        Ok(s) => s,
+        Err(e) => return WsResponse::err(req.id, -1, format!("serialize error: {}", e)),
+    };
+    if let Err(e) = std::fs::write(&gw.config_path, &serialized) {
+        return WsResponse::err(req.id, -1, format!("failed to save config: {}", e));
+    }
+
+    // Rebuild the registry's Agent entry from the updated config. Unlike
+    // `reload_agent_config` (which only syncs approval/tools/model), this
+    // recreates the whole Agent so the new `runtime` + codex_auth_path take
+    // effect for the next spawn.
+    let new_agent_cfg = full.agents.iter().find(|a| a.id == agent_id).cloned().unwrap();
+    let workspace_root = full.general.workspace.clone();
+    let timezone = full.general.timezone.clone();
+    let default_model = full.general.default_model.clone();
+    let default_fallback_model = full.general.default_fallback_model.clone();
+    *gw.config.write().unwrap() = full;
+
+    match crate::agent::AgentLoader::load(
+        &new_agent_cfg,
+        &workspace_root,
+        default_model.as_deref(),
+        default_fallback_model.as_deref(),
+        timezone.as_deref(),
+    ) {
+        Ok(agent) => {
+            // Preserve default status across the rebuild: `add()` would only
+            // re-flag default when none exists, so capture+restore explicitly.
+            let was_default = gw
+                .agent_registry
+                .read()
+                .unwrap()
+                .get(&agent_id)
+                .map(|a| a.is_default)
+                .unwrap_or(false);
+            let mut registry = gw.agent_registry.write().unwrap();
+            registry.remove(&agent_id);
+            registry.add(agent);
+            if was_default {
+                registry.set_default(&agent_id);
+            }
+        }
+        Err(e) => {
+            return WsResponse::err(
+                req.id,
+                -1,
+                format!(
+                    "runtime switched in config but registry reload failed ({}); restart the gateway to apply",
+                    e
+                ),
+            );
+        }
+    }
+
+    // Archive old sessions — their runtime is bound in metadata at creation, so
+    // they'd keep spawning the prior CLI. Next message opens a fresh session.
+    let archived = gw.session_manager.archive_all_for_agent(&agent_id).await;
+
+    info!(agent_id = %agent_id, runtime = %new_runtime.as_str(), archived, "agent runtime switched");
+    WsResponse::ok(
+        req.id,
+        json!({
+            "agent_id": agent_id,
+            "runtime": new_runtime.as_str(),
+            "model": new_model,
+            "archived_sessions": archived,
+        }),
+    )
 }
 
 /// Set an agent as the default. Clears `default=true` on all others.
