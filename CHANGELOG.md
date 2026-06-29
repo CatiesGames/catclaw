@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.54.1](https://github.com/CatiesGames/catclaw/compare/v0.54.0...v0.54.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* **codex:** 修正 codex 模型補全清單為實測可用 + 同步 set-runtime 文件 ([e81496d](https://github.com/CatiesGames/catclaw/commit/e81496d9807d4aee26912bbbfc5cbbff2cf8e85f))
+
 ## [0.54.0](https://github.com/CatiesGames/catclaw/compare/v0.53.0...v0.54.0) (2026-06-26)
 
 
