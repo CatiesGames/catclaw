@@ -1117,8 +1117,21 @@ impl Component for SessionsPanel {
                         self.update_slash_completions();
                         return Action::None;
                     }
-                    // Slash completion accept
-                    if !self.slash_completions.is_empty() {
+                    // Slash completion: only auto-accept when the typed text
+                    // doesn't already stand on its own. The old code force-
+                    // accepted the highlighted completion on *every* Enter while
+                    // the list was non-empty — so typing a custom model id (e.g.
+                    // `/model claude/Qwen/Qwen3.6-35B-A3B-FP8` for a vLLM backend)
+                    // got overwritten by whatever entry slash_idx pointed at
+                    // (often `clear`, which then wiped the override). Now: if the
+                    // user is mid-`/model` with a custom argument, send it as-is;
+                    // Tab / arrow keys remain the explicit "accept completion"
+                    // path. Only auto-accept for bare command completion (no
+                    // argument typed yet).
+                    let typed: String = self.textarea.lines().join("\n");
+                    let is_model_with_arg = typed.starts_with("/model ")
+                        && !typed.strip_prefix("/model ").unwrap_or("").trim().is_empty();
+                    if !self.slash_completions.is_empty() && !is_model_with_arg {
                         self.accept_slash_completion();
                         return Action::None;
                     }

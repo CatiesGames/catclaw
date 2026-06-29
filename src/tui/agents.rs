@@ -1373,17 +1373,15 @@ impl Component for AgentsPanel {
                 let model_count = models.len();
                 match event.code {
                     KeyCode::Enter => {
-                        // If completions visible, accept current selection first
-                        if model_count > 0 && (!self.model_edit_buffer.is_empty()
-                            || self.model_completion_idx < model_count)
-                        {
-                            // Check if buffer exactly matches a model id — if not, accept completion
-                            let exact = models.iter().any(|(id, _)| *id == self.model_edit_buffer);
-                            if !exact && model_count > 0 {
-                                self.accept_model_completion();
-                                return Action::None;
-                            }
-                        }
+                        // Enter saves whatever is in the buffer verbatim — this
+                        // is what lets users type a custom/self-hosted model id
+                        // (e.g. `claude/Qwen/Qwen3.6-35B-A3B-FP8` for a vLLM
+                        // backend) that isn't in the completion list. To accept
+                        // a completion instead, use Tab or the arrow keys (which
+                        // overwrite the buffer with the highlighted entry). The
+                        // old behaviour force-accepted a completion whenever the
+                        // buffer didn't exactly match a known id, which silently
+                        // ate any custom input.
                         self.save_model_edit();
                         Action::None
                     }
