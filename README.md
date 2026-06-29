@@ -145,6 +145,9 @@ catclaw agent tools <name> \
   --allow "Read,Grep,WebFetch" \
   --deny "Bash" \
   --approve "Edit,Write"                          # Configure tool permissions
+catclaw agent set-model <name> <provider/model> [--fallback <provider/model>]  # Set model (must match runtime)
+catclaw agent set-runtime <name> <claude|codex> [--codex-auth-path PATH]       # Switch CLI runtime in place
+catclaw agent set-default <name>                  # Mark as default (no-binding fallback)
 catclaw agent delete <name>                       # Delete an agent
 ```
 
@@ -157,7 +160,9 @@ CatClaw can drive two CLI runtimes interchangeably — every channel adapter, ap
 - **claude** (default) — `claude -p` subprocesses, OAuth via Anthropic Console.
 - **codex** — `codex exec` subprocesses, OAuth via `codex login`.
 
-Switching runtime is per-agent (catclaw.toml `[[agents]] runtime = "codex"`) and doesn't change how an admin clicks Approve/Deny, where IG drafts surface, or how `tools.toml` is structured.
+Switching runtime is per-agent (catclaw.toml `[[agents]] runtime = "codex"`) and doesn't change how an admin clicks Approve/Deny, where IG drafts surface, or how `tools.toml` is structured. **Claude and codex agents coexist on the same gateway** — runtime is per-agent, not a global switch.
+
+**To switch an existing agent's runtime, use `catclaw agent set-runtime <name> <claude|codex>`** — it switches in place, preserving all workspace data, transcripts, memory, contacts, and bindings. It resets the model to the new runtime's default and archives old sessions (whose runtime is bound at creation). Do NOT delete + recreate the agent. **`runtime` ≠ `model`**: the runtime picks which CLI binary to spawn (`claude -p` vs `codex exec`), the model is just an argument to it — changing the model can't change the runtime, which is why mismatched provider/model combos are rejected.
 
 #### What's identical across runtimes
 
@@ -189,7 +194,7 @@ Codex-runtime agents automatically get image generation (gpt-image-2) via codex'
 #### Setup
 
 1. Run `codex login` once on the host (creates `~/.codex/auth.json`).
-2. `catclaw agent new my-codex-agent --runtime codex` — catclaw verifies `~/.codex/auth.json` exists at agent-creation time so missing-auth fails loudly.
+2. `catclaw agent new my-codex-agent --runtime codex` — catclaw verifies `~/.codex/auth.json` exists at agent-creation time so missing-auth fails loudly. (Or convert an existing agent: `catclaw agent set-runtime my-agent codex`.)
 3. Bind a channel (`catclaw bind ...`) like any other agent. Send a message — codex spawns automatically.
 
 For per-account isolation (e.g. work + personal codex accounts), pass `--codex-auth-path` to point at a different `auth.json`.
@@ -200,8 +205,8 @@ All model references use the canonical `provider/model` form:
 
 ```bash
 # Per-agent model
-catclaw agent set-model my-agent --model claude/opus-4-8
-catclaw agent set-model my-codex-agent --model codex/gpt-5.5
+catclaw agent set-model my-agent claude/opus-4-8
+catclaw agent set-model my-codex-agent codex/gpt-5.5
 
 # Global defaults
 catclaw config set default_model claude/sonnet-4-6
@@ -209,7 +214,7 @@ catclaw config set default_fallback_model claude/haiku-4-5
 
 # Background diary/memory analysis (catclaw-internal — runs independent of agents)
 catclaw config set diary_model claude/haiku-4-5   # default; fast & cheap
-catclaw config set diary_model codex/gpt-5.5-mini # switch to OpenAI mini
+catclaw config set diary_model codex/gpt-5.4-mini # switch to OpenAI cheap tier
 ```
 
 The provider must match the agent's runtime — `claude/*` for Claude agents,

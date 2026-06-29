@@ -535,16 +535,19 @@ impl ConfigPanel {
                 "claude/sonnet-4-6".into(),
                 "claude/haiku-4-5".into(),
                 "codex/gpt-5.5".into(),
-                "codex/gpt-5.5-mini".into(),
+                "codex/gpt-5.4".into(),
+                "codex/gpt-5.4-mini".into(),
                 "codex/o3".into(),
                 "".into(),
             ];
         }
         if key == "diary_model" {
             // diary_model is catclaw-internal — cheap tier picks make sense.
+            // codex/gpt-5.4-mini is the cheapest codex tier available on a
+            // ChatGPT-account login (gpt-5.5-mini is NOT — see models.rs).
             return vec![
                 "claude/haiku-4-5".into(),
-                "codex/gpt-5.5-mini".into(),
+                "codex/gpt-5.4-mini".into(),
                 "claude/sonnet-4-6".into(),
                 "".into(),
             ];

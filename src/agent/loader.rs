@@ -1418,7 +1418,7 @@ daemon mode won't inherit interactive shell env.
 |-----|---------|-------|
 | `heartbeat.enabled` | false | Enable periodic heartbeat — requires restart |
 | `heartbeat.interval_mins` | 30 | Minutes between heartbeats — requires restart |
-| `heartbeat.model` | "" (=agent default) | Model override for heartbeat poll. Canonical `provider/model` form (e.g. `claude/haiku-4-5`). Recommend a cheap tier (haiku / gpt-5.5-mini) if agent default is a flagship — saves ~95% tokens on routine checks. Hot-reload (every tick archives + restarts the heartbeat session, so the next tick picks up the new model). |
+| `heartbeat.model` | "" (=agent default) | Model override for heartbeat poll. Canonical `provider/model` form (e.g. `claude/haiku-4-5`). Recommend a cheap tier (`claude/haiku-4-5` / `codex/gpt-5.4-mini`) if agent default is a flagship — saves ~95% tokens on routine checks. Hot-reload (every tick archives + restarts the heartbeat session, so the next tick picks up the new model). |
 
 ### Contacts Keys
 
@@ -1534,8 +1534,8 @@ Common short aliases: `claude/opus` → `claude/opus-4-8`,
 
 ```bash
 # Per-agent model (validated against agent.runtime)
-catclaw agent set-model my-agent --model claude/opus-4-8
-catclaw agent set-model my-codex-agent --model codex/gpt-5.5
+catclaw agent set-model my-agent claude/opus-4-8
+catclaw agent set-model my-codex-agent codex/gpt-5.5
 
 # Global default (used by agents that don't override)
 catclaw config set default_model claude/sonnet-4-6
@@ -1545,7 +1545,43 @@ catclaw config set default_fallback_model claude/haiku-4-5
 **Provider/runtime must match**: a codex-runtime agent CANNOT use a
 `claude/*` model, and vice versa — `catclaw` rejects mismatched
 combinations with a friendly error. To use a different provider on an
-existing agent, switch the runtime first.
+existing agent, switch the runtime first (see below) — DON'T delete and
+recreate the agent.
+
+### Switching an agent's runtime (claude ↔ codex)
+
+**runtime ≠ model.** The `runtime` picks which CLI subprocess catclaw
+spawns (`claude -p` vs `codex exec`) — a completely different binary,
+auth (`~/.claude` vs `~/.codex`), MCP config format, and behaviour. The
+`model` is just an argument passed to that CLI. So you can't turn a
+claude agent into a codex agent by changing its model — you switch the
+runtime, and the model is reset to the new runtime's default for you.
+
+```bash
+# Prerequisite for codex: log in once on this machine.
+codex login                                  # creates ~/.codex/auth.json
+
+# Switch in place — preserves ALL agent data (workspace, skills,
+# tools.toml, transcripts, memory, contacts, bindings). Resets the model
+# to the new runtime's default and archives old sessions.
+catclaw agent set-runtime my-agent codex
+catclaw agent set-runtime my-agent claude
+
+# Optional per-agent codex auth (multi-account):
+catclaw agent set-runtime my-agent codex --codex-auth-path /path/to/auth.json
+```
+
+What it does: updates `runtime` in `catclaw.toml`, builds the per-agent
+`.codex-home/` + verifies `auth.json` (fails loudly if missing), resets
+`model` to the runtime default (`codex/gpt-5.5` or `claude/opus-4-8`),
+hot-reloads the registry, and archives the agent's existing sessions
+(their runtime is fixed at creation time, so the next message opens a
+fresh session under the new runtime). **No delete/recreate needed — the
+agent keeps its identity and all data.**
+
+**Claude and codex agents coexist** — runtime is per-agent. One gateway
+can run a claude agent and a codex agent side by side, sharing the same
+channels, bindings, and contacts.
 
 Legacy un-prefixed values (`"opus"`, `"haiku"`, `"claude-opus-4-7"`)
 auto-migrate to the canonical form on the next `catclaw config` load,
@@ -1558,8 +1594,8 @@ CatClaw's internal background tasks — diary generation from transcripts
 any agent. Default: `claude/haiku-4-5`. Change with:
 
 ```bash
-# Use OpenAI's GPT mini for diary instead:
-catclaw config set diary_model codex/gpt-5.5-mini
+# Use OpenAI's cheap GPT tier for diary instead:
+catclaw config set diary_model codex/gpt-5.4-mini
 
 # Or pick a higher tier for richer summaries:
 catclaw config set diary_model claude/sonnet-4-6
@@ -1630,6 +1666,8 @@ catclaw agent list             # List all agents
 catclaw agent edit <name> <file>  # Open file in $EDITOR
 catclaw agent delete <name>    # Remove agent from config (workspace files preserved)
 catclaw agent set-default <name>  # Mark as default (used when no binding matches)
+catclaw agent set-model <name> <provider/model> [--fallback <provider/model>]  # Set model (must match runtime)
+catclaw agent set-runtime <name> <claude|codex> [--codex-auth-path PATH]  # Switch CLI runtime in place
 catclaw agent tools <name>     # Show current tool permissions
 catclaw agent tools <name> --allow "Read,Edit,Bash" --deny "WebFetch" --approve "Bash"
 ```
@@ -1637,7 +1675,7 @@ catclaw agent tools <name> --allow "Read,Edit,Bash" --deny "WebFetch" --approve 
 ### Runtime: claude vs codex
 
 CatClaw can drive two CLI runtimes. Models use the canonical
-`provider/model` form (set with `catclaw agent set-model my-agent --model
+`provider/model` form (set with `catclaw agent set-model my-agent
 claude/opus-4-8` etc.):
 
 - **claude** (default) — `claude -p` subprocesses with PreToolUse hook +
@@ -1646,8 +1684,12 @@ claude/opus-4-8` etc.):
   (fastest/cheapest).
 - **codex** — `codex exec` subprocesses with isolated `CODEX_HOME` per
   agent. Approval gate runs inside catclaw's MCP server (codex's
-  user-level hooks don't fire in exec mode). Models: `codex/gpt-5.5`,
-  `codex/gpt-5.5-mini`, `codex/o3`.
+  user-level hooks don't fire in exec mode). Models: `codex/gpt-5.5`
+  (flagship), `codex/gpt-5.4`, `codex/gpt-5.4-mini` (cheap tier),
+  `codex/o3`. The exact set depends on your ChatGPT plan — codex accepts
+  any model id you're entitled to (catclaw passes `codex/*` through
+  unchanged), so type your own if these don't match. Note `gpt-5.5-mini`
+  is NOT available on a ChatGPT-account login — use `gpt-5.4-mini`.
 
 **catclaw user surfaces are identical across runtimes** — same approval cards (Discord embed / Telegram inline keyboard / Slack Block Kit / LINE Flex), same `tools.toml` schema, same TUI panels, same WS protocol. Switching `runtime = "codex"` in `catclaw.toml` doesn't change how an admin interacts with the bot.
 

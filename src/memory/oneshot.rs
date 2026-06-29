@@ -7,7 +7,7 @@
 //! text reply as a `String`.
 //!
 //! `model_str` is a canonical `provider/model` (e.g. `claude/haiku-4-5`,
-//! `codex/gpt-5.5-mini`). The Runtime is read from the parsed provider so
+//! `codex/gpt-5.4-mini`). The Runtime is read from the parsed provider so
 //! a single config key (`general.diary_model`) selects both the binary
 //! and the model.
 

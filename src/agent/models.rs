@@ -2,7 +2,7 @@
 //! `provider/model` form used by catclaw config files and WS protocols.
 //!
 //! All model strings stored in `catclaw.toml` or sent over WS are now in
-//! `provider/model` form — e.g. `claude/opus-4-7`, `codex/gpt-5.5-mini`.
+//! `provider/model` form — e.g. `claude/opus-4-7`, `codex/gpt-5.4-mini`.
 //! `Config::load` migrates old un-prefixed values (e.g. `opus`, `haiku`,
 //! `claude-opus-4-8`) on first load by writing them back with the
 //! `claude/` prefix preserved.
@@ -17,7 +17,7 @@ use crate::agent::Runtime;
 ///
 /// Constructed from a `provider/model` string or a legacy un-prefixed alias.
 /// `model` is always the full upstream model ID (e.g. `claude-opus-4-8`,
-/// `gpt-5.5-mini`), never an alias — aliases are resolved during parsing.
+/// `gpt-5.4-mini`), never an alias — aliases are resolved during parsing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModel {
     pub provider: Runtime,
@@ -99,10 +99,14 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
         description: "alias → claude/haiku-4-5",
     },
     // ── Codex (OpenAI) ─────────────────────────────────────────────────────
-    // Codex CLI's `-c model="..."` config key accepts any model name the
-    // ChatGPT account is subscribed to. The list below is the common set
-    // surfaced in the TUI picker; users can still set arbitrary IDs by
-    // editing catclaw.toml directly.
+    // Codex CLI's `-c model="..."` / `-m` accepts any model name the ChatGPT
+    // account is entitled to — the actual set depends on the user's plan, not
+    // on this list. These are completion HINTS only; `parse_model_string` lets
+    // codex/* pass through unchanged so users can type any id codex accepts.
+    // Verified available on a standard ChatGPT-account Codex login (2026-06):
+    // gpt-5.5, gpt-5.4, gpt-5.4-mini, o3. NOTE: `gpt-5.5-mini` is NOT available
+    // on ChatGPT-account Codex (400 "model is not supported") — do not re-add
+    // it as a hint; use gpt-5.4-mini for the cheap tier.
     ModelEntry {
         provider: Runtime::Codex,
         alias: "gpt-5.5",
@@ -111,9 +115,15 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
     },
     ModelEntry {
         provider: Runtime::Codex,
-        alias: "gpt-5.5-mini",
-        full_id: "gpt-5.5-mini",
-        description: "GPT-5.5 mini — fastest, cheapest",
+        alias: "gpt-5.4",
+        full_id: "gpt-5.4",
+        description: "GPT-5.4 — previous flagship, balanced",
+    },
+    ModelEntry {
+        provider: Runtime::Codex,
+        alias: "gpt-5.4-mini",
+        full_id: "gpt-5.4-mini",
+        description: "GPT-5.4 mini — fastest, cheapest",
     },
     ModelEntry {
         provider: Runtime::Codex,
@@ -123,9 +133,19 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
     },
 ];
 
+/// Canonical default model (wire form) for a runtime. Used when switching an
+/// agent's runtime: the prior `claude/*` model can't be carried over to a codex
+/// runtime (and vice versa), so we reset to the runtime's flagship default.
+pub fn default_model_for_runtime(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Claude => "claude/opus-4-8",
+        Runtime::Codex => "codex/gpt-5.5",
+    }
+}
+
 /// Parse a model string in any of the supported forms into a [`ProviderModel`]:
 ///
-/// 1. Canonical: `claude/opus-4-7` / `codex/gpt-5.5-mini`
+/// 1. Canonical: `claude/opus-4-7` / `codex/gpt-5.4-mini`
 /// 2. Provider + alias: `claude/opus` / `codex/mini`
 /// 3. Legacy un-prefixed alias: `opus` / `haiku` (defaults to claude)
 /// 4. Legacy full ID: `claude-opus-4-8` / `gpt-5.5` (provider sniffed from prefix)
