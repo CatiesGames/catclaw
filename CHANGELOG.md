@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.54.2](https://github.com/CatiesGames/catclaw/compare/v0.54.1...v0.54.2) (2026-06-29)
+
+
+### Bug Fixes
+
+* **tui:** model 編輯 / /model 指令尊重自訂輸入,不再被補全覆蓋 ([a303bdf](https://github.com/CatiesGames/catclaw/commit/a303bdf941041ff65ea1ac6f6f2c898894efd867))
+
 ## [0.54.1](https://github.com/CatiesGames/catclaw/compare/v0.54.0...v0.54.1) (2026-06-29)
 
 
