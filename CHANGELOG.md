@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.54.3](https://github.com/CatiesGames/catclaw/compare/v0.54.2...v0.54.3) (2026-06-30)
+
+
+### Bug Fixes
+
+* **agent:** 重寫 NO_REPLY 系統指令,消除 LLM 二次判斷「該不該回」 ([bd0e0fe](https://github.com/CatiesGames/catclaw/commit/bd0e0fed86f6a5ca583ad435a1467eb99e8dd7f6))
+
 ## [0.54.2](https://github.com/CatiesGames/catclaw/compare/v0.54.1...v0.54.2) (2026-06-29)
 
 
