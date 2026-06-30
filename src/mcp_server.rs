@@ -345,7 +345,7 @@ async fn handle_codex_tool_call(
     // an empty require_approval list).
     if CODEX_SOCIAL_PUBLISH_TOOLS.contains(&tool_name)
         && matches!(
-            agent.tool_permission(&prefixed_name),
+            agent.mcp_tool_permission(&prefixed_name),
             crate::agent::Permission::RequireApproval
         )
     {
@@ -364,7 +364,11 @@ async fn handle_codex_tool_call(
     // approval internally.
 
     // ── Branch 3: general tool permission gate. ──
-    match agent.tool_permission(&prefixed_name) {
+    // Use the MCP-aware gate: catclaw MCP tools default to Allowed (the
+    // `allowed` whitelist only governs built-in tools, matching Claude). Only
+    // explicit denied / require_approval entries change that. See
+    // `Agent::mcp_tool_permission`.
+    match agent.mcp_tool_permission(&prefixed_name) {
         crate::agent::Permission::Denied => jsonrpc_error(
             id,
             -32001,

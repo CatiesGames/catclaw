@@ -64,6 +64,55 @@ pub struct SessionManager {
     diary_trigger: Option<Arc<dyn DiaryTrigger>>,
 }
 
+/// Write an MCP-resolvable lookup row for a codex `thread_id`. Free function so
+/// it can be called both from `&self` spawn paths and from inside the detached
+/// `tokio::spawn` event loop in `send_streaming` (which captures a cloned
+/// `Arc<StateDb>` and can't borrow `&self`).
+///
+/// Codex generates its own session id (the `thread.started` `thread_id`) and
+/// starts issuing catclaw MCP tool calls (memory_write, kg_*, contacts_*,
+/// discord_*) **mid-turn**, carrying that id in `_meta.x-codex-turn-metadata`.
+/// The MCP intercept (`mcp_server::resolve_agent_from_session`) resolves the
+/// caller by looking that id up in the `sessions` table. The main session row
+/// stores catclaw's own placeholder id (needed for resume + transcript naming),
+/// so without an extra row keyed on the codex thread_id, that first MCP call
+/// lands as "unknown codex session" and EVERY catclaw tool the codex agent
+/// calls fails — memory palace, contacts, discord ops, the lot.
+///
+/// Fix (this mirrors what `ephemeral_run` already does for background diary
+/// runs): upsert a separate `archived` row keyed on the codex thread_id.
+/// `archived` + `ephemeral` origin keeps it out of TUI lists / the resume
+/// picker — it's purely a lookup handle; the main session row is untouched.
+/// Idempotent (upsert) so repeated SystemInit events are safe. No-op for
+/// non-codex agents / empty thread_id.
+fn write_codex_mcp_lookup_row(state_db: &StateDb, agent: &Agent, thread_id: &str) {
+    if !matches!(agent.runtime, crate::agent::Runtime::Codex) || thread_id.is_empty() {
+        return;
+    }
+    let now = Utc::now().to_rfc3339();
+    let row = SessionRow {
+        session_key: format!("catclaw:{}:ephemeral:{}", agent.id, thread_id),
+        session_id: thread_id.to_string(),
+        agent_id: agent.id.clone(),
+        origin: "ephemeral".to_string(),
+        context_id: thread_id.to_string(),
+        parent_session_id: None,
+        state: "archived".to_string(),
+        last_activity_at: now.clone(),
+        created_at: now,
+        metadata: Some(
+            serde_json::json!({
+                "runtime": agent.runtime.as_str(),
+                "ephemeral": true,
+            })
+            .to_string(),
+        ),
+    };
+    if let Err(e) = state_db.upsert_session(&row) {
+        warn!(agent = %agent.id, thread_id, error = %e, "failed to write codex MCP lookup row");
+    }
+}
+
 #[allow(dead_code)]
 impl SessionManager {
     pub fn new(
@@ -89,6 +138,54 @@ impl SessionManager {
 
     pub fn diary_trigger(&self) -> Option<Arc<dyn DiaryTrigger>> {
         self.diary_trigger.clone()
+    }
+
+    /// Write an MCP-resolvable lookup row for a codex `thread_id`.
+    ///
+    /// Codex generates its own session id (the `thread.started` `thread_id`)
+    /// and starts issuing catclaw MCP tool calls (memory_write, kg_*, etc.)
+    /// **mid-turn**, carrying that id in `_meta.x-codex-turn-metadata`. The MCP
+    /// intercept (`mcp_server::resolve_agent_from_session`) resolves the caller
+    /// by looking the id up in `sessions`. The main session row stores catclaw's
+    /// own placeholder id (used for resume + transcript naming), so without an
+    /// extra row keyed on the codex thread_id, that first MCP call lands as
+    /// "unknown codex session" and every catclaw tool the codex agent calls
+    /// fails — memory palace, contacts, discord ops, the lot.
+    ///
+    /// Fix (mirrors `ephemeral_run`, which already does this): upsert a separate
+    /// `archived` row keyed on the codex thread_id. `archived` + `ephemeral`
+    /// origin keeps it out of TUI lists / the resume picker — it's purely a
+    /// lookup handle. The main session row is left untouched. Idempotent (upsert)
+    /// so repeated SystemInit events are safe. No-op for non-codex agents.
+    fn write_codex_mcp_lookup_row(&self, agent: &Agent, thread_id: &str) {
+        write_codex_mcp_lookup_row(&self.state_db, agent, thread_id);
+    }
+
+    /// For codex agents on the non-streaming path (`send_and_wait` + BOOT.md):
+    /// drain events until `thread.started`/SystemInit, register the MCP lookup
+    /// row, then let the caller proceed to `wait_for_result` for the rest of the
+    /// turn. Without this, `wait_for_result` drains SystemInit internally but
+    /// never writes the lookup row, so codex's mid-turn catclaw MCP calls error
+    /// out (see `write_codex_mcp_lookup_row`). No-op for non-codex agents.
+    /// Bounded scan so a misbehaving subprocess can't hang us.
+    async fn register_codex_session_pre_wait(
+        &self,
+        handle: &mut crate::session::runtime::RuntimeHandle,
+        agent: &Agent,
+    ) {
+        if !matches!(agent.runtime, crate::agent::Runtime::Codex) {
+            return;
+        }
+        for _ in 0..16 {
+            match handle.recv_event().await {
+                Some(super::runtime::RuntimeEvent::SystemInit { session_id }) => {
+                    self.write_codex_mcp_lookup_row(agent, &session_id);
+                    break;
+                }
+                Some(_) => continue, // pre-SystemInit event — keep scanning
+                None => break,       // subprocess died early
+            }
+        }
     }
 
     /// Call the rolling-diary hook after a turn was written to the transcript.
@@ -286,6 +383,9 @@ impl SessionManager {
                         let mut handle =
                             agent.spawn_session(&spawn_params, &combined, &subprocess_env).await?;
 
+                        // Codex: register MCP lookup row before waiting (see send_and_wait).
+                        self.register_codex_session_pre_wait(&mut handle, agent).await;
+
                         let response = tokio::select! {
                             result = handle.wait_for_result(event_observer.clone()) => result?,
                             _ = &mut kill_rx => {
@@ -361,6 +461,10 @@ impl SessionManager {
             resume_thread_id: None,
         };
         let mut handle = agent.spawn_session(&spawn_params, message, &subprocess_env).await?;
+
+        // Codex: register the MCP lookup row before waiting, so mid-turn catclaw
+        // tool calls (memory_write, etc.) resolve instead of "unknown codex session".
+        self.register_codex_session_pre_wait(&mut handle, agent).await;
 
         // Wait for result, but also listen for kill signal
         let response = tokio::select! {
@@ -499,41 +603,10 @@ impl SessionManager {
         // preserved — nothing meaningful is shown).
         //
         // We can only do this AFTER spawn so codex has actually issued its
-        // thread.started event; recv one event to get the thread_id, then
-        // write the row, then proceed with wait_for_result for the rest.
-        if matches!(agent.runtime, crate::agent::Runtime::Codex) {
-            // Drain events until we see SystemInit (or give up after a few
-            // to avoid hanging on a misbehaving subprocess).
-            for _ in 0..16 {
-                match handle.recv_event().await {
-                    Some(super::runtime::RuntimeEvent::SystemInit { session_id: thread_id }) => {
-                        let now = chrono::Utc::now().to_rfc3339();
-                        let row = SessionRow {
-                            session_key: format!("catclaw:{}:ephemeral:{}", agent.id, thread_id),
-                            session_id: thread_id.clone(),
-                            agent_id: agent.id.clone(),
-                            origin: "ephemeral".to_string(),
-                            context_id: thread_id.clone(),
-                            parent_session_id: None,
-                            state: "archived".to_string(),
-                            last_activity_at: now.clone(),
-                            created_at: now,
-                            metadata: Some(
-                                serde_json::json!({
-                                    "runtime": agent.runtime.as_str(),
-                                    "ephemeral": true,
-                                })
-                                .to_string(),
-                            ),
-                        };
-                        let _ = self.state_db.upsert_session(&row);
-                        break;
-                    }
-                    Some(_) => continue, // any other event before SystemInit — keep looking
-                    None => break,       // subprocess died early
-                }
-            }
-        }
+        // thread.started event; drain to SystemInit, write the lookup row, then
+        // proceed with wait_for_result for the rest. (Shared with send_and_wait
+        // + send_streaming so all spawn paths register the codex session.)
+        self.register_codex_session_pre_wait(&mut handle, agent).await;
 
         handle.wait_for_result(None).await
     }
@@ -745,6 +818,11 @@ impl SessionManager {
                                 info!(session_id = %session_id, "streaming: got session init");
                                 if !session_id.is_empty() {
                                     final_session_id = session_id.clone();
+                                    // Codex issues catclaw MCP calls mid-turn under
+                                    // this just-reported thread_id; register a lookup
+                                    // row NOW so the MCP intercept resolves it instead
+                                    // of erroring "unknown codex session".
+                                    write_codex_mcp_lookup_row(&state_db, &agent_clone, session_id);
                                 }
                             }
                             RuntimeEvent::TextDelta { text } => {

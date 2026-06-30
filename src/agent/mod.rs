@@ -266,6 +266,33 @@ impl Agent {
         Permission::Allowed
     }
 
+    /// Resolve policy for a **catclaw MCP tool** (`mcp__catclaw__*`).
+    ///
+    /// Same as [`tool_permission`] EXCEPT the `allowed` whitelist does NOT deny
+    /// unlisted tools. This mirrors Claude: under Claude Code the `allowed` list
+    /// becomes the `--tools` flag, which only whitelists **built-in** tools —
+    /// MCP tools are never gated by it (CLAUDE.md lesson #25 / MCP permission
+    /// constraints), so an agent whose `tools.toml` lists only `Read,Bash,...`
+    /// still has every `mcp__catclaw__*` tool available.
+    ///
+    /// Codex has no `--tools` flag; catclaw enforces the gate itself in
+    /// `mcp_server.rs`. Routing codex's MCP calls through [`tool_permission`]
+    /// (which applies the whitelist to ALL names) made every catclaw MCP tool
+    /// "denied by agent policy" the moment an agent had a non-empty `allowed`
+    /// list — so a claude→codex migration silently lost memory palace, contacts,
+    /// discord ops, etc. with no tools.toml change. This method restores parity:
+    /// MCP tools are available by default; only an explicit `denied` /
+    /// `require_approval` entry changes that.
+    pub fn mcp_tool_permission(&self, name: &str) -> Permission {
+        if self.tools.denied.iter().any(|d| d == name) {
+            return Permission::Denied;
+        }
+        if self.tools.require_approval.iter().any(|d| d == name) {
+            return Permission::RequireApproval;
+        }
+        Permission::Allowed
+    }
+
     /// Check if memory is disabled for this agent.
     /// Disabled only when ALL memory/kg tools are denied.
     /// Used by build_system_prompt() and scheduler diary extraction.
