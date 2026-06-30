@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.54.4](https://github.com/CatiesGames/catclaw/compare/v0.54.3...v0.54.4) (2026-06-30)
+
+
+### Bug Fixes
+
+* **codex:** 修復 codex 下 catclaw MCP 工具全失效(session 競態 + 權限白名單) ([a33db22](https://github.com/CatiesGames/catclaw/commit/a33db222090eab47b48a4aa477c57419008da3f5))
+
 ## [0.54.3](https://github.com/CatiesGames/catclaw/compare/v0.54.2...v0.54.3) (2026-06-30)
 
 
