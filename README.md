@@ -209,7 +209,7 @@ catclaw agent set-model my-agent claude/opus-4-8
 catclaw agent set-model my-codex-agent codex/gpt-5.5
 
 # Global defaults
-catclaw config set default_model claude/sonnet-4-6
+catclaw config set default_model claude/sonnet-5
 catclaw config set default_fallback_model claude/haiku-4-5
 
 # Background diary/memory analysis (catclaw-internal — runs independent of agents)
