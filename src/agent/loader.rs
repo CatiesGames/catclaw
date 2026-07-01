@@ -1398,7 +1398,7 @@ daemon mode won't inherit interactive shell env.
 | `session_archive_timeout_hours` | 168 | Hours before archival |
 | `session_retention_days` | 30 | Days to keep archived sessions (rows + transcripts) before permanent deletion; 0 = never. Pruned in the 6-hourly cleanup pass — requires restart |
 | `streaming` | true | Streaming mode (true/false) |
-| `default_model` | — | Canonical `provider/model` (e.g. `claude/sonnet-5`, `codex/gpt-5.5`). Empty string clears. Legacy un-prefixed values auto-migrate to `claude/<old>`. |
+| `default_model` | — | `provider/model` (e.g. `claude/sonnet-5`, `codex/gpt-5.5`). Aliases + full IDs accepted; normalised on save to `provider/full_id` (`claude/claude-sonnet-5`). Empty string clears. |
 | `default_fallback_model` | — | Same format. Used when primary returns overload/rate-limit errors. |
 | `diary_model` | `claude/haiku-4-5` | Model for catclaw-internal diary generation + memory fact extraction. Independent from any agent's model. Hot-reloads. |
 | `diary_turn_threshold` | 10 | Rolling diary trigger: write a diary every N user turns inside a session (in addition to 30-min idle / `/new` / scheduled-task triggers). 0 disables rolling. Hot-reloads. |
@@ -1527,8 +1527,14 @@ All model strings use the canonical `provider/model` form — see the
 **Agents > Runtime: claude vs codex** section below for the two
 runtimes catclaw drives and the available models in each.
 
-Common short aliases: `claude/opus` → `claude/opus-4-8`,
-`claude/haiku` → `claude/haiku-4-5`.
+You can type short aliases (`opus`, `claude/opus`, `claude/sonnet-5`)
+or full IDs — they all resolve. Whatever you type is **normalised on
+save to `provider/full_id`** (the exact `--model` argument), so
+`claude/sonnet-5` and `sonnet` both persist as `claude/claude-sonnet-5`
+in catclaw.toml. That's the form the TUI model picker shows and stores,
+so the displayed value always matches the stored value. Aliases:
+`claude/opus` → `claude/claude-opus-4-8`, `claude/sonnet` →
+`claude/claude-sonnet-5`, `claude/haiku` → `claude/claude-haiku-4-5-20251001`.
 
 ### Setting models
 

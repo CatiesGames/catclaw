@@ -12,6 +12,24 @@ use super::{Action, Component};
 use crate::config::Config;
 use crate::ws_client::GatewayClient;
 
+/// Canonical `provider/full_id` model completions derived from `KNOWN_MODELS`,
+/// deduped by full_id (short aliases like `opus` collapse into their versioned
+/// entry). Single source so config completions never drift from the catalog.
+fn catalog_model_completions() -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    crate::agent::models::KNOWN_MODELS
+        .iter()
+        .filter_map(|e| {
+            let id = format!("{}/{}", e.provider.as_str(), e.full_id);
+            if seen.insert(id.clone()) {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum ConfigMode {
     Normal,
@@ -526,30 +544,22 @@ impl ConfigPanel {
             return vec!["true".into(), "false".into()];
         }
         if key == "default_model" || key == "default_fallback_model" || key == "heartbeat.model" {
-            // Common picks from both providers. The gateway accepts any
-            // parseable `provider/model` so users can type their own value;
-            // these are completion hints. Empty string clears the key.
-            return vec![
-                "claude/opus-4-8".into(),
-                "claude/opus-4-7".into(),
-                "claude/sonnet-5".into(),
-                "claude/sonnet-4-6".into(),
-                "claude/haiku-4-5".into(),
-                "codex/gpt-5.5".into(),
-                "codex/gpt-5.4".into(),
-                "codex/gpt-5.4-mini".into(),
-                "codex/o3".into(),
-                "".into(),
-            ];
+            // Derived from KNOWN_MODELS so the list never drifts. Ids are the
+            // canonical `provider/full_id` form (the exact stored value). The
+            // gateway accepts any parseable `provider/model` so users can type
+            // their own value; these are hints. Empty string clears the key.
+            let mut out = catalog_model_completions();
+            out.push("".into());
+            return out;
         }
         if key == "diary_model" {
             // diary_model is catclaw-internal — cheap tier picks make sense.
             // codex/gpt-5.4-mini is the cheapest codex tier available on a
             // ChatGPT-account login (gpt-5.5-mini is NOT — see models.rs).
             return vec![
-                "claude/haiku-4-5".into(),
+                "claude/claude-haiku-4-5-20251001".into(),
                 "codex/gpt-5.4-mini".into(),
-                "claude/sonnet-4-6".into(),
+                "claude/claude-sonnet-4-6".into(),
                 "".into(),
             ];
         }

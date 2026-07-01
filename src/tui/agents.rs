@@ -81,17 +81,24 @@ enum SkillInputMode {
 }
 
 /// Model picker entries displayed in the agent editor. Sourced from
-/// `agent/models.rs::KNOWN_MODELS` so the catalog stays in one place; the
-/// `id` shown / written into tools.toml is always the canonical
-/// `provider/alias` wire form (e.g. `claude/opus-4-7`, `codex/gpt-5.5`).
+/// `agent/models.rs::KNOWN_MODELS` so the catalog stays in one place. The
+/// `id` shown / stored is the canonical `provider/full_id` form
+/// (e.g. `claude/claude-opus-4-8`, `codex/gpt-5.5`) — the exact `--model`
+/// argument the CLI receives, matching what config migration + set_model
+/// persist so the picker always highlights the current model. De-duplicated
+/// by full_id because several entries share one full_id via short aliases
+/// (`opus` + `opus-4-8` → `claude-opus-4-8`).
 fn known_models_for_picker() -> Vec<(String, &'static str)> {
+    let mut seen = std::collections::HashSet::new();
     crate::agent::models::KNOWN_MODELS
         .iter()
-        .map(|e| {
-            (
-                format!("{}/{}", e.provider.as_str(), e.alias),
-                e.description,
-            )
+        .filter_map(|e| {
+            let id = format!("{}/{}", e.provider.as_str(), e.full_id);
+            if seen.insert(id.clone()) {
+                Some((id, e.description))
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -786,13 +793,30 @@ impl AgentsPanel {
 
     fn save_model_edit(&mut self) {
         let value = self.model_edit_buffer.trim().to_string();
+
+        // Non-empty input must parse; canonicalize to `provider/full_id` so the
+        // optimistic local value matches what the gateway stores (and the
+        // picker will highlight on next open). Reject a partially-typed
+        // `claude/` here instead of firing a doomed WS request — this is the
+        // "empty model part" error users hit when Enter fired mid-edit.
+        let new_value = if value.is_empty() {
+            None
+        } else {
+            match crate::agent::models::canonicalize_model_string(&value) {
+                Ok(canon) => Some(canon),
+                Err(e) => {
+                    self.status_msg = Some(format!("Invalid model: {} — not saved", e));
+                    // Stay in the editor so the user can fix it.
+                    return;
+                }
+            }
+        };
+
         let Some(agent) = self.agents.get_mut(self.selected) else {
             self.mode = Mode::Normal;
             return;
         };
         let agent_id = agent.id.clone();
-
-        let new_value = if value.is_empty() { None } else { Some(value.clone()) };
         let is_model = self.model_edit_field == 0;
 
         if is_model {
@@ -802,7 +826,7 @@ impl AgentsPanel {
         }
 
         let field_name = if is_model { "model" } else { "fallback_model" };
-        let display = if value.is_empty() { "(cleared)" } else { &value };
+        let display = new_value.as_deref().unwrap_or("(cleared)");
         self.status_msg = Some(format!("{} {} = {}", agent_id, field_name, display));
 
         // Gateway is the authoritative writer; send the change via WS.

@@ -25,11 +25,30 @@ pub struct ProviderModel {
 }
 
 impl ProviderModel {
-    /// Canonical wire form: `provider/model`. Stable across save/load cycles.
-    #[allow(dead_code)] // used by C.2 migration + C.6 TUI rendering
-    pub fn to_wire_string(&self) -> String {
+    /// Canonical **stored** form used across catclaw.toml, WS, and the TUI:
+    /// `provider/full_id` — where `full_id` is the exact model argument the
+    /// underlying CLI receives (e.g. `claude/claude-sonnet-5`,
+    /// `codex/gpt-5.5`). `model` is always the full upstream ID (aliases are
+    /// resolved during parsing), so this never contains a short alias.
+    ///
+    /// This is the single canonical form: config migration, `agents.set_model`,
+    /// and `sessions.set_model` all normalise through it so the stored value
+    /// always equals `provider/<the --model argument>`, with no alias
+    /// indirection. The TUI model picker builds its ids the same way
+    /// (`provider/full_id`), so the picker always highlights the current model
+    /// and the displayed value matches what's stored.
+    pub fn to_canonical_string(&self) -> String {
         format!("{}/{}", self.provider.as_str(), self.model)
     }
+}
+
+/// Normalise any accepted model string into the canonical `provider/full_id`
+/// stored form (see [`ProviderModel::to_canonical_string`]). Returns `Err`
+/// for unparseable input so callers can reject before persisting — this is
+/// what stops a partially-typed `claude/` (empty model part) from being saved
+/// verbatim. Idempotent: canonical input maps to itself.
+pub fn canonicalize_model_string(s: &str) -> Result<String, String> {
+    parse_model_string(s).map(|pm| pm.to_canonical_string())
 }
 
 /// Known model catalog. Aliases (shorter names that resolve to a full ID) are
@@ -139,12 +158,14 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
     },
 ];
 
-/// Canonical default model (wire form) for a runtime. Used when switching an
-/// agent's runtime: the prior `claude/*` model can't be carried over to a codex
-/// runtime (and vice versa), so we reset to the runtime's flagship default.
+/// Canonical default model (`provider/full_id` wire form) for a runtime. Used
+/// when switching an agent's runtime: the prior `claude/*` model can't be
+/// carried over to a codex runtime (and vice versa), so we reset to the
+/// runtime's flagship default. Returned in canonical form so callers that write
+/// it straight into `agent.model` store the same value set_model would produce.
 pub fn default_model_for_runtime(runtime: Runtime) -> &'static str {
     match runtime {
-        Runtime::Claude => "claude/opus-4-8",
+        Runtime::Claude => "claude/claude-opus-4-8",
         Runtime::Codex => "codex/gpt-5.5",
     }
 }
@@ -252,5 +273,70 @@ pub fn resolve_model(name: &str) -> String {
     match parse_model_string(name) {
         Ok(pm) => pm.model,
         Err(_) => name.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every accepted input form must canonicalize to the same stored
+    /// `provider/full_id` value — the exact `--model` argument, no alias
+    /// indirection. This is what keeps catclaw.toml, the WS handlers, and the
+    /// TUI picker in sync (the bug: stored `claude/claude-sonnet-4-6` vs picker
+    /// `claude/sonnet-4-6` never matched).
+    #[test]
+    fn canonical_form_is_provider_full_id() {
+        let cases = [
+            ("sonnet", "claude/claude-sonnet-5"),
+            ("claude/sonnet-5", "claude/claude-sonnet-5"),
+            ("claude/sonnet", "claude/claude-sonnet-5"),
+            ("claude-sonnet-5", "claude/claude-sonnet-5"),
+            ("claude/claude-sonnet-5", "claude/claude-sonnet-5"), // idempotent
+            ("claude/sonnet-4-6", "claude/claude-sonnet-4-6"),
+            ("opus", "claude/claude-opus-4-8"),
+            ("claude/opus", "claude/claude-opus-4-8"),
+            ("codex/gpt-5.5", "codex/gpt-5.5"),
+            ("gpt-5.5", "codex/gpt-5.5"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(
+                canonicalize_model_string(input).unwrap(),
+                want,
+                "canonicalize({input:?})"
+            );
+        }
+    }
+
+    /// A partially-typed `claude/` (empty model part) must be rejected, not
+    /// stored verbatim — this was the "invalid model string: ... has empty
+    /// model part" error surfaced from the TUI when Enter saved the buffer
+    /// mid-edit.
+    #[test]
+    fn empty_model_part_is_rejected() {
+        assert!(canonicalize_model_string("claude/").is_err());
+        assert!(canonicalize_model_string("codex/").is_err());
+        assert!(canonicalize_model_string("").is_err());
+    }
+
+    /// Unknown / self-hosted ids (no alias in the catalog) pass through in
+    /// `provider/<verbatim>` form so vLLM-style custom models still work.
+    #[test]
+    fn unknown_model_passes_through() {
+        assert_eq!(
+            canonicalize_model_string("claude/Qwen3.6-35B").unwrap(),
+            "claude/Qwen3.6-35B"
+        );
+    }
+
+    /// The runtime reset default must already be canonical so callers that
+    /// write it straight into `agent.model` store the same value set_model
+    /// would produce (no post-hoc migration needed).
+    #[test]
+    fn default_model_for_runtime_is_canonical() {
+        for rt in [Runtime::Claude, Runtime::Codex] {
+            let d = default_model_for_runtime(rt);
+            assert_eq!(canonicalize_model_string(d).unwrap(), d, "runtime {rt:?}");
+        }
     }
 }

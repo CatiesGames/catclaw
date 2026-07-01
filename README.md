@@ -221,8 +221,13 @@ The provider must match the agent's runtime — `claude/*` for Claude agents,
 `codex/*` for Codex agents. Mismatched combinations are rejected with a
 clear error.
 
-Legacy un-prefixed values (`opus`, `claude-opus-4-7`) auto-migrate to the
-canonical form on first load after upgrade.
+Aliases and full IDs are both accepted as input, but every value is
+**normalised on save to the canonical `provider/full_id` form** — the exact
+`--model` argument the CLI receives. So `claude/sonnet-5`, `sonnet`, and
+`claude-sonnet-5` all persist as `claude/claude-sonnet-5`. This is the form
+stored in `catclaw.toml` and shown in the TUI model picker, so the displayed
+value always matches the stored value. Legacy un-prefixed values (`opus`,
+`claude-opus-4-7`) auto-migrate to this form on first load after upgrade.
 
 #### Check subscription status
 
@@ -491,7 +496,7 @@ session_archive_timeout_hours = 168
 session_retention_days = 30         # delete archived sessions + transcripts after N days (0 = never)
 port = 21130                        # WS + MCP on single port
 streaming = true
-default_model = "claude/opus-4-8"   # canonical provider/model form; codex/* and aliases like claude/opus also work
+default_model = "claude/claude-opus-4-8"   # canonical provider/full_id form (aliases like claude/opus + codex/* also accepted, normalised to this on save)
 # diary_model = "claude/haiku-4-5" # catclaw-internal analysis model (defaults to claude/haiku-4-5)
 diary_turn_threshold = 10           # rolling diary: write every N user turns (0 = disabled; only idle/30-min triggers fire)
 diary_max_concurrent = 1            # max parallel diary extractions — keep at 1 unless host has headroom

@@ -770,9 +770,12 @@ fn handle_sessions_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResp
     // model: string to set, null/absent to clear
     let model = req.params.get("model").and_then(|v| v.as_str());
 
-    // C.3 — Validate provider/runtime alignment on the session's runtime.
-    // Pulls runtime from session metadata (defaults to Claude for legacy
-    // pre-v0.50 sessions that predate the metadata field).
+    // C.3 — Validate provider/runtime alignment on the session's runtime, and
+    // canonicalize the accepted value to `provider/full_id` so the stored
+    // session override matches what the TUI picker offers (same normalisation
+    // as agents.set_model). Pulls runtime from session metadata (defaults to
+    // Claude for legacy pre-v0.50 sessions that predate the metadata field).
+    let mut canonical_model: Option<String> = None;
     if let Some(m) = model {
         if !m.is_empty() {
             let session_runtime = gw
@@ -783,7 +786,9 @@ fn handle_sessions_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResp
                 .and_then(|row| row.runtime_from_metadata())
                 .unwrap_or(crate::agent::Runtime::Claude);
             match crate::agent::models::parse_model_string(m) {
-                Ok(pm) if pm.provider == session_runtime => {}
+                Ok(pm) if pm.provider == session_runtime => {
+                    canonical_model = Some(pm.to_canonical_string());
+                }
                 Ok(pm) => {
                     return WsResponse::err(
                         req.id,
@@ -804,7 +809,13 @@ fn handle_sessions_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResp
         }
     }
 
-    match gw.session_manager.set_session_model(key, model) {
+    // Empty string / absent → clear (None); otherwise the canonical form.
+    let store_model = if model.is_some_and(|m| m.is_empty()) {
+        None
+    } else {
+        canonical_model.as_deref().or(model)
+    };
+    match gw.session_manager.set_session_model(key, store_model) {
         Ok(()) => {
             // Codex thread-binds `model` at thread start (PoC verified — see
             // codex-runtime-plan.md). Mid-thread changes only take effect on
@@ -818,7 +829,7 @@ fn handle_sessions_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsResp
                 .and_then(|row| row.runtime_from_metadata())
                 .map(|r| matches!(r, crate::agent::Runtime::Codex))
                 .unwrap_or(false);
-            let mut result = json!({ "model": model });
+            let mut result = json!({ "model": store_model });
             if is_codex {
                 result["note"] = json!(
                     "codex session: model change applies to NEW threads only. \
@@ -1356,10 +1367,22 @@ fn handle_agents_set_model(req: &WsRequest, gw: &Arc<GatewayHandle>) -> WsRespon
         return err;
     }
 
-    if let Some(m) = model_change.clone() {
+    // Store the canonical `provider/full_id` form, not the raw input — so
+    // `claude/sonnet-5`, `sonnet`, and `claude-sonnet-5` all persist as the
+    // same `claude/claude-sonnet-5`, matching what the TUI picker offers.
+    // Validation above already guaranteed parseability for any set (Some(Some))
+    // value, so canonicalize can't fail here; clears (Some(None)) pass through.
+    let canonicalize = |change: Option<Option<String>>| -> Option<Option<String>> {
+        change.map(|inner| {
+            inner.map(|s| {
+                crate::agent::models::canonicalize_model_string(&s).unwrap_or(s)
+            })
+        })
+    };
+    if let Some(m) = canonicalize(model_change.clone()) {
         agent_cfg.model = m;
     }
-    if let Some(fb) = fallback_change.clone() {
+    if let Some(fb) = canonicalize(fallback_change.clone()) {
         agent_cfg.fallback_model = fb;
     }
 
