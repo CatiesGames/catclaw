@@ -1,5 +1,23 @@
 # CatClaw Implementation Progress
 
+## Review: 新增 Opus 4.8 + Sonnet 5 模型支援 — 2026-07-01
+- [x] `src/agent/models.rs` — `KNOWN_MODELS` 新增 `sonnet-5` → `claude-sonnet-5`;短別名 `sonnet` 改指向 sonnet-5;`sonnet-4-6` 保留為 previous balanced。Opus 4.8 本已存在。
+- [x] `src/tui/sessions.rs` — `/model` 補全加入 `claude/sonnet-5`。
+- [x] `src/tui/config_panel.rs` — `default_model`/`fallback`/`heartbeat.model` 補全加入 `claude/sonnet-5`。
+- [x] `src/agent/loader.rs` (`SKILL_CATCLAW`) — runtime 模型清單、default_model 範例、config key 表格更新為 sonnet-5。
+- [x] `README.md` — default_model 範例更新為 `claude/sonnet-5`。
+- [x] `cargo check` + `cargo clippy -- -D warnings` 皆零警告通過。
+
+Result: model catalog 為唯一真理源,`parse_model_string` 與 config 遷移邏輯由 `KNOWN_MODELS` 驅動,新別名(`sonnet` / `claude/sonnet-5` / `claude/sonnet` / bare `claude-sonnet-5`)自動全部可解析,無需改動解析或遷移程式碼。
+
+## Review: Codex Runtime Image Generation Auto-Enable — 2026-07-01
+- [x] Confirmed codex runtime args unconditionally inject `-c features.image_generation=true` in `src/agent/codex_args.rs`.
+- [x] Confirmed codex-only system prompt guidance tells agents they have `image_gen` + `imagegen` and must send generated files via platform `upload_file`.
+- [x] Confirmed README documents codex-only automatic image generation and Claude-runtime limitation.
+- [x] Verified with `cargo check`.
+
+Result: Switching an agent to `runtime = "codex"` automatically enables image generation capability. No per-agent flag or extra CatClaw skill install is required; the remaining requirement is a valid `codex login` / ChatGPT entitlement on the host.
+
 ## Phase 2: Gateway WebSocket 架構重構 — COMPLETE
 - [x] 1. `Cargo.toml` — 加 `tokio-tungstenite = "0.24"`
 - [x] 2. `src/config.rs` — GeneralConfig 加 `ws_port: u16` (預設 21130)

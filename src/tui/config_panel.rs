@@ -532,6 +532,7 @@ impl ConfigPanel {
             return vec![
                 "claude/opus-4-8".into(),
                 "claude/opus-4-7".into(),
+                "claude/sonnet-5".into(),
                 "claude/sonnet-4-6".into(),
                 "claude/haiku-4-5".into(),
                 "codex/gpt-5.5".into(),

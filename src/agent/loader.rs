@@ -1398,7 +1398,7 @@ daemon mode won't inherit interactive shell env.
 | `session_archive_timeout_hours` | 168 | Hours before archival |
 | `session_retention_days` | 30 | Days to keep archived sessions (rows + transcripts) before permanent deletion; 0 = never. Pruned in the 6-hourly cleanup pass — requires restart |
 | `streaming` | true | Streaming mode (true/false) |
-| `default_model` | — | Canonical `provider/model` (e.g. `claude/sonnet-4-6`, `codex/gpt-5.5`). Empty string clears. Legacy un-prefixed values auto-migrate to `claude/<old>`. |
+| `default_model` | — | Canonical `provider/model` (e.g. `claude/sonnet-5`, `codex/gpt-5.5`). Empty string clears. Legacy un-prefixed values auto-migrate to `claude/<old>`. |
 | `default_fallback_model` | — | Same format. Used when primary returns overload/rate-limit errors. |
 | `diary_model` | `claude/haiku-4-5` | Model for catclaw-internal diary generation + memory fact extraction. Independent from any agent's model. Hot-reloads. |
 | `diary_turn_threshold` | 10 | Rolling diary trigger: write a diary every N user turns inside a session (in addition to 30-min idle / `/new` / scheduled-task triggers). 0 disables rolling. Hot-reloads. |
@@ -1538,7 +1538,7 @@ catclaw agent set-model my-agent claude/opus-4-8
 catclaw agent set-model my-codex-agent codex/gpt-5.5
 
 # Global default (used by agents that don't override)
-catclaw config set default_model claude/sonnet-4-6
+catclaw config set default_model claude/sonnet-5
 catclaw config set default_fallback_model claude/haiku-4-5
 ```
 
@@ -1598,7 +1598,7 @@ any agent. Default: `claude/haiku-4-5`. Change with:
 catclaw config set diary_model codex/gpt-5.4-mini
 
 # Or pick a higher tier for richer summaries:
-catclaw config set diary_model claude/sonnet-4-6
+catclaw config set diary_model claude/sonnet-5
 
 # Reset to default:
 catclaw config set diary_model ""
@@ -1680,8 +1680,8 @@ claude/opus-4-8` etc.):
 
 - **claude** (default) — `claude -p` subprocesses with PreToolUse hook +
   `--mcp-config` for catclaw's MCP server. Models: `claude/opus-4-8`
-  (flagship), `claude/sonnet-4-6` (balanced), `claude/haiku-4-5`
-  (fastest/cheapest).
+  (flagship), `claude/sonnet-5` (balanced, near-Opus coding/agentic),
+  `claude/haiku-4-5` (fastest/cheapest).
 - **codex** — `codex exec` subprocesses with isolated `CODEX_HOME` per
   agent. Approval gate runs inside catclaw's MCP server (codex's
   user-level hooks don't fire in exec mode). Models: `codex/gpt-5.5`

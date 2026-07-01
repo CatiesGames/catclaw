@@ -68,9 +68,15 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
     },
     ModelEntry {
         provider: Runtime::Claude,
+        alias: "sonnet-5",
+        full_id: "claude-sonnet-5",
+        description: "Sonnet 5 — newest balanced, near-Opus coding/agentic",
+    },
+    ModelEntry {
+        provider: Runtime::Claude,
         alias: "sonnet-4-6",
         full_id: "claude-sonnet-4-6",
-        description: "Sonnet 4.6 — balanced",
+        description: "Sonnet 4.6 — previous balanced",
     },
     ModelEntry {
         provider: Runtime::Claude,
@@ -89,8 +95,8 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
     ModelEntry {
         provider: Runtime::Claude,
         alias: "sonnet",
-        full_id: "claude-sonnet-4-6",
-        description: "alias → claude/sonnet-4-6",
+        full_id: "claude-sonnet-5",
+        description: "alias → claude/sonnet-5",
     },
     ModelEntry {
         provider: Runtime::Claude,
