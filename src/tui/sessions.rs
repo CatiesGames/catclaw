@@ -23,25 +23,29 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show available commands"),
 ];
 
-/// Completion hints for the `/model` command. Includes both providers' common
-/// aliases so the user gets dropdown options regardless of session runtime —
-/// the gateway rejects provider/runtime mismatches with a clear error.
-const MODEL_COMPLETIONS: &[&str] = &[
-    "claude/opus-4-8",
-    "claude/opus-4-7",
-    "claude/opus",
-    "claude/sonnet-5",
-    "claude/sonnet-4-6",
-    "claude/sonnet",
-    "claude/haiku-4-5",
-    "claude/haiku",
-    "codex/gpt-5.5",
-    "codex/gpt-5.4",
-    "codex/gpt-5.4-mini",
-    "codex/o3",
-    "clear",
-    "default",
-];
+/// Completion hints for the `/model` command, derived from `KNOWN_MODELS` so
+/// the list never drifts from the catalog. Ids are the canonical
+/// `provider/full_id` form (e.g. `claude/claude-opus-4-8`) — the exact stored
+/// value — deduped by full_id, plus the `clear` / `default` specials. Both
+/// providers are listed regardless of session runtime; the gateway rejects
+/// provider/runtime mismatches with a clear error.
+fn model_completions() -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<String> = crate::agent::models::KNOWN_MODELS
+        .iter()
+        .filter_map(|e| {
+            let id = format!("{}/{}", e.provider.as_str(), e.full_id);
+            if seen.insert(id.clone()) {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .collect();
+    out.push("clear".to_string());
+    out.push("default".to_string());
+    out
+}
 
 /// Viewing mode
 enum Mode {
@@ -656,13 +660,12 @@ impl SessionsPanel {
                 .unwrap_or_else(|| "(default)".to_string());
 
             let mut info = format!("Current model: {}\n\nAvailable models:", current);
+            let mut seen = std::collections::HashSet::new();
             for entry in KNOWN_MODELS {
-                info.push_str(&format!(
-                    "\n  {}/{} — {}",
-                    entry.provider.as_str(),
-                    entry.alias,
-                    entry.description
-                ));
+                let id = format!("{}/{}", entry.provider.as_str(), entry.full_id);
+                if seen.insert(id.clone()) {
+                    info.push_str(&format!("\n  {} — {}", id, entry.description));
+                }
             }
             info.push_str("\n\nUse /model <name> to switch. /model clear to reset.");
 
@@ -676,11 +679,26 @@ impl SessionsPanel {
             return;
         }
 
-        // "clear" removes the override
+        // "clear" removes the override; otherwise canonicalize to the stored
+        // `provider/full_id` form so local state matches what the gateway
+        // persists (and reject unparseable input like a bare `claude/` here
+        // rather than sending a doomed request).
         let model_value = if arg.eq_ignore_ascii_case("clear") || arg.eq_ignore_ascii_case("default") {
             None
         } else {
-            Some(models::resolve_model(arg))
+            match models::canonicalize_model_string(arg) {
+                Ok(canon) => Some(canon),
+                Err(e) => {
+                    self.messages.push(ChatMessage {
+                        sender: "system".to_string(),
+                        text: format!("Invalid model '{}': {}", arg, e),
+                        is_user: false,
+                        timestamp: now.format("%H:%M").to_string(),
+                        streaming: false,
+                    });
+                    return;
+                }
+            }
         };
 
         let display = model_value.as_deref()
@@ -750,9 +768,9 @@ impl SessionsPanel {
         if text.starts_with("/model ") {
             // Sub-completions for model argument
             let arg = text.strip_prefix("/model ").unwrap().to_lowercase();
-            for &m in MODEL_COMPLETIONS {
+            for m in model_completions() {
                 if arg.is_empty() || m.starts_with(&arg) {
-                    self.slash_completions.push(m.to_string());
+                    self.slash_completions.push(m);
                 }
             }
         } else if !text.contains(' ') {

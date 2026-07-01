@@ -711,13 +711,14 @@ impl Config {
             }
         }
 
-        // Migration: upgrade un-prefixed model strings to canonical
-        // `provider/model` form. Pre-v0.50 catclaw.toml stored model values
-        // as bare aliases ("opus") or full IDs ("claude-opus-4-7"); the
-        // model picker, runtime/provider validation, and subscription UI
-        // all expect the prefixed form going forward. We re-canonicalise
-        // through parse_model_string and write back via to_wire_string —
-        // idempotent on already-prefixed values.
+        // Migration: normalise every model string to the canonical
+        // `provider/full_id` form (see ProviderModel::to_canonical_string).
+        // Pre-v0.50 catclaw.toml stored bare aliases ("opus") or full IDs
+        // ("claude-opus-4-7"); we re-canonicalise through parse_model_string +
+        // to_canonical_string so the stored value is always `provider/<the id
+        // Claude Code / codex actually receives>` (e.g. claude/claude-sonnet-5)
+        // — the exact `--model` argument, no alias indirection. Idempotent on
+        // already-canonical values.
         let migrate_model = |val: &mut Option<String>, label: &str| -> bool {
             let Some(raw) = val.as_ref() else {
                 return false;
@@ -725,7 +726,6 @@ impl Config {
             if raw.is_empty() {
                 return false;
             }
-            // Already in `provider/model` form? Skip — but normalise alias.
             let parsed = match crate::agent::models::parse_model_string(raw) {
                 Ok(pm) => pm,
                 Err(e) => {
@@ -739,7 +739,7 @@ impl Config {
                     return false;
                 }
             };
-            let canonical = parsed.to_wire_string();
+            let canonical = parsed.to_canonical_string();
             if canonical == *raw {
                 return false;
             }
@@ -964,22 +964,42 @@ impl Config {
                 Ok(false)
             }
             "default_model" => {
-                self.general.default_model = if value.is_empty() { None } else { Some(value.to_string()) };
+                // Canonicalize to `provider/full_id` so the stored value is the
+                // exact --model argument and matches the TUI picker (also
+                // rejects unparseable input like a bare `claude/`).
+                self.general.default_model = if value.is_empty() {
+                    None
+                } else {
+                    Some(
+                        crate::agent::models::canonicalize_model_string(value)
+                            .map_err(|e| CatClawError::Config(format!("invalid default_model: {}", e)))?,
+                    )
+                };
                 Ok(false)
             }
             "default_fallback_model" => {
-                self.general.default_fallback_model = if value.is_empty() { None } else { Some(value.to_string()) };
+                self.general.default_fallback_model = if value.is_empty() {
+                    None
+                } else {
+                    Some(
+                        crate::agent::models::canonicalize_model_string(value)
+                            .map_err(|e| CatClawError::Config(format!("invalid default_fallback_model: {}", e)))?,
+                    )
+                };
                 Ok(false)
             }
             "diary_model" => {
-                // Validate as a parseable provider/model string before
-                // accepting — `config.set diary_model claude/garbage` should
-                // fail fast, not at the next diary tick.
-                let cleaned = if value.is_empty() { None } else { Some(value.to_string()) };
-                if let Some(ref v) = cleaned {
-                    crate::agent::models::parse_model_string(v)
-                        .map_err(|e| CatClawError::Config(format!("invalid diary_model: {}", e)))?;
-                }
+                // Canonicalize + validate before accepting — `config.set
+                // diary_model claude/garbage` should fail fast, not at the next
+                // diary tick, and the stored value is the canonical form.
+                let cleaned = if value.is_empty() {
+                    None
+                } else {
+                    Some(
+                        crate::agent::models::canonicalize_model_string(value)
+                            .map_err(|e| CatClawError::Config(format!("invalid diary_model: {}", e)))?,
+                    )
+                };
                 self.general.diary_model = cleaned;
                 // Hot-reload: re-install the snapshot so the next diary tick
                 // uses the new model without a gateway restart.
@@ -1088,7 +1108,14 @@ impl Config {
                 Ok(true)
             }
             "heartbeat.model" => {
-                let new_model = if value.is_empty() { None } else { Some(value.to_string()) };
+                let new_model = if value.is_empty() {
+                    None
+                } else {
+                    Some(
+                        crate::agent::models::canonicalize_model_string(value)
+                            .map_err(|e| CatClawError::Config(format!("invalid heartbeat.model: {}", e)))?,
+                    )
+                };
                 if let Some(h) = &mut self.heartbeat {
                     h.model = new_model;
                 } else {
