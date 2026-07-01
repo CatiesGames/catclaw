@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.55.0](https://github.com/CatiesGames/catclaw/compare/v0.54.4...v0.55.0) (2026-07-01)
+
+
+### Features
+
+* **models:** 新增 Sonnet 5 支援,確認 Opus 4.8 已完整支援 ([#129](https://github.com/CatiesGames/catclaw/issues/129)) ([f461b45](https://github.com/CatiesGames/catclaw/commit/f461b455360c10ce7bb9212ee13bb851ee7993ee))
+
 ## [0.54.4](https://github.com/CatiesGames/catclaw/compare/v0.54.3...v0.54.4) (2026-06-30)
 
 
