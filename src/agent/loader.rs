@@ -987,7 +987,7 @@ CatClaw treats Discord DMs and guild messages **asymmetrically**:
 You have access to Discord tools provided by CatClaw via MCP. Use them directly as tool calls:
 
 **Messages:**
-- `discord_get_messages` — Read messages (params: channel_id, limit?)
+- `discord_get_messages` — Read messages (params: channel_id, limit?). Each message includes an `attachments` array (filename, url, content_type, size) when present. **The `url` is a signed Discord CDN link that expires ~24h after the message was sent** — if it's already expired, you'll only get filename/content_type/size, not the actual file content. There is no built-in way to refresh an expired attachment URL yet; ask the sender to re-send if you need the file and the link has gone stale.
 - `discord_send_message` — Send message (params: channel_id, text, reply_to_message_id? to reply to a specific message). To post in a forum post or thread, pass the post/thread id as channel_id.
 - `discord_edit_message` — Edit bot's message (params: channel_id, message_id, text)
 - `discord_delete_message` — Delete message (params: channel_id, message_id)

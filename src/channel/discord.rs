@@ -1209,6 +1209,7 @@ impl ChannelAdapter for DiscordAdapter {
                         "content": m.content,
                         "timestamp": m.timestamp.to_string(),
                         "pinned": m.pinned,
+                        "attachments": attachments_to_json(&m.attachments),
                     }))
                     .collect();
                 Ok(serde_json::json!(result))
@@ -1308,6 +1309,7 @@ impl ChannelAdapter for DiscordAdapter {
                     "author": m.author.name,
                     "content": m.content,
                     "timestamp": m.timestamp.to_string(),
+                    "attachments": attachments_to_json(&m.attachments),
                 })).collect();
                 Ok(serde_json::json!(result))
             }
@@ -2048,6 +2050,21 @@ impl ChannelAdapter for DiscordAdapter {
 }
 
 // ── Helper functions ──────────────────────────────────────────────────
+
+/// Serializes serenity attachments for MCP responses. `attachment.url` is a
+/// signed Discord CDN URL (`?ex=...&is=...&hm=...`) that expires roughly 24h
+/// after the message was sent; there is no refresh built in here yet.
+fn attachments_to_json(attachments: &[serenity::all::Attachment]) -> Vec<serde_json::Value> {
+    attachments
+        .iter()
+        .map(|a| serde_json::json!({
+            "filename": a.filename,
+            "url": a.url,
+            "content_type": a.content_type,
+            "size": a.size,
+        }))
+        .collect()
+}
 
 fn parse_u64(params: &serde_json::Value, field: &str) -> Result<u64> {
     params
