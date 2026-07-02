@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.56.0](https://github.com/CatiesGames/catclaw/compare/v0.55.0...v0.56.0) (2026-07-02)
+
+
+### Features
+
+* **discord:** get_messages/list_pins 回傳附件資訊 ([e461860](https://github.com/CatiesGames/catclaw/commit/e4618607e61aa31e77cff8b97e435416933b9dda))
+
+
+### Bug Fixes
+
+* **agent:** 補上「延續待確認動作」規則,修正簡短肯定詞被重新確認的問題 ([5731896](https://github.com/CatiesGames/catclaw/commit/5731896b99b4b12a2aa28f44540a1d42a3c9732d))
+* **models:** 統一模型字串規範形式為 provider/full_id,修正 TUI 顯示與選單不同步 ([#131](https://github.com/CatiesGames/catclaw/issues/131)) ([bbfe04e](https://github.com/CatiesGames/catclaw/commit/bbfe04eef2a87c9f7594a7cb4446a201efc446c0))
+
 ## [0.55.0](https://github.com/CatiesGames/catclaw/compare/v0.54.4...v0.55.0) (2026-07-01)
 
 
