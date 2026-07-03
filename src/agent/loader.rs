@@ -1685,7 +1685,8 @@ CatClaw can drive two CLI runtimes. Models use the canonical
 claude/opus-4-8` etc.):
 
 - **claude** (default) — `claude -p` subprocesses with PreToolUse hook +
-  `--mcp-config` for catclaw's MCP server. Models: `claude/opus-4-8`
+  `--mcp-config` for catclaw's MCP server. Models: `claude/fable-5`
+  (most capable, hardest reasoning/long-horizon), `claude/opus-4-8`
   (flagship), `claude/sonnet-5` (balanced, near-Opus coding/agentic),
   `claude/haiku-4-5` (fastest/cheapest).
 - **codex** — `codex exec` subprocesses with isolated `CODEX_HOME` per
