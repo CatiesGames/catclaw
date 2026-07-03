@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.56.1](https://github.com/CatiesGames/catclaw/compare/v0.56.0...v0.56.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **tui:** 修正模型選單 Enter 無法選取,新增 Fable 5 支援 ([#133](https://github.com/CatiesGames/catclaw/issues/133)) ([0627f01](https://github.com/CatiesGames/catclaw/commit/0627f01bcf46aa3448996296a72d3ab7fa79593c))
+
 ## [0.56.0](https://github.com/CatiesGames/catclaw/compare/v0.55.0...v0.56.0) (2026-07-02)
 
 
