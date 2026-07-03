@@ -69,9 +69,15 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
     // ── Claude ────────────────────────────────────────────────────────────
     ModelEntry {
         provider: Runtime::Claude,
+        alias: "fable-5",
+        full_id: "claude-fable-5",
+        description: "Fable 5 — most capable, 1M context, hardest reasoning/long-horizon",
+    },
+    ModelEntry {
+        provider: Runtime::Claude,
         alias: "opus-4-8",
         full_id: "claude-opus-4-8",
-        description: "Opus 4.8 — newest flagship, 1M context, Fast mode",
+        description: "Opus 4.8 — flagship, 1M context, Fast mode",
     },
     ModelEntry {
         provider: Runtime::Claude,
@@ -105,6 +111,12 @@ pub const KNOWN_MODELS: &[ModelEntry] = &[
     },
     // Short top-level aliases (Claude is the default provider, so `opus`
     // alone — no `claude/` prefix — resolves here for back-compat).
+    ModelEntry {
+        provider: Runtime::Claude,
+        alias: "fable",
+        full_id: "claude-fable-5",
+        description: "alias → claude/fable-5",
+    },
     ModelEntry {
         provider: Runtime::Claude,
         alias: "opus",
@@ -288,6 +300,9 @@ mod tests {
     #[test]
     fn canonical_form_is_provider_full_id() {
         let cases = [
+            ("fable", "claude/claude-fable-5"),
+            ("claude/fable-5", "claude/claude-fable-5"),
+            ("claude-fable-5", "claude/claude-fable-5"),
             ("sonnet", "claude/claude-sonnet-5"),
             ("claude/sonnet-5", "claude/claude-sonnet-5"),
             ("claude/sonnet", "claude/claude-sonnet-5"),

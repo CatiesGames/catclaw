@@ -1397,15 +1397,25 @@ impl Component for AgentsPanel {
                 let model_count = models.len();
                 match event.code {
                     KeyCode::Enter => {
-                        // Enter saves whatever is in the buffer verbatim — this
-                        // is what lets users type a custom/self-hosted model id
-                        // (e.g. `claude/Qwen/Qwen3.6-35B-A3B-FP8` for a vLLM
-                        // backend) that isn't in the completion list. To accept
-                        // a completion instead, use Tab or the arrow keys (which
-                        // overwrite the buffer with the highlighted entry). The
-                        // old behaviour force-accepted a completion whenever the
-                        // buffer didn't exactly match a known id, which silently
-                        // ate any custom input.
+                        // Enter accepts the highlighted dropdown entry, then saves
+                        // in the same press — so ↑↓ to a model + Enter just works
+                        // (the previous behaviour only moved the highlight on ↑↓
+                        // and saved the raw buffer on Enter, so selecting from the
+                        // menu did nothing). Custom/self-hosted ids are still
+                        // supported: type an id the menu doesn't contain and the
+                        // filtered list is empty, so Enter saves the buffer
+                        // verbatim. When the buffer already equals the highlighted
+                        // entry, accepting is a no-op and it just saves.
+                        if model_count > 0 {
+                            let highlighted = models
+                                .get(self.model_completion_idx)
+                                .map(|(id, _)| id.clone());
+                            if let Some(id) = highlighted {
+                                if id != self.model_edit_buffer {
+                                    self.model_edit_buffer = id;
+                                }
+                            }
+                        }
                         self.save_model_edit();
                         Action::None
                     }
@@ -1841,14 +1851,14 @@ impl AgentsPanel {
             ]))
         } else if self.mode == Mode::EditModel {
             Paragraph::new(Line::from(vec![
-                Span::styled(" Enter", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-                Span::styled(" Save  ", Style::default().fg(Theme::OVERLAY1)),
-                Span::styled("↑↓", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
+                Span::styled(" ↑↓", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
                 Span::styled(" Select  ", Style::default().fg(Theme::OVERLAY1)),
+                Span::styled("Enter", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+                Span::styled(" Choose/Save  ", Style::default().fg(Theme::OVERLAY1)),
                 Span::styled("Tab", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-                Span::styled(" Accept  ", Style::default().fg(Theme::OVERLAY1)),
+                Span::styled(" Autocomplete  ", Style::default().fg(Theme::OVERLAY1)),
                 Span::styled("Ctrl+F", Style::default().fg(Theme::MAUVE).add_modifier(Modifier::BOLD)),
-                Span::styled(" Toggle model/fallback  ", Style::default().fg(Theme::OVERLAY1)),
+                Span::styled(" Model/Fallback  ", Style::default().fg(Theme::OVERLAY1)),
                 Span::styled("Esc", Style::default().fg(Theme::OVERLAY0).add_modifier(Modifier::BOLD)),
                 Span::styled(" Cancel", Style::default().fg(Theme::OVERLAY1)),
             ]))
