@@ -866,8 +866,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
                         // Queue an auto-resume so the gateway silently picks up
                         // the session the agent was working in. Best effort —
-                        // if no recent channel session is found, skip.
-                        if resume {
+                        // if no recent channel session is found, skip. Auto-enabled
+                        // without the flag when stdout isn't a TTY (see
+                        // should_auto_resume) so a model that forgets --resume
+                        // doesn't strand its own conversation.
+                        if should_auto_resume(resume) {
                             queue_pending_resume(&cli.config, "update", Some(&version));
                         }
 
@@ -1080,8 +1083,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
                 GatewayCommands::Restart { resume } => {
                     // Queue an auto-resume so the gateway silently picks up the
-                    // session the agent was working in. Best effort.
-                    if resume {
+                    // session the agent was working in. Best effort. Auto-enabled
+                    // without the flag when stdout isn't a TTY (see
+                    // should_auto_resume) so a model that forgets --resume
+                    // doesn't strand its own conversation.
+                    if should_auto_resume(resume) {
                         queue_pending_resume(&cli.config, "restart", None);
                     }
 
@@ -3407,6 +3413,20 @@ const SLACK_APP_MANIFEST: &str = r#"{
     "socket_mode_enabled": true
   }
 }"#;
+
+/// Decide whether to queue an auto-resume, even when the caller didn't pass
+/// `--resume` explicitly. The skill tells the agent to always add `--resume`
+/// when it restarts/updates itself (otherwise the restart kills its own
+/// in-flight turn with no way back — see CLAUDE.md lesson on stuck sessions
+/// after a self-restart), but the model can still forget the flag. A human
+/// running this command has an interactive terminal on stdout; the agent's
+/// Bash tool invocation does not. Treat "no TTY" as "almost certainly the
+/// agent, not a human" and auto-resume anyway — a resume is a no-op (falls
+/// back to "no recent channel session found") when there's nothing to
+/// resume, so this has no downside for the human's manual/scripted use.
+fn should_auto_resume(explicit: bool) -> bool {
+    explicit || !atty::is(atty::Stream::Stdout)
+}
 
 /// Queue an auto-resume for the next gateway startup. Looks up the most
 /// recent channel-originated session and writes it to pending_resume.json.
