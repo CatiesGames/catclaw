@@ -225,9 +225,22 @@ impl CodexHandle {
         &mut self,
         observer: Option<mpsc::UnboundedSender<RuntimeEvent>>,
     ) -> Result<String> {
+        self.wait_for_result_meta(observer).await.map(|(text, _)| text)
+    }
+
+    /// Like [`Self::wait_for_result`], but also reports whether the turn
+    /// contained any real model activity (assistant text or a tool call).
+    /// See [`super::claude::ClaudeHandle::wait_for_result_meta`] for why this
+    /// distinction matters.
+    #[allow(dead_code)]
+    pub async fn wait_for_result_meta(
+        &mut self,
+        observer: Option<mpsc::UnboundedSender<RuntimeEvent>>,
+    ) -> Result<(String, bool)> {
         let mut got_result = false;
         let mut final_text = String::new();
         let mut error_text: Option<String> = None;
+        let mut had_activity = false;
 
         while let Some(event) = self.recv_event().await {
             if let Some(ref tx) = observer {
@@ -239,7 +252,13 @@ impl CodexHandle {
                     // Accumulate text; final value picked up at turn.completed.
                     for block in &content {
                         if let super::claude::ContentBlock::Text(t) = block {
+                            if !t.is_empty() {
+                                had_activity = true;
+                            }
                             final_text.push_str(t);
+                        }
+                        if matches!(block, super::claude::ContentBlock::ToolUse { .. }) {
+                            had_activity = true;
                         }
                     }
                 }
@@ -257,10 +276,15 @@ impl CodexHandle {
                     got_result = true;
                     break;
                 }
-                RuntimeEvent::TextDelta { .. }
-                | RuntimeEvent::ToolUseStart { .. }
-                | RuntimeEvent::ToolResult { .. }
-                | RuntimeEvent::StreamEvent { .. } => {}
+                RuntimeEvent::TextDelta { ref text } => {
+                    if !text.is_empty() {
+                        had_activity = true;
+                    }
+                }
+                RuntimeEvent::ToolUseStart { .. } | RuntimeEvent::ToolResult { .. } => {
+                    had_activity = true;
+                }
+                RuntimeEvent::StreamEvent { .. } => {}
                 RuntimeEvent::Unknown(v) => {
                     // turn.failed shows up here if our parser couldn't pin it
                     // down — pull out the message if present so we surface it.
@@ -283,7 +307,7 @@ impl CodexHandle {
                 "codex process ended without turn.completed".to_string(),
             ));
         }
-        Ok(final_text)
+        Ok((final_text, had_activity))
     }
 
     #[allow(dead_code)]

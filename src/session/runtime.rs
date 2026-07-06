@@ -43,9 +43,23 @@ impl RuntimeHandle {
         &mut self,
         observer: Option<UnboundedSender<RuntimeEvent>>,
     ) -> Result<String> {
+        self.wait_for_result_meta(observer).await.map(|(text, _)| text)
+    }
+
+    /// Like [`Self::wait_for_result`], but also reports whether the turn
+    /// contained any real model activity (assistant text or a tool call) —
+    /// as opposed to only system passthrough events. A `false` here alongside
+    /// an empty result means the runtime never actually engaged with the
+    /// user's message (e.g. its entire turn was consumed relaying a stale
+    /// background-task notification on resume), so the caller should not
+    /// treat it as "already replied via tool use".
+    pub async fn wait_for_result_meta(
+        &mut self,
+        observer: Option<UnboundedSender<RuntimeEvent>>,
+    ) -> Result<(String, bool)> {
         match self {
             RuntimeHandle::Claude(h) => {
-                // ClaudeHandle::wait_for_result takes an Option<UnboundedSender<ClaudeEvent>>.
+                // ClaudeHandle::wait_for_result_meta takes an Option<UnboundedSender<ClaudeEvent>>.
                 // Wrap the caller's RuntimeEvent observer (if any) in a tee that converts
                 // each ClaudeEvent to RuntimeEvent before forwarding.
                 let claude_observer = observer.map(|runtime_tx| {
@@ -60,9 +74,9 @@ impl RuntimeHandle {
                     });
                     claude_tx
                 });
-                h.wait_for_result(claude_observer).await
+                h.wait_for_result_meta(claude_observer).await
             }
-            RuntimeHandle::Codex(h) => h.wait_for_result(observer).await,
+            RuntimeHandle::Codex(h) => h.wait_for_result_meta(observer).await,
         }
     }
 

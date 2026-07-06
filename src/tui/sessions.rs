@@ -102,6 +102,13 @@ pub struct SessionsPanel {
     client: Arc<GatewayClient>,
     sessions: Vec<SessionInfo>,
     selected: usize,
+    /// session_key of the session currently open in chat (List selection or
+    /// active ChatBrowse/Chat). This is the source of truth for "which
+    /// session am I talking to" — `selected` is re-anchored to it on every
+    /// `SessionsLoaded`, since the list is re-sorted by `last_activity_at`
+    /// and can reshuffle after ANY session in the system gets activity, not
+    /// just this one.
+    current_session_key: Option<String>,
     mode: Mode,
     messages: Vec<ChatMessage>,
     chat_scroll: u16,
@@ -164,6 +171,7 @@ impl SessionsPanel {
             client,
             sessions: Vec::new(),
             selected: 0,
+            current_session_key: None,
             mode: Mode::List,
             messages: Vec::new(),
             chat_scroll: 0,
@@ -298,6 +306,7 @@ impl SessionsPanel {
         for (idx, s) in self.sessions.iter().enumerate() {
             if s.origin == "tui" && s.context_id == "default" {
                 self.selected = idx;
+                self.current_session_key = Some(s.session_key.clone());
                 self.load_transcript();
                 self.mode = Mode::ChatBrowse;
                 return;
@@ -425,6 +434,7 @@ impl SessionsPanel {
                 }
                 ChatEvent::NewSession(agent_id) => {
                     let key = format!("catclaw:{}:tui:default", agent_id);
+                    self.current_session_key = Some(key.clone());
                     self.pending_session = Some(PendingSession {
                         agent_id,
                         session_key: key,
@@ -451,6 +461,18 @@ impl SessionsPanel {
                 ChatEvent::SessionsLoaded(sessions) => {
                     let was_empty = self.sessions.is_empty();
                     self.sessions = sessions;
+                    // Re-anchor `selected` to the session the user actually has open —
+                    // the list is sorted by last_activity_at and reshuffles whenever
+                    // ANY session (any agent, any channel) gets activity, so a raw
+                    // index would otherwise silently start pointing at a different
+                    // session (see CLAUDE.md lesson on TUI session drift).
+                    if let Some(key) = &self.current_session_key {
+                        if let Some(idx) = self.sessions.iter().position(|s| &s.session_key == key) {
+                            self.selected = idx;
+                        }
+                        // If not found (archived/deleted elsewhere), leave `selected`
+                        // as-is rather than guessing — the clamp below keeps it in range.
+                    }
                     if self.selected >= self.sessions.len() && !self.sessions.is_empty() {
                         self.selected = self.sessions.len() - 1;
                     }
@@ -636,6 +658,7 @@ impl SessionsPanel {
         // Clear chat state immediately for responsiveness
         self.messages.clear();
         self.pending_session = None;
+        self.current_session_key = None;
         self.loading = false;
         self.chat_scroll = 0;
 
@@ -967,12 +990,14 @@ impl Component for SessionsPanel {
 
                     if pending_at_0 {
                         // Enter pending session directly
+                        self.current_session_key = self.pending_session.as_ref().map(|p| p.session_key.clone());
                         self.mode = Mode::ChatBrowse;
                     } else if !self.sessions.is_empty() {
                         // Adjust selected for DB sessions if pending is prepended
                         if self.selected != session_idx {
                             self.selected = session_idx;
                         }
+                        self.current_session_key = self.sessions.get(self.selected).map(|s| s.session_key.clone());
                         if !self.loading {
                             self.load_transcript();
                         }

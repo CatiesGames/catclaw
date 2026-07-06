@@ -448,58 +448,96 @@ impl SessionManager {
         let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
         self.active_handles.insert(session_key.clone(), kill_tx);
 
-        // Spawn the agent's runtime (claude or codex) with the prompt
-        let spawn_params = crate::session::runtime::SpawnParams {
-            session_id: &session_id,
-            model_override: session_model.as_deref(),
-            mcp_port: self.mcp_port,
-            hook_session_key: Some(&session_key),
-            config_path: self.config_path.as_deref(),
-            mcp_env: &mcp_env,
-            state_db: Some(&self.state_db),
-            is_resume,
-            resume_thread_id: None,
-        };
-        let mut handle = agent.spawn_session(&spawn_params, message, &subprocess_env).await?;
+        // On resume, the CLI can replay a stale notification (e.g. a
+        // background subagent whose completion was never acknowledged) as
+        // the entire turn, ending it with an empty result before the user's
+        // message is ever engaged with. That looks identical to "the reply
+        // already went out via tool use" (also an empty result), so a single
+        // retry — same message, fresh subprocess — is needed to tell them
+        // apart: if the retry also comes back with no activity, we stop and
+        // surface what we have rather than loop forever on a stuck session.
+        let mut attempt = 0;
+        let (response, returned_session_id) = loop {
+            attempt += 1;
+            let spawn_params = crate::session::runtime::SpawnParams {
+                session_id: &session_id,
+                model_override: session_model.as_deref(),
+                mcp_port: self.mcp_port,
+                hook_session_key: Some(&session_key),
+                config_path: self.config_path.as_deref(),
+                mcp_env: &mcp_env,
+                state_db: Some(&self.state_db),
+                is_resume,
+                resume_thread_id: None,
+            };
+            let mut handle = agent.spawn_session(&spawn_params, message, &subprocess_env).await?;
 
-        // Codex: register the MCP lookup row before waiting, so mid-turn catclaw
-        // tool calls (memory_write, etc.) resolve instead of "unknown codex session".
-        self.register_codex_session_pre_wait(&mut handle, agent).await;
+            // Codex: register the MCP lookup row before waiting, so mid-turn catclaw
+            // tool calls (memory_write, etc.) resolve instead of "unknown codex session".
+            self.register_codex_session_pre_wait(&mut handle, agent).await;
 
-        // Wait for result, but also listen for kill signal
-        let response = tokio::select! {
-            result = handle.wait_for_result(event_observer) => {
-                match result {
-                    Ok(r) => Ok(r),
-                    Err(e) if is_resume => {
-                        // Resume failed — likely a stale session. Archive it so
-                        // the next attempt creates a fresh session.
-                        warn!(
-                            session_key = %session_key,
-                            session_id = %session_id,
-                            error = %e,
-                            "resume failed, archiving stale session"
-                        );
-                        self.state_db.update_session_state(&session_key, "archived")?;
-                        self.active_handles.remove(&session_key);
-                        return Err(CatClawError::Claude(
-                            "Session expired — please resend your message.".to_string()
-                        ));
+            // Wait for result, but also listen for kill signal
+            let (text, had_activity) = tokio::select! {
+                result = handle.wait_for_result_meta(event_observer.clone()) => {
+                    match result {
+                        Ok(r) => r,
+                        Err(e) if is_resume => {
+                            // Resume failed — likely a stale session. Archive it so
+                            // the next attempt creates a fresh session.
+                            warn!(
+                                session_key = %session_key,
+                                session_id = %session_id,
+                                error = %e,
+                                "resume failed, archiving stale session"
+                            );
+                            self.state_db.update_session_state(&session_key, "archived")?;
+                            self.active_handles.remove(&session_key);
+                            return Err(CatClawError::Claude(
+                                "Session expired — please resend your message.".to_string()
+                            ));
+                        }
+                        Err(e) => return Err(e),
                     }
-                    Err(e) => Err(e),
+                },
+                _ = &mut kill_rx => {
+                    warn!(session_key = %session_key, "session stopped by user");
+                    handle.kill().await.ok();
+                    self.active_handles.remove(&session_key);
+                    self.state_db.update_session_state(&session_key, "idle")?;
+                    return Err(CatClawError::Session("session stopped by user".to_string()));
                 }
-            },
-            _ = &mut kill_rx => {
-                warn!(session_key = %session_key, "session stopped by user");
-                handle.kill().await.ok();
-                self.active_handles.remove(&session_key);
-                self.state_db.update_session_state(&session_key, "idle")?;
-                return Err(CatClawError::Session("session stopped by user".to_string()));
+            };
+
+            if text.is_empty() && !had_activity {
+                if attempt == 1 {
+                    warn!(
+                        session_key = %session_key,
+                        session_id = %session_id,
+                        "turn ended with no model activity and an empty result (likely a stale \
+                         resume notification) — retrying once with the same message"
+                    );
+                    continue;
+                }
+                // Retry also produced nothing: an empty response here would be
+                // silently swallowed downstream as "already replied via tool
+                // use" (router.rs treats "" like NO_REPLY), so the user would
+                // see nothing at all — which is exactly the failure mode this
+                // is meant to prevent. Surface an honest fallback instead.
+                warn!(
+                    session_key = %session_key,
+                    session_id = %session_id,
+                    "retry also ended with no model activity — surfacing fallback reply instead of silence"
+                );
+                break (
+                    "(system) I didn't get a real response from the model this turn — please try again.".to_string(),
+                    handle.session_id().map(String::from),
+                );
             }
-        }?;
+
+            break (text, handle.session_id().map(String::from));
+        };
 
         // Determine final session ID for transcript
-        let returned_session_id = handle.session_id().map(String::from);
         let final_id = returned_session_id.as_deref().unwrap_or(&session_id);
 
         // Log transcript (skip for system-originated sessions: heartbeat, cron tasks)

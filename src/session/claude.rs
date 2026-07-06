@@ -493,8 +493,23 @@ impl ClaudeHandle {
         &mut self,
         event_observer: Option<tokio::sync::mpsc::UnboundedSender<ClaudeEvent>>,
     ) -> Result<String> {
+        self.wait_for_result_meta(event_observer).await.map(|(text, _)| text)
+    }
+
+    /// Like [`Self::wait_for_result`], but also reports whether the turn
+    /// contained any real model activity (assistant text or a tool call) —
+    /// as opposed to only system/`Unknown` passthrough events (e.g. a stray
+    /// background-task notification the CLI replays on resume). Callers use
+    /// this to distinguish "empty because the reply already went out via a
+    /// tool" from "empty because the turn never actually engaged with the
+    /// user's message", which otherwise look identical.
+    pub async fn wait_for_result_meta(
+        &mut self,
+        event_observer: Option<tokio::sync::mpsc::UnboundedSender<ClaudeEvent>>,
+    ) -> Result<(String, bool)> {
         let mut result_text = String::new();
         let mut got_result_event = false;
+        let mut had_activity = false;
 
         while let Some(event) = self.recv_event().await {
             // Tee events to observer (best-effort, ignore send errors)
@@ -526,15 +541,30 @@ impl ClaudeHandle {
                     // Accumulate text from content blocks
                     for block in &content {
                         if let ContentBlock::Text(text) = block {
+                            if !text.is_empty() {
+                                had_activity = true;
+                            }
                             result_text.push_str(text);
+                        }
+                        if matches!(block, ContentBlock::ToolUse { .. }) {
+                            had_activity = true;
                         }
                     }
                 }
-                ClaudeEvent::TextDelta { .. } | ClaudeEvent::ToolUseStart { .. } | ClaudeEvent::StreamEvent { .. } => {
+                ClaudeEvent::TextDelta { ref text } => {
+                    if !text.is_empty() {
+                        had_activity = true;
+                    }
+                }
+                ClaudeEvent::ToolUseStart { .. } => {
+                    had_activity = true;
+                }
+                ClaudeEvent::StreamEvent { .. } => {
                     // Ignore streaming events in wait_for_result (used by Discord/Telegram)
                 }
                 ClaudeEvent::Unknown(_) => {
-                    // Skip unknown events gracefully
+                    // Skip unknown events gracefully — this includes system
+                    // passthrough like a replayed background-task notification.
                 }
             }
         }
@@ -546,8 +576,8 @@ impl ClaudeHandle {
             ));
         }
 
-        info!(len = result_text.len(), "claude result received");
-        Ok(result_text)
+        info!(len = result_text.len(), had_activity, "claude result received");
+        Ok((result_text, had_activity))
     }
 
     /// Check if the child process is still running
