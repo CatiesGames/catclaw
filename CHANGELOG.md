@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.56.2](https://github.com/CatiesGames/catclaw/compare/v0.56.1...v0.56.2) (2026-07-06)
+
+
+### Bug Fixes
+
+* **session:** 修正 TUI session 錯位跳轉與空結果被靜默吞掉的問題 ([188f253](https://github.com/CatiesGames/catclaw/commit/188f253c3124ec4b798aa05eaa364455a05a6724))
+
 ## [0.56.1](https://github.com/CatiesGames/catclaw/compare/v0.56.0...v0.56.1) (2026-07-03)
 
 
