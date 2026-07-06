@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.56.3](https://github.com/CatiesGames/catclaw/compare/v0.56.2...v0.56.3) (2026-07-06)
+
+
+### Bug Fixes
+
+* **gateway:** 頻道 adapter 缺少設定時優雅降級,不再讓整個 gateway 啟動失敗 ([e7d66cf](https://github.com/CatiesGames/catclaw/commit/e7d66cf3b41fbd41ad07ff9ecd4050e9daa9d3c1))
+
 ## [0.56.2](https://github.com/CatiesGames/catclaw/compare/v0.56.1...v0.56.2) (2026-07-06)
 
 
