@@ -218,123 +218,147 @@ pub async fn start(config: &Config, config_path: PathBuf) -> Result<GatewayHandl
     for channel_config in &config.channels {
         match channel_config.channel_type.as_str() {
             "discord" => {
-                let (da, filter) = DiscordAdapter::from_config(channel_config)?;
-                adapter_filters.push(filter);
-                let adapter = Arc::new(da);
+                match DiscordAdapter::from_config(channel_config) {
+                    Ok((da, filter)) => {
+                        adapter_filters.push(filter);
+                        let adapter = Arc::new(da);
 
-                // Wire state_db + Config so the Discord Handler can auto-register
-                // DM senders as unknown contacts. Must happen before start(),
-                // since Handler captures the value at start() time.
-                adapter
-                    .set_contacts_context(state_db.clone(), gw_config.clone())
-                    .await;
+                        // Wire state_db + Config so the Discord Handler can auto-register
+                        // DM senders as unknown contacts. Must happen before start(),
+                        // since Handler captures the value at start() time.
+                        adapter
+                            .set_contacts_context(state_db.clone(), gw_config.clone())
+                            .await;
 
-                // Take approval_rx before moving adapter into the start task
-                if let Some(rx) = adapter.take_approval_rx().await {
-                    approval_receivers.push(rx);
-                }
-                if let Some(rx) = adapter.take_social_action_rx().await {
-                    social_action_receivers.push(rx);
-                }
-                if let Some(rx) = adapter.take_contact_action_rx().await {
-                    contact_action_receivers.push(rx);
-                }
+                        // Take approval_rx before moving adapter into the start task
+                        if let Some(rx) = adapter.take_approval_rx().await {
+                            approval_receivers.push(rx);
+                        }
+                        if let Some(rx) = adapter.take_social_action_rx().await {
+                            social_action_receivers.push(rx);
+                        }
+                        if let Some(rx) = adapter.take_contact_action_rx().await {
+                            contact_action_receivers.push(rx);
+                        }
 
-                adapters.push(adapter.clone());
+                        adapters.push(adapter.clone());
 
-                let tx = msg_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = adapter.start(tx).await {
-                        error!(error = %e, "discord adapter error");
+                        let tx = msg_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = adapter.start(tx).await {
+                                error!(error = %e, "discord adapter error");
+                            }
+                        });
+
+                        info!("discord adapter started");
                     }
-                });
-
-                info!("discord adapter started");
+                    Err(e) => {
+                        warn!(error = %e, "discord adapter not started (missing config), skipping");
+                    }
+                }
             }
             "telegram" => {
-                let (ta, filter) = TelegramAdapter::from_config(channel_config)?;
-                adapter_filters.push(filter);
-                let adapter = Arc::new(ta);
+                match TelegramAdapter::from_config(channel_config) {
+                    Ok((ta, filter)) => {
+                        adapter_filters.push(filter);
+                        let adapter = Arc::new(ta);
 
-                // Wire state_db + Config so the dispatcher closure can
-                // auto-register private-chat senders as unknown contacts.
-                // Must happen before start() — the closure captures the value
-                // at start() time.
-                adapter
-                    .set_contacts_context(state_db.clone(), gw_config.clone())
-                    .await;
+                        // Wire state_db + Config so the dispatcher closure can
+                        // auto-register private-chat senders as unknown contacts.
+                        // Must happen before start() — the closure captures the value
+                        // at start() time.
+                        adapter
+                            .set_contacts_context(state_db.clone(), gw_config.clone())
+                            .await;
 
-                // Take approval_rx before moving adapter into the start task
-                if let Some(rx) = adapter.take_approval_rx().await {
-                    approval_receivers.push(rx);
-                }
-                if let Some(rx) = adapter.take_social_action_rx().await {
-                    social_action_receivers.push(rx);
-                }
-                if let Some(rx) = adapter.take_contact_action_rx().await {
-                    contact_action_receivers.push(rx);
-                }
+                        // Take approval_rx before moving adapter into the start task
+                        if let Some(rx) = adapter.take_approval_rx().await {
+                            approval_receivers.push(rx);
+                        }
+                        if let Some(rx) = adapter.take_social_action_rx().await {
+                            social_action_receivers.push(rx);
+                        }
+                        if let Some(rx) = adapter.take_contact_action_rx().await {
+                            contact_action_receivers.push(rx);
+                        }
 
-                adapters.push(adapter.clone());
+                        adapters.push(adapter.clone());
 
-                let tx = msg_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = adapter.start(tx).await {
-                        error!(error = %e, "telegram adapter error");
+                        let tx = msg_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = adapter.start(tx).await {
+                                error!(error = %e, "telegram adapter error");
+                            }
+                        });
+
+                        info!("telegram adapter started");
                     }
-                });
-
-                info!("telegram adapter started");
+                    Err(e) => {
+                        warn!(error = %e, "telegram adapter not started (missing config), skipping");
+                    }
+                }
             }
             "slack" => {
-                let (sa, filter) = SlackAdapter::from_config(channel_config)?;
-                adapter_filters.push(filter);
-                let adapter = Arc::new(sa);
+                match SlackAdapter::from_config(channel_config) {
+                    Ok((sa, filter)) => {
+                        adapter_filters.push(filter);
+                        let adapter = Arc::new(sa);
 
-                // Take approval_rx before moving adapter into the start task
-                if let Some(rx) = adapter.take_approval_rx().await {
-                    approval_receivers.push(rx);
-                }
-                if let Some(rx) = adapter.take_social_action_rx().await {
-                    social_action_receivers.push(rx);
-                }
-                if let Some(rx) = adapter.take_contact_action_rx().await {
-                    contact_action_receivers.push(rx);
-                }
+                        // Take approval_rx before moving adapter into the start task
+                        if let Some(rx) = adapter.take_approval_rx().await {
+                            approval_receivers.push(rx);
+                        }
+                        if let Some(rx) = adapter.take_social_action_rx().await {
+                            social_action_receivers.push(rx);
+                        }
+                        if let Some(rx) = adapter.take_contact_action_rx().await {
+                            contact_action_receivers.push(rx);
+                        }
 
-                adapters.push(adapter.clone());
+                        adapters.push(adapter.clone());
 
-                let tx = msg_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = adapter.start(tx).await {
-                        error!(error = %e, "slack adapter error");
+                        let tx = msg_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = adapter.start(tx).await {
+                                error!(error = %e, "slack adapter error");
+                            }
+                        });
+
+                        info!("slack adapter started");
                     }
-                });
-
-                info!("slack adapter started");
+                    Err(e) => {
+                        warn!(error = %e, "slack adapter not started (missing config), skipping");
+                    }
+                }
             }
             "line" => {
-                let (la, filter) = LineAdapter::from_config(channel_config)?;
-                adapter_filters.push(filter);
-                let adapter = Arc::new(la);
-                adapters.push(adapter.clone());
-                line_adapter = Some(adapter.clone());
+                match LineAdapter::from_config(channel_config) {
+                    Ok((la, filter)) => {
+                        adapter_filters.push(filter);
+                        let adapter = Arc::new(la);
+                        adapters.push(adapter.clone());
+                        line_adapter = Some(adapter.clone());
 
-                // Drain the postback approval receiver into the shared
-                // approval channel pool (mirrors Discord/Telegram/Slack).
-                if let Some(rx) = adapter.take_approval_rx().await {
-                    approval_receivers.push(rx);
-                }
+                        // Drain the postback approval receiver into the shared
+                        // approval channel pool (mirrors Discord/Telegram/Slack).
+                        if let Some(rx) = adapter.take_approval_rx().await {
+                            approval_receivers.push(rx);
+                        }
 
-                let tx = msg_tx.clone();
-                let adapter_for_start = adapter.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = adapter_for_start.start(tx).await {
-                        error!(error = %e, "line adapter error");
+                        let tx = msg_tx.clone();
+                        let adapter_for_start = adapter.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = adapter_for_start.start(tx).await {
+                                error!(error = %e, "line adapter error");
+                            }
+                        });
+
+                        info!("line adapter started (webhook-driven)");
                     }
-                });
-
-                info!("line adapter started (webhook-driven)");
+                    Err(e) => {
+                        warn!(error = %e, "line adapter not started (missing config), skipping");
+                    }
+                }
             }
             "backend" => {
                 match BackendAdapter::from_config(channel_config) {
