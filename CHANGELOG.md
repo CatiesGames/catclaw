@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.57.1](https://github.com/CatiesGames/catclaw/compare/v0.57.0...v0.57.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **memory:** 修正 chunk_text 無窮迴圈，memory_write 改為全域循序執行 ([5f1e501](https://github.com/CatiesGames/catclaw/commit/5f1e50158bef47556ed7e41100a0f5c27646d92c))
+* **tui:** 修正日誌換行遇到全形空格等多位元組字元會 panic 的問題 ([d247cc8](https://github.com/CatiesGames/catclaw/commit/d247cc8119d2e19604f823158b19b7cf91facd26))
+
 ## [0.57.0](https://github.com/CatiesGames/catclaw/compare/v0.56.3...v0.57.0) (2026-07-07)
 
 
