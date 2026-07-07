@@ -692,6 +692,7 @@ impl MessageRouter {
     /// Returns (agent_id, is_explicit_binding).
     fn resolve_agent(&self, ctx: &MsgContext) -> (String, bool) {
         let channel_type = ctx.channel_type.as_str();
+        let is_telegram = channel_type == "telegram";
 
         // Build candidate patterns from most specific to least
         let candidates = vec![
@@ -701,11 +702,28 @@ impl MessageRouter {
             }),
             // Channel-specific
             Some(format!("{}:channel:{}", channel_type, ctx.channel_id)),
+            // Telegram-native spelling of the same exact-chat match above
+            // ("chat" mirrors Telegram's own Bot API vocabulary — Telegram
+            // has its own distinct "Channel" broadcast type, so reusing
+            // Discord's "channel" word for "any chat" is a genuine naming
+            // collision there).
+            is_telegram.then(|| format!("telegram:chat:{}", ctx.channel_id)),
             // Guild-specific (from raw_event)
             ctx.raw_event
                 .get("guild_id")
                 .and_then(|v| v.as_str())
                 .map(|g| format!("{}:guild:{}", channel_type, g)),
+            // Telegram DM-vs-group wildcard. Only one of the two is ever
+            // offered as a candidate — decided by Telegram's own protocol
+            // data (ChatKind::Private vs Group/Supergroup, already resolved
+            // into `ctx.is_direct_message` by the adapter), not by string
+            // matching. No literal-ID `dm:<user_id>` scope exists because it
+            // would be a pure alias of `chat:<id>`/`channel:<id>` above —
+            // once you know the specific chat_id, you already know whether
+            // it's a DM.
+            is_telegram.then(|| {
+                format!("telegram:{}:*", if ctx.is_direct_message { "dm" } else { "group" })
+            }),
             // Platform wildcard
             Some(format!("{}:*", channel_type)),
             // Global wildcard

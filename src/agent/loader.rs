@@ -1761,21 +1761,30 @@ Both commands talk to the running gateway via WS, so changes apply immediately �
 
 | Pattern | Matches |
 |---------|---------|
-| `discord:dm:<user_id>` | Specific user's DM |
 | `discord:channel:<channel_id>` | Specific channel |
 | `discord:guild:<guild_id>` | Entire Discord server |
 | `discord:*` | All Discord messages |
-| `telegram:dm:<user_id>` | Specific Telegram DM |
-| `telegram:*` | All Telegram messages |
+| `telegram:chat:<chat_id>` | Specific Telegram chat — DM or group, by exact chat ID (Telegram's own term; DM chat_id equals the user's ID, group chat_id is negative) |
+| `telegram:dm:*` | All Telegram DMs (1:1 private chats) — no per-user form, since once you know a specific chat_id you already know it's a DM; use `telegram:chat:<id>` for that |
+| `telegram:group:*` | All Telegram groups/supergroups — no per-group form; use `telegram:chat:<id>` for a specific one |
+| `telegram:*` | All Telegram messages (DM or group) |
 | `backend:channel:<tenant_id>` | Specific backend tenant |
 | `backend:*` | All backend tenants |
 | `*` | All platforms (global fallback) |
+
+**Note:** there is no `discord:dm:<user_id>` or `telegram:dm:<user_id>` (literal-ID) form — only `telegram:dm:*` (the wildcard) exists. A specific DM is matched via `channel:<id>`/`chat:<id>` like any other specific chat, since you already know its type once you know its ID.
 
 **Without bindings:** all messages go to the default agent (the one with `default: true` in config, or the first agent).
 
 **Example:** Route #support channel to a support agent:
 ```bash
 catclaw bind "discord:channel:1234567890" support
+```
+
+**Example:** Route all Telegram DMs to one agent, all Telegram groups to another:
+```bash
+catclaw bind "telegram:dm:*" concierge
+catclaw bind "telegram:group:*" ops
 ```
 
 ---
@@ -1908,6 +1917,16 @@ catclaw channel add backend --token-env "my-shared-secret"
 ```
 
 `--activation`: `mention` (respond only when @mentioned) or `all` (respond to everything)
+
+**One bot token per platform only — never add a second `discord`/`telegram`/`slack`/`line` channel entry.**
+The gateway's internal routing keys off the platform name itself (not the token), so a second
+`[[channels]] type = "telegram"` (or any other platform) silently breaks things: both bots receive
+messages fine, but outbound replies and MCP tool calls (`telegram_send_message`, etc.) always go
+through whichever one was configured last — the other bot goes mute with no error anywhere. If a
+user asks you to set up a second bot on a platform that already has one configured, refuse and
+explain this limitation instead of running `catclaw channel add`; tell them a second bot on the same
+platform requires either a separate CatClaw gateway instance (own config/state.db/workspace — no
+shared agents/memory/contacts) or a real code change to the gateway's adapter-routing layer.
 
 ### Backend Channel
 

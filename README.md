@@ -260,11 +260,16 @@ catclaw channel add slack \
   --app-token-env CATCLAW_SLACK_APP_TOKEN         # Add Slack channel
 ```
 
+Only one bot token per platform is supported — a second `discord`/`telegram`/`slack`/`line` channel entry silently breaks routing (outbound replies always go through whichever one was configured last, the other goes mute). To run two bots on the same platform, use two separate CatClaw gateway instances instead.
+
 ### Bindings (Channel → Agent routing)
 
 ```bash
 catclaw bind "discord:channel:222222" research    # Bind a channel to an agent
 catclaw bind "telegram:*" main                    # Bind all Telegram to main
+catclaw bind "telegram:chat:123456789" concierge  # Bind a specific Telegram chat (DM or group)
+catclaw bind "telegram:dm:*" concierge            # Bind all Telegram DMs to an agent
+catclaw bind "telegram:group:*" ops               # Bind all Telegram groups to another agent
 catclaw bind "slack:channel:C12345" research      # Bind a Slack channel to an agent
 catclaw bind "*" main                             # Global fallback
 catclaw unbind "discord:channel:222222"           # Remove a binding

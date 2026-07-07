@@ -539,7 +539,15 @@ fn pattern_hint(buf: &str) -> String {
         [platform] => {
             let scopes = match *platform {
                 "discord"  => "dm | channel | guild | *",
-                "telegram" => "dm | *",
+                // Telegram has its own vocabulary: "chat" (any 1:1 or group
+                // chat by exact ID — Telegram's own Bot API calls this a
+                // Chat; Discord's "channel" word would collide with
+                // Telegram's distinct broadcast-Channel feature), plus
+                // wildcard-only dm/group buckets. There is no
+                // "telegram:dm:<user_id>" literal-ID form — once you know a
+                // specific chat_id you already know whether it's a DM, so
+                // that would just be an alias of chat:<id>.
+                "telegram" => "chat | dm:* | group:* | *",
                 "*"        => "(global wildcard — matches all platforms)",
                 _          => "dm | channel | guild | *",
             };
@@ -547,11 +555,14 @@ fn pattern_hint(buf: &str) -> String {
         }
         [platform, scope] => {
             let id_hint = match (*platform, *scope) {
-                (_, "dm")      => "user ID  e.g. 123456789",
-                (_, "channel") => "channel ID  e.g. 987654321",
-                (_, "guild")   => "guild/server ID  e.g. 111222333",
-                (_, "*")       => "(wildcard — matches all in this platform)",
-                _              => "ID or *",
+                ("telegram", "dm")    => "* (all Telegram DMs — no per-user form; use chat:<id> for a specific one)",
+                ("telegram", "group") => "* (all Telegram groups — no per-group form; use chat:<id> for a specific one)",
+                ("telegram", "chat")  => "chat ID  e.g. 123456789 (DM) or -100987654321 (group)",
+                (_, "dm")       => "user ID  e.g. 123456789",
+                (_, "channel")  => "channel ID  e.g. 987654321",
+                (_, "guild")    => "guild/server ID  e.g. 111222333",
+                (_, "*")        => "(wildcard — matches all in this platform)",
+                _               => "ID or *",
             };
             format!("{platform}:{scope}:  ← next: {id_hint}")
         }
@@ -561,7 +572,9 @@ fn pattern_hint(buf: &str) -> String {
                 ("discord",  "channel") => "messages in this Discord channel",
                 ("discord",  "guild")   => "all messages in this Discord server",
                 ("discord",  "*")       => "all Discord messages",
-                ("telegram", "dm")      => "Telegram DM from this user",
+                ("telegram", "chat")    => "messages in this specific Telegram chat (DM or group)",
+                ("telegram", "dm")      => "all Telegram DMs (1:1 private chats)",
+                ("telegram", "group")   => "all Telegram groups/supergroups",
                 ("telegram", "*")       => "all Telegram messages",
                 ("*",        _)         => "all platforms (global fallback)",
                 _                       => "messages matching this pattern",
