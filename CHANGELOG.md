@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.57.0](https://github.com/CatiesGames/catclaw/compare/v0.56.3...v0.57.0) (2026-07-07)
+
+
+### Features
+
+* **telegram:** 新增 chat/dm:*/group:* binding scope，修正文件謊報的 dm:&lt;id&gt; 語法 ([2bd4466](https://github.com/CatiesGames/catclaw/commit/2bd446633ad6f3a9474648e8154719690f233be6))
+
+
+### Bug Fixes
+
+* **cli:** gateway restart/update 在非互動式呼叫時自動補上 --resume ([5e2aaa6](https://github.com/CatiesGames/catclaw/commit/5e2aaa682fb66d93b097a7edbe4cb5ff5e726e6c))
+
 ## [0.56.3](https://github.com/CatiesGames/catclaw/compare/v0.56.2...v0.56.3) (2026-07-06)
 
 
