@@ -559,10 +559,15 @@ fn wrap_log_text(text: &str, max_width: usize) -> Vec<String> {
             .nth(max_width)
             .map(|(i, _)| i)
             .unwrap_or(remaining.len());
-        // Try to find a word boundary within the first max_width chars
+        // Try to find a word boundary within the first max_width chars.
+        // `pos` is the byte offset of the matched char, which may itself be
+        // multi-byte (e.g. full-width space U+3000 is 3 bytes) — advance by
+        // that char's own UTF-8 length, not a hardcoded +1, or the slice
+        // below panics on a non-char-boundary index.
         let break_at = remaining[..byte_end]
-            .rfind(|c: char| c.is_whitespace() || c == '=' || c == ',' || c == '/')
-            .map(|pos| pos + 1)
+            .char_indices()
+            .rfind(|(_, c)| c.is_whitespace() || *c == '=' || *c == ',' || *c == '/')
+            .map(|(pos, c)| pos + c.len_utf8())
             .unwrap_or(byte_end); // hard-wrap if no good break point
         result.push(remaining[..break_at].to_string());
         remaining = &remaining[break_at..];
