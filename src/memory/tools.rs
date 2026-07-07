@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
 
@@ -7,6 +7,21 @@ use crate::memory::embed::Embedder;
 use crate::memory::search::hybrid_search;
 use crate::memory::WriteRequest;
 use crate::state::StateDb;
+
+/// Serializes `memory_write` calls process-wide (not per-session — every
+/// agent/session queues behind the same lock). `chunk_text` + the DB writes
+/// below are synchronous, CPU/disk-bound work with no `.await` inside the
+/// loop; running many of these concurrently is how a single pathological
+/// input (see chunk_text's forward-progress fix) could previously balloon
+/// memory across several overlapping calls at once. A plain `Mutex<()>`
+/// holds no data and is released before the background classification
+/// `tokio::spawn` below, so it can never leak — the guard's lifetime is
+/// scoped to one MCP call.
+static MEMORY_WRITE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn memory_write_lock() -> &'static tokio::sync::Mutex<()> {
+    MEMORY_WRITE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 /// Build MCP tool definitions for memory palace tools.
 pub fn build_memory_tools() -> Vec<Value> {
@@ -196,33 +211,42 @@ pub async fn execute_memory_tool(
             let importance = args.get("importance").and_then(|v| v.as_i64()).map(|v| v as i32);
             let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("agent");
 
-            let chunks = crate::memory::chunk_text(content);
-            let is_chunked = chunks.len() > 1;
-            let mut first_id = None;
-            let mut node_ids = Vec::new();
+            let (chunks, first_id, node_ids) = {
+                // Hold the global lock only across chunking + the DB writes —
+                // released before returning, well before the background
+                // classification spawn below.
+                let _guard = memory_write_lock().lock().await;
 
-            for (i, chunk) in chunks.iter().enumerate() {
-                let req = WriteRequest {
-                    wing: wing.to_string(),
-                    room: room.to_string(),
-                    hall: hall.to_string(),
-                    content: chunk.clone(),
-                    summary: if i == 0 { summary.clone() } else { None },
-                    source: source.to_string(),
-                    importance,
-                };
+                let chunks = crate::memory::chunk_text(content);
+                let is_chunked = chunks.len() > 1;
+                let mut first_id = None;
+                let mut node_ids = Vec::new();
 
-                let id = if is_chunked {
-                    state_db.memory_write_chunk(&req, i as i32, first_id)?
-                } else {
-                    state_db.memory_write(&req)?
-                };
+                for (i, chunk) in chunks.iter().enumerate() {
+                    let req = WriteRequest {
+                        wing: wing.to_string(),
+                        room: room.to_string(),
+                        hall: hall.to_string(),
+                        content: chunk.clone(),
+                        summary: if i == 0 { summary.clone() } else { None },
+                        source: source.to_string(),
+                        importance,
+                    };
 
-                if i == 0 {
-                    first_id = Some(id);
+                    let id = if is_chunked {
+                        state_db.memory_write_chunk(&req, i as i32, first_id)?
+                    } else {
+                        state_db.memory_write(&req)?
+                    };
+
+                    if i == 0 {
+                        first_id = Some(id);
+                    }
+                    node_ids.push(id);
                 }
-                node_ids.push(id);
-            }
+
+                (chunks, first_id, node_ids)
+            };
 
             // Background: Haiku classification (room + summary) + embedding generation
             let db = state_db.clone();

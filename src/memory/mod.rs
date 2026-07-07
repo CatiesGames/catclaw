@@ -211,11 +211,23 @@ pub fn chunk_text(text: &str) -> Vec<String> {
         if actual_end >= text.len() {
             break;
         }
-        start = safe_boundary(text, if actual_end > CHUNK_OVERLAP {
+        let overlapped_start = safe_boundary(text, if actual_end > CHUNK_OVERLAP {
             actual_end - CHUNK_OVERLAP
         } else {
             actual_end
         });
+        // Guarantee forward progress: on repetitive input (e.g. a paragraph
+        // break recurring within CHUNK_OVERLAP bytes of `actual_end`), the
+        // overlap step can land at or behind `start`, which would make the
+        // next iteration re-derive the exact same `actual_end` forever —
+        // pushing unbounded duplicate chunks until the process OOMs. If the
+        // overlapped position doesn't advance, skip the overlap for this
+        // step and cut straight to `actual_end` instead.
+        start = if overlapped_start > start {
+            overlapped_start
+        } else {
+            actual_end
+        };
     }
 
     chunks
