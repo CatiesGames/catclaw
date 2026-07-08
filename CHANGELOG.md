@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.57.2](https://github.com/CatiesGames/catclaw/compare/v0.57.1...v0.57.2) (2026-07-08)
+
+
+### Bug Fixes
+
+* **social:** IG/Threads 發文草稿不再誤覆蓋前一則失敗草稿 ([3beb628](https://github.com/CatiesGames/catclaw/commit/3beb628aa560cc2de8f50b5138dba9d2eb83edab))
+
 ## [0.57.1](https://github.com/CatiesGames/catclaw/compare/v0.57.0...v0.57.1) (2026-07-07)
 
 
