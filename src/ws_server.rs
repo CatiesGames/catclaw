@@ -2658,9 +2658,12 @@ fn stage_draft_from_tool(
         .map(parse_string_or_array)
         .unwrap_or_default();
 
-    // Reuse any non-terminal draft for the same target so retries don't leave
-    // zombie rows behind. Refresh the content + media with the agent's new output,
-    // and reset status to 'draft' so the submit handler can transition it cleanly.
+    // Reuse an existing draft for the same target (reply/dm only — see
+    // `find_latest_draft_for_tool`) so retries don't leave zombie rows behind.
+    // Refresh the content + media with the agent's new output, and reset
+    // status to 'draft' so the submit handler can transition it cleanly.
+    // post/carousel drafts (reply_to_id == None) never reuse — each call
+    // always creates a fresh row below.
     if let Ok(Some(mut existing)) = db.find_latest_draft_for_tool(platform, draft_type, reply_to_id.as_deref()) {
         let _ = db.update_social_draft_content(existing.id, content, &media_urls);
         let _ = db.update_social_draft_status(existing.id, "draft");

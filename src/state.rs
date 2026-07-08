@@ -1401,8 +1401,19 @@ impl StateDb {
         Ok(())
     }
 
-    /// Find the latest staged draft matching platform + draft_type (+ optional reply_to_id).
+    /// Find the latest staged draft matching platform + draft_type + reply_to_id.
     /// Used after a publish tool call to associate the draft.
+    ///
+    /// Reuse rule: only reply / dm drafts have a precise alignment key
+    /// (`reply_to_id`), so only they are eligible for reuse — a retry of the
+    /// same target (same comment / same DM recipient) should land on the same
+    /// row. `post` / `carousel` drafts have no alignment key: matching on just
+    /// `(platform, draft_type, status='failed')` previously caused a brand new
+    /// post drafted today to silently overwrite yesterday's unrelated failed
+    /// draft (same row id, same Discord approval card binding), so a stale
+    /// "failed, click to retry" card would end up publishing today's content
+    /// when approved. Callers must always create a fresh row for `reply_to_id
+    /// == None` — see `stage_draft_from_tool`.
     pub fn find_latest_draft_for_tool(
         &self,
         platform: &str,
@@ -1412,29 +1423,15 @@ impl StateDb {
         const COLS: &str = "id,platform,draft_type,content,media_url,reply_to_id,original_text,\
                             original_author,status,reply_id,forward_ref,agent_id,session_key,\
                             metadata,created_at,updated_at";
-        // Reuse rules:
-        //   reply / dm — have a precise alignment key (reply_to_id), so reuse any
-        //                non-terminal draft for that target (retries + re-approvals
-        //                should land on the same row).
-        //   post / carousel — no alignment key, multiple concurrent posts share the
-        //                same (platform, draft_type). Only reuse 'failed' rows so a
-        //                retry from a failed card still goes through, without letting
-        //                a new unrelated post overwrite a pending awaiting_approval
-        //                draft from a different task.
-        let conn = self.conn.lock().unwrap();
-        let row = if let Some(rid) = reply_to_id {
-            conn.query_row(
-                &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND reply_to_id=?3 AND status IN ('draft','awaiting_approval','failed') ORDER BY created_at DESC LIMIT 1"),
-                params![platform, draft_type, rid],
-                social_draft_row_mapper,
-            ).optional()?
-        } else {
-            conn.query_row(
-                &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND status='failed' ORDER BY created_at DESC LIMIT 1"),
-                params![platform, draft_type],
-                social_draft_row_mapper,
-            ).optional()?
+        let Some(rid) = reply_to_id else {
+            return Ok(None);
         };
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            &format!("SELECT {COLS} FROM social_drafts WHERE platform=?1 AND draft_type=?2 AND reply_to_id=?3 AND status IN ('draft','awaiting_approval','failed') ORDER BY created_at DESC LIMIT 1"),
+            params![platform, draft_type, rid],
+            social_draft_row_mapper,
+        ).optional()?;
         Ok(row)
     }
 
