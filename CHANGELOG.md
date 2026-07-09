@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.58.0](https://github.com/CatiesGames/catclaw/compare/v0.57.2...v0.58.0) (2026-07-09)
+
+
+### Features
+
+* **line:** 群組訊息改為預設 mention 才觸發，新增 line:dm:*/line:group:* binding ([7482c4c](https://github.com/CatiesGames/catclaw/commit/7482c4c3a1b76833fe93d6af4b6e75171fcab689))
+
 ## [0.57.2](https://github.com/CatiesGames/catclaw/compare/v0.57.1...v0.57.2) (2026-07-08)
 
 
