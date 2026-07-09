@@ -396,7 +396,8 @@ pub struct ChannelConfig {
 /// channel override beats guild override beats the channel's global `activation`.
 ///
 /// `pattern` formats:
-/// - `discord:channel:<channel_id>` / `telegram:chat:<chat_id>` / `slack:channel:<channel_id>` — single channel
+/// - `discord:channel:<channel_id>` / `telegram:chat:<chat_id>` / `slack:channel:<channel_id>`
+///   / `line:channel:<channel_id>` — single channel (LINE: groupId `C...` / roomId `R...` / userId `U...`)
 /// - `discord:guild:<guild_id>` — every channel in a Discord guild (guild fallback; Discord only)
 ///
 /// `activation` values: `"all"` (respond to everything), `"mention"` (only DM / @mention),

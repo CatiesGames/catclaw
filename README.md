@@ -271,6 +271,9 @@ catclaw bind "telegram:chat:123456789" concierge  # Bind a specific Telegram cha
 catclaw bind "telegram:dm:*" concierge            # Bind all Telegram DMs to an agent
 catclaw bind "telegram:group:*" ops               # Bind all Telegram groups to another agent
 catclaw bind "slack:channel:C12345" research      # Bind a Slack channel to an agent
+catclaw bind "line:channel:C1234567890abcdef" vip # Bind a specific LINE group/room/user (groupId `C…`/roomId `R…`/userId `U…`)
+catclaw bind "line:dm:*" concierge                # Bind all LINE DMs to an agent
+catclaw bind "line:group:*" ops                   # Bind all LINE groups/rooms to another agent
 catclaw bind "*" main                             # Global fallback
 catclaw unbind "discord:channel:222222"           # Remove a binding
 ```
@@ -761,6 +764,16 @@ secret_env = "LINE_CHANNEL_SECRET"
 ```
 
 In LINE Developer Console, set the webhook URL to `https://your.host/webhook/line` and verify.
+
+### Activation (groups)
+
+Invite the bot into a LINE group/room and it dispatches to an agent like any other channel. Groups/rooms default to `activation = "mention"` (same semantics as Discord) — the bot only responds when @mentioned, or on a "mention everyone" (`@全体メンバー`). DMs are unaffected by this gate (always dispatched, subject to `dm_policy`).
+
+```bash
+catclaw channel override set "line:channel:<groupId>" all   # always-on for one specific group
+```
+
+Or set `activation = "all"` in the `[[channels]]` LINE config for blanket always-on across every LINE group. See the "Bindings" section above for routing groups/DMs to specific agents (`line:channel:<id>`, `line:dm:*`, `line:group:*`).
 
 ### Capabilities
 

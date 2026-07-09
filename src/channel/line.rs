@@ -201,6 +201,27 @@ impl LineAdapter {
                 continue;
             }
 
+            // Activation gate (mention/all/none, dm/group allow-deny) — only
+            // applies to "message" events. Runs before parse_event to avoid
+            // wasting a get_display_name profile-API call on a message we're
+            // about to drop, and to keep parse_event's Option<MsgContext>
+            // meaning "unsupported event type", not "filtered by activation".
+            if event_type == "message" {
+                let source = event.get("source");
+                let user_id = source
+                    .and_then(|s| s.get("userId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let is_dm = source_type == "user";
+                let channel_id = source
+                    .map(|s| resolve_line_channel_id(s, source_type, user_id))
+                    .unwrap_or_default();
+                if !self.should_respond(event, is_dm, &channel_id, user_id).await {
+                    debug!(channel_id, "line: activation gate — not responding");
+                    continue;
+                }
+            }
+
             if let Some(ctx) = self.parse_event(event).await {
                 if let Some(tx) = self.msg_tx.get() {
                     let _ = tx.send(ctx).await;
@@ -259,6 +280,55 @@ impl LineAdapter {
         );
     }
 
+    /// Activation gate for inbound "message" events — mirrors the
+    /// Discord/Telegram/Slack pattern: read `filter` (std::sync::RwLock)
+    /// inside a sync block that drops the guard before any `.await`
+    /// (CLAUDE.md lesson #3), THEN — only if the mention check is actually
+    /// needed — await `bot_user_id` (tokio::sync::Mutex, safe across await).
+    /// The two locks must stay in this order; don't merge them into one block.
+    async fn should_respond(&self, event: &Value, is_dm: bool, channel_id: &str, sender_id: &str) -> bool {
+        let activation = {
+            let filter = self.filter.read().unwrap();
+            if !filter.is_sender_allowed(is_dm, sender_id) {
+                return false;
+            }
+            filter.activation_for("line:channel", channel_id).to_string()
+        };
+
+        match activation.as_str() {
+            "all" => true,
+            "mention" => {
+                if is_dm {
+                    return true;
+                }
+                let bot_uid = self.bot_user_id.lock().await.clone();
+                let mentionees = event
+                    .get("message")
+                    .and_then(|m| m.get("mention"))
+                    .and_then(|m| m.get("mentionees"))
+                    .and_then(|v| v.as_array());
+                match mentionees {
+                    Some(list) => list.iter().any(|m| {
+                        let mtype = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        if mtype == "all" {
+                            return true;
+                        }
+                        if mtype == "user" {
+                            if let (Some(uid), Some(bot)) =
+                                (m.get("userId").and_then(|v| v.as_str()), bot_uid.as_deref())
+                            {
+                                return uid == bot;
+                            }
+                        }
+                        false
+                    }),
+                    None => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Parse a single LINE webhook event into a MsgContext (for "message" events).
     /// Other event types (follow, unfollow, postback) are logged but skipped in MVP.
     async fn parse_event(&self, event: &Value) -> Option<MsgContext> {
@@ -277,12 +347,7 @@ impl LineAdapter {
 
         let source_type = source.get("type").and_then(|v| v.as_str()).unwrap_or("user");
         let is_dm = source_type == "user";
-        let channel_id = match source_type {
-            "user" => user_id.to_string(),
-            "group" => source.get("groupId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            "room" => source.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            _ => user_id.to_string(),
-        };
+        let channel_id = resolve_line_channel_id(source, source_type, user_id);
 
         let sender_name = self
             .get_display_name(user_id, source_type, &channel_id)
@@ -649,10 +714,40 @@ fn channel_type_for_line() -> ChannelType {
     ChannelType::Line
 }
 
+/// Compute the routing/activation channel_id for a LINE event source. Shared
+/// by `parse_event` (builds MsgContext) and `should_respond` (activation gate)
+/// so the two never drift apart. DM: userId. Group: groupId. Room: roomId.
+fn resolve_line_channel_id(source: &Value, source_type: &str, user_id: &str) -> String {
+    match source_type {
+        "user" => user_id.to_string(),
+        "group" => source.get("groupId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "room" => source.get("roomId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        _ => user_id.to_string(),
+    }
+}
+
 #[async_trait]
 impl ChannelAdapter for LineAdapter {
     async fn start(&self, msg_tx: mpsc::Sender<MsgContext>) -> Result<()> {
         let _ = self.msg_tx.set(msg_tx);
+
+        // Resolve the bot's own userId for mention detection (GET /v2/bot/info).
+        // Fail-soft, unlike Slack/Telegram's `?` on their bot-identity fetch:
+        // LINE's core send/receive path (reply token / push) doesn't depend on
+        // bot_user_id, so a transient API failure here should only degrade
+        // mention detection (falls back to "only @全体メンバー counts") rather
+        // than block the whole adapter from starting.
+        match self.line_get("/info").await {
+            Ok(info) => match info.get("userId").and_then(|v| v.as_str()) {
+                Some(uid) => {
+                    *self.bot_user_id.lock().await = Some(uid.to_string());
+                    info!(bot_user_id = %uid, "LINE bot identity resolved");
+                }
+                None => warn!("LINE /v2/bot/info response missing userId field"),
+            },
+            Err(e) => warn!(error = %e, "LINE bot info fetch failed — mention detection degraded until next restart"),
+        }
+
         info!("LINE adapter ready (webhook-driven)");
         Ok(())
     }

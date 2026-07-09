@@ -1465,7 +1465,7 @@ Resolution is most-specific-first: **channel override → guild override → glo
 
 | `pattern` | Scope |
 |-----------|-------|
-| `discord:channel:<channel_id>` / `telegram:chat:<chat_id>` / `slack:channel:<channel_id>` | one channel |
+| `discord:channel:<channel_id>` / `telegram:chat:<chat_id>` / `slack:channel:<channel_id>` / `line:channel:<channel_id>` | one channel |
 | `discord:guild:<guild_id>` | every channel in a Discord server (Discord only) |
 
 `activation` values: `all` (reply to everything), `mention` (reply only on DM / @mention),
@@ -1768,11 +1768,17 @@ Both commands talk to the running gateway via WS, so changes apply immediately �
 | `telegram:dm:*` | All Telegram DMs (1:1 private chats) — no per-user form, since once you know a specific chat_id you already know it's a DM; use `telegram:chat:<id>` for that |
 | `telegram:group:*` | All Telegram groups/supergroups — no per-group form; use `telegram:chat:<id>` for a specific one |
 | `telegram:*` | All Telegram messages (DM or group) |
+| `line:channel:<channel_id>` | Specific LINE chat — DM, group, or room, by exact ID (LINE's own IDs are self-distinguishing: userId starts with `U`, groupId with `C`, roomId with `R`, so DM/group/room bindings never collide in this one namespace) |
+| `line:dm:*` | All LINE 1:1 DMs — no per-user form, same rationale as `telegram:dm:*` |
+| `line:group:*` | All LINE groups/rooms — no per-group form; use `line:channel:<id>` for a specific one |
+| `line:*` | All LINE messages (DM, group, or room) |
 | `backend:channel:<tenant_id>` | Specific backend tenant |
 | `backend:*` | All backend tenants |
 | `*` | All platforms (global fallback) |
 
-**Note:** there is no `discord:dm:<user_id>` or `telegram:dm:<user_id>` (literal-ID) form — only `telegram:dm:*` (the wildcard) exists. A specific DM is matched via `channel:<id>`/`chat:<id>` like any other specific chat, since you already know its type once you know its ID.
+**Note:** there is no `<platform>:dm:<user_id>` (literal-ID) form on any platform — only the `dm:*` wildcard exists (Telegram, LINE). A specific DM is matched via `channel:<id>`/`chat:<id>` like any other specific chat, since you already know its type once you know its ID.
+
+LINE groups default to `activation = "mention"` — the bot only responds when @mentioned (or "@全体メンバー", LINE's mention-everyone) in a group/room; DMs are always dispatched regardless of activation. Use `catclaw channel override set "line:channel:<id>" all` to make a specific group always-on, or set `activation = "all"` in the channel config for blanket always-on behavior.
 
 **Without bindings:** all messages go to the default agent (the one with `default: true` in config, or the first agent).
 
@@ -1785,6 +1791,12 @@ catclaw bind "discord:channel:1234567890" support
 ```bash
 catclaw bind "telegram:dm:*" concierge
 catclaw bind "telegram:group:*" ops
+```
+
+**Example:** Route all LINE groups to one agent by default, but carve out one specific group for another agent (channel-specific beats the wildcard):
+```bash
+catclaw bind "line:group:*" ops
+catclaw bind "line:channel:C1234567890abcdef" vip-support
 ```
 
 ---
@@ -2773,6 +2785,8 @@ LINE messages come from three source types — each has a distinct ID:
 | `room` | Multi-person chat (no admin, all equal) | `roomId` (starts with `R`) |
 
 CatClaw normalizes these: `peer_id` is always the userId of the actual sender; `channel_id` is the userId / groupId / roomId depending on source. For groups/rooms, you may not be able to fetch member display names without scope grants.
+
+**Group/room activation:** by default (`activation = "mention"`) the agent only responds in a group/room when @mentioned (checked against LINE's `message.mention.mentionees` field — either a direct mention of the bot's own userId, or a "mention everyone" / `type: "all"` mention). DMs always dispatch regardless of activation. To make a specific group always-on, use `catclaw channel override set "line:channel:<groupId>" all`; for blanket always-on across all LINE groups, set the channel's `activation = "all"`. See the Bindings section for `line:channel:<id>` / `line:dm:*` / `line:group:*` routing patterns.
 
 ## Reply Token vs Push API
 

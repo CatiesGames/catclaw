@@ -693,6 +693,7 @@ impl MessageRouter {
     fn resolve_agent(&self, ctx: &MsgContext) -> (String, bool) {
         let channel_type = ctx.channel_type.as_str();
         let is_telegram = channel_type == "telegram";
+        let is_line = channel_type == "line";
 
         // Build candidate patterns from most specific to least
         let candidates = vec![
@@ -723,6 +724,13 @@ impl MessageRouter {
             // it's a DM.
             is_telegram.then(|| {
                 format!("telegram:{}:*", if ctx.is_direct_message { "dm" } else { "group" })
+            }),
+            // LINE DM-vs-group wildcard (mirrors Telegram's, above). LINE has
+            // no guild concept, so this sits at the same relative position:
+            // more specific than the platform wildcard, less specific than a
+            // channel-specific `line:channel:<id>` binding.
+            is_line.then(|| {
+                format!("line:{}:*", if ctx.is_direct_message { "dm" } else { "group" })
             }),
             // Platform wildcard
             Some(format!("{}:*", channel_type)),
